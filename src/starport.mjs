@@ -27,6 +27,43 @@ function unsupported() {
   });
 }
 
+function unavailable(error) {
+  if (error?.code === "STARPORT_INSTALLATION_INCOMPLETE") {
+    return Object.freeze({
+      ok: false,
+      data: null,
+      error: Object.freeze({
+        code: "STARPORT_INSTALLATION_INCOMPLETE",
+        message: "tldr; installation did not complete.",
+        retryable: true,
+        remediation: "Set up tldr;",
+      }),
+    });
+  }
+  if (error?.code === "STARPORT_RELEASE_INVALID") {
+    return Object.freeze({
+      ok: false,
+      data: null,
+      error: Object.freeze({
+        code: "STARPORT_RELEASE_INVALID",
+        message: "tldr; release verification failed.",
+        retryable: false,
+        remediation: "Reinstall tldr;",
+      }),
+    });
+  }
+  return Object.freeze({
+    ok: false,
+    data: null,
+    error: Object.freeze({
+      code: "STARPORT_UNAVAILABLE",
+      message: "tldr; could not complete the lifecycle operation.",
+      retryable: true,
+      remediation: "Repair tldr;",
+    }),
+  });
+}
+
 export async function dispatchStarportOperation(
   operation,
   { createRuntime = createProductionStarportRuntime } = {},
@@ -36,17 +73,8 @@ export async function dispatchStarportOperation(
     const runtime = await createRuntime();
     if (typeof runtime?.[operation] !== "function") return unsupported();
     return await runtime[operation]();
-  } catch {
-    return Object.freeze({
-      ok: false,
-      data: null,
-      error: Object.freeze({
-        code: "STARPORT_UNAVAILABLE",
-        message: "tldr; could not complete the lifecycle operation.",
-        retryable: true,
-        remediation: "Repair tldr;",
-      }),
-    });
+  } catch (error) {
+    return unavailable(error);
   }
 }
 

@@ -20,7 +20,7 @@ Run the complete installation block in Terminal:
 
 ```bash
 claude plugin marketplace add joenandez/tldr
-claude plugin install tldr@codename --scope user
+claude plugin install tldr@tldr --scope user
 ```
 
 If Claude Code asks the current session to reload plugins, run:
@@ -82,7 +82,7 @@ state. Unrelated files remain untouched.
 After Claude reports that local cleanup is complete, remove the plugin itself:
 
 ```bash
-claude plugin uninstall tldr@codename
+claude plugin uninstall tldr@tldr
 ```
 
 tldr; is released under the MIT License.

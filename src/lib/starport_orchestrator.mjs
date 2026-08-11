@@ -155,7 +155,7 @@ export function createStarportOrchestrator({
         "uninstalled",
         [],
         "remove-plugin",
-        "claude plugin uninstall tldr@codename",
+        "claude plugin uninstall tldr@tldr",
       );
     },
   });

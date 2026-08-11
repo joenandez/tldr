@@ -9,6 +9,10 @@ import {
 const SHA256 = /^[a-f0-9]{64}$/;
 const MINIMUM_MACOS = "13.0";
 
+function lifecycleError(code, message, cause) {
+  return Object.assign(new Error(message, { cause }), { code });
+}
+
 export async function installVerifiedLocalAegisPackage({
   packagePath,
   artifact,
@@ -27,10 +31,29 @@ export async function installVerifiedLocalAegisPackage({
     !/^[A-Z0-9]{10}$/.test(artifact.installer_team_id ?? "") ||
     artifact.package_identifier !== `ai.codename.aegis.${artifact.architecture}`
   ) {
-    throw new Error("Aegis package integrity failed");
+    throw lifecycleError(
+      "STARPORT_RELEASE_INVALID",
+      "tldr; release verification failed.",
+    );
   }
-  await verifyPackage(packagePath, artifact);
-  await installPackage(packagePath, artifact);
+  try {
+    await verifyPackage(packagePath, artifact);
+  } catch (error) {
+    throw lifecycleError(
+      "STARPORT_RELEASE_INVALID",
+      "tldr; release verification failed.",
+      error,
+    );
+  }
+  try {
+    await installPackage(packagePath, artifact);
+  } catch (error) {
+    throw lifecycleError(
+      "STARPORT_INSTALLATION_INCOMPLETE",
+      "tldr; installation did not complete.",
+      error,
+    );
+  }
   return Object.freeze({
     ok: true,
     architecture: artifact.architecture,

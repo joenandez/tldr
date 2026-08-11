@@ -9,14 +9,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import {
   requestAegisSetupStateSafe,
   requestAegisStatusSafe,
 } from "./aegis_client.mjs";
 
-const PACKAGE_RELEASE = "0.1.0-rc.1";
+const PACKAGE_RELEASE = "0.1.0-rc.2";
 const RELEASE_MANIFEST_SCHEMA = 2;
 const BROKER_PROTOCOL_VERSION = 2;
 const SETUP_STATE_SCHEMA_VERSION = 2;
@@ -472,7 +472,7 @@ export function verifyPackageWithMacOS(path, artifact) {
     path,
   ]);
   checked("/usr/bin/xcrun", ["stapler", "validate", path]);
-  const expanded = mkdtempSync(join(tmpdir(), "tldr-agent-aegis-pkg-"));
+  const expanded = join(mkdtempSync(join(tmpdir(), "tldr-agent-pkg-")), "x");
   try {
     checked("/usr/sbin/pkgutil", ["--expand", path, expanded]);
     const identifiers = findPackageIdentifiers(expanded);
@@ -483,7 +483,7 @@ export function verifyPackageWithMacOS(path, artifact) {
       throw new Error("Aegis package identity failed");
     }
   } finally {
-    rmSync(expanded, { recursive: true, force: true });
+    rmSync(dirname(expanded), { recursive: true, force: true });
   }
   if (artifact.minimum_macos !== MINIMUM_MACOS) {
     throw new Error("Aegis package minimum macOS incompatible");

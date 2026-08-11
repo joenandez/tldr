@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "phase": "source",
-  "release": "0.1.0-rc.1",
+  "release": "0.1.0-rc.2",
   "source_commit": null,
   "npm": {
     "package": "@joenandez/tldr",
-    "version": "0.1.0-rc.1",
+    "version": "0.1.0-rc.2",
     "publication": {
       "status": "pending",
       "dist_integrity": null,
@@ -14,11 +14,11 @@
     }
   },
   "marketplace": {
-    "name": "codename",
+    "name": "tldr",
     "catalog_source": "joenandez/tldr",
     "plugin": "tldr",
-    "install_command": "claude plugin install tldr@codename",
-    "uninstall_command": "claude plugin uninstall tldr@codename"
+    "install_command": "claude plugin install tldr@tldr",
+    "uninstall_command": "claude plugin uninstall tldr@tldr"
   },
   "claude_code": {
     "development_baseline": "2.1.226",
