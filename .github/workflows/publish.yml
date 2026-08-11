@@ -1,9 +1,9 @@
-name: Publish npm release candidate
+name: Publish npm release
 
 on:
   push:
     tags:
-      - "v*-rc.*"
+      - "v*"
 
 permissions:
   contents: read
@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   publish:
-    name: publish @joenandez/tldr to next
+    name: publish @joenandez/tldr
     runs-on: macos-latest
     environment: npm
     steps:
@@ -37,6 +37,18 @@ jobs:
       - name: Bind the Git tag to the package version
         run: test "$GITHUB_REF_NAME" = "v$(node -p 'require("./package.json").version')"
 
+      - name: Resolve the npm release channel
+        id: release
+        shell: bash
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          if [[ "$version" == *-* ]]; then
+            npm_tag=next
+          else
+            npm_tag=latest
+          fi
+          echo "npm_tag=$npm_tag" >> "$GITHUB_OUTPUT"
+
       - name: Verify the promoted public source and payload closure
         run: node scripts/verify-public-release.mjs
 
@@ -54,5 +66,5 @@ jobs:
           test "$exit_code" -eq 0
           node -e 'const value=JSON.parse(process.argv[1]); if (!value.ok || value.data?.state !== "setup-required" || value.data?.next_action !== "setup" || value.error !== null) process.exit(1)' "$output"
 
-      - name: Publish the verified release candidate
-        run: npm publish "${{ steps.pack.outputs.tarball }}" --access public --tag next --provenance
+      - name: Publish the verified release
+        run: npm publish "${{ steps.pack.outputs.tarball }}" --access public --tag "${{ steps.release.outputs.npm_tag }}" --provenance
