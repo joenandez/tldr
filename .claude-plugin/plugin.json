@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
+  "name": "tldr",
+  "displayName": "tldr;",
+  "version": "0.1.0-rc.1",
+  "description": "Set up private owner email for Claude Code and continue the same session when the owner replies.",
+  "author": {
+    "name": "Codename, Inc."
+  },
+  "homepage": "https://github.com/joenandez/tldr#readme",
+  "repository": "https://github.com/joenandez/tldr",
+  "license": "MIT",
+  "keywords": ["email", "continuity", "agentmail", "macos"],
+  "metadata": {
+    "developmentBaseline": "2.1.226",
+    "releaseContract": "release/starport-release.json"
+  }
+}

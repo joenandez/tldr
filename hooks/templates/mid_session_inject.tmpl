@@ -1,0 +1,12 @@
+[tldr-agent] New user reply on trusted thread {thread_id}:
+
+--- user reply ---
+{body}
+--- end user reply ---
+
+Respond on this thread within 120 seconds:
+- If the answer is ready, send it.
+- Otherwise, before starting work, send a one-line acknowledgement saying what you’ll do.
+
+After the work, send one final reply on the same thread:
+`{tldr_agent_cmd} reply --thread {thread_id} --body "..." --json`

@@ -1,0 +1,60 @@
+name: Publish npm release candidate
+
+on:
+  push:
+    tags:
+      - "v*-rc.*"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: npm-publish-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish @joenandez/tldr to next
+    runs-on: macos-latest
+    environment: npm
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up the release Node runtime
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Pin an OIDC-capable npm CLI
+        run: npm install --global npm@11.17.0
+
+      - name: Install exact runtime dependencies
+        run: npm ci --omit=dev
+
+      - name: Bind the Git tag to the package version
+        run: test "$GITHUB_REF_NAME" = "v$(node -p 'require("./package.json").version')"
+
+      - name: Verify the promoted public source and payload closure
+        run: node scripts/verify-public-release.mjs
+
+      - name: Pack and install the exact registry payload
+        id: pack
+        shell: bash
+        run: |
+          tarball=$(npm pack --json | node -e 'let body=""; process.stdin.on("data", chunk => body += chunk); process.stdin.on("end", () => process.stdout.write(JSON.parse(body)[0].filename))')
+          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
+          npm install --global --prefix "$RUNNER_TEMP/tldr-install" "./$tarball"
+          set +e
+          output=$(TLDR_AGENT_HOME="$RUNNER_TEMP/tldr-home" "$RUNNER_TEMP/tldr-install/bin/tldr-agent" 2>&1)
+          exit_code=$?
+          set -e
+          test "$exit_code" -eq 0
+          node -e 'const value=JSON.parse(process.argv[1]); if (!value.ok || value.data?.state !== "setup-required" || value.data?.next_action !== "setup" || value.error !== null) process.exit(1)' "$output"
+
+      - name: Publish the verified release candidate
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish "${{ steps.pack.outputs.tarball }}" --access public --tag next --provenance

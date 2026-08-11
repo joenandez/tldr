@@ -1,0 +1,1238 @@
+{
+  "schema_version": 1,
+  "package": {
+    "name": "@joenandez/tldr",
+    "version": "0.1.0-rc.1"
+  },
+  "source": {
+    "repository": "tldr-internal",
+    "commit": "7c8832dab0ffda282f9520d80d6164f608ef35fe"
+  },
+  "files": [
+    {
+      "path": ".claude-plugin/marketplace.json",
+      "source": ".claude-plugin/marketplace.json",
+      "sha256": "80b64b1734f6b3939f30bc9eb7d353b4c7c3f974711d705228126d6ca67068d9",
+      "bytes": 573,
+      "mode": "644"
+    },
+    {
+      "path": ".claude-plugin/plugin.json",
+      "source": ".claude-plugin/plugin.json",
+      "sha256": "e2a7c84cbe4ffe086946c71839925d86f902102eb6836bac46f4ec8e6bb052b4",
+      "bytes": 623,
+      "mode": "644"
+    },
+    {
+      "path": ".github/workflows/publish.yml",
+      "source": "release/public-repo/publish.yml",
+      "sha256": "4486d5b1f844e14b8b661e8dccca0a0876c3d38554923183b1336ecdfc92501e",
+      "bytes": 2077,
+      "mode": "644"
+    },
+    {
+      "path": "bin/tldr-agent",
+      "source": "bin/tldr-agent",
+      "sha256": "0dfca987a53ea0337d7fa5b29af16022f9b2d1525d35a8445bda0cd72afe96a9",
+      "bytes": 1769,
+      "mode": "755"
+    },
+    {
+      "path": "CONTRIBUTING.md",
+      "source": "CONTRIBUTING.md",
+      "sha256": "9f3f1ccc9c8bc696c33ed6f5a79da478c048cf91be1841ba43e99ee4c0c3cac9",
+      "bytes": 7360,
+      "mode": "644"
+    },
+    {
+      "path": "hooks/hooks.json",
+      "source": "hooks/hooks.json",
+      "sha256": "2b8f019681a3647881bd6bff45930803dcaddf6b0ea9e86b70c397ef0757dffd",
+      "bytes": 1238,
+      "mode": "644"
+    },
+    {
+      "path": "hooks/lib/ariadne-post-tool-use.mjs",
+      "source": "hooks/lib/ariadne-post-tool-use.mjs",
+      "sha256": "d593972f36dbb19baf25805435c9fa9d36b3dd60aa21786eea7e4d71199a75bc",
+      "bytes": 443,
+      "mode": "644"
+    },
+    {
+      "path": "hooks/lib/beacon-stop-preflight.mjs",
+      "source": "hooks/lib/beacon-stop-preflight.mjs",
+      "sha256": "c8e20daf6db51b51a6f65c6848e3f92c897f388a41fa59fbda253e5877f97a58",
+      "bytes": 2555,
+      "mode": "644"
+    },
+    {
+      "path": "hooks/lib/mark-reply-presented.mjs",
+      "source": "hooks/lib/mark-reply-presented.mjs",
+      "sha256": "1cd6dc040d182d5d9c42c15197d7a592b9fa19cd8c957b93b348109938e9964e",
+      "bytes": 1634,
+      "mode": "644"
+    },
+    {
+      "path": "hooks/lib/prefetch-session-inbox-slow.sh",
+      "source": "hooks/lib/prefetch-session-inbox-slow.sh",
+      "sha256": "0a2bd16c1e981c66ab1cf56cd4a6d9a5651bfcb2655c309b69a07f3dcfdf9390",
+      "bytes": 3497,
+      "mode": "644"
+    },
+    {
+      "path": "hooks/lib/resolve_session_id.sh",
+      "source": "hooks/lib/resolve_session_id.sh",
+      "sha256": "0dd2a09dcdfe523d511e05776effd1501b88e10c8c240e8328228b38b9c81bdf",
+      "bytes": 2177,
+      "mode": "755"
+    },
+    {
+      "path": "hooks/lib/resolve-tldr-agent-node.sh",
+      "source": "hooks/lib/resolve-tldr-agent-node.sh",
+      "sha256": "0ca22ea18d23bac79d52b04af6723d6d64f58dd61ba8052867785dc2c0bf6ba5",
+      "bytes": 961,
+      "mode": "755"
+    },
+    {
+      "path": "hooks/lib/tachyon-stop.mjs",
+      "source": "hooks/lib/tachyon-stop.mjs",
+      "sha256": "3c3a31a88ebc55fadb02fab779292b721daa10c0b34b3d0009644adba76e253c",
+      "bytes": 14479,
+      "mode": "644"
+    },
+    {
+      "path": "hooks/lib/user-prompt-submit.mjs",
+      "source": "hooks/lib/user-prompt-submit.mjs",
+      "sha256": "7d308b2f8754104e29a1994c38574414466e3b8b125b34bed440c61736a086d4",
+      "bytes": 216,
+      "mode": "644"
+    },
+    {
+      "path": "hooks/templates/mid_session_inject.mjs",
+      "source": "hooks/templates/mid_session_inject.mjs",
+      "sha256": "77c0ef7ed223570b2efcdd42312ab05feaa06379a0c89fdcc6ca76b6246e21a4",
+      "bytes": 1004,
+      "mode": "644"
+    },
+    {
+      "path": "hooks/templates/mid_session_inject.tmpl",
+      "source": "hooks/templates/mid_session_inject.tmpl",
+      "sha256": "1bf65691e73ed0fe2ebfc2ca8ac6f779978c9437075d883d7993dadd63dee9dd",
+      "bytes": 404,
+      "mode": "644"
+    },
+    {
+      "path": "hooks/tldr-agent-capture-session-identity.sh",
+      "source": "hooks/tldr-agent-capture-session-identity.sh",
+      "sha256": "7c65c94ae69b8b47b66f0719d3a505b1c3481cd74f26e73f26584867781f911e",
+      "bytes": 6312,
+      "mode": "755"
+    },
+    {
+      "path": "hooks/tldr-agent-hold-stop-for-unread.sh",
+      "source": "hooks/tldr-agent-hold-stop-for-unread.sh",
+      "sha256": "e4404191c400d078f0ddc2584a7e2a6d7fd58aa5d1b381aeb6c53c56f4d5a74d",
+      "bytes": 4822,
+      "mode": "755"
+    },
+    {
+      "path": "hooks/tldr-agent-inject-session-messages.sh",
+      "source": "hooks/tldr-agent-inject-session-messages.sh",
+      "sha256": "23cdde9bdd97c472e2312b459c9258c38ba5446eec06417e3993ef914603015a",
+      "bytes": 2902,
+      "mode": "755"
+    },
+    {
+      "path": "hooks/tldr-agent-mark-session-busy.sh",
+      "source": "hooks/tldr-agent-mark-session-busy.sh",
+      "sha256": "6317d184531b186850f109cb0fe6c6af680ec0e70f63e531d06d6dbf316af6c3",
+      "bytes": 1146,
+      "mode": "755"
+    },
+    {
+      "path": "hooks/tldr-agent-prefetch-session-inbox.sh",
+      "source": "hooks/tldr-agent-prefetch-session-inbox.sh",
+      "sha256": "1a22bc38009337c2caaa55d17bb53c2067e6d3e35b452f8a642e2b86c9c05e55",
+      "bytes": 818,
+      "mode": "755"
+    },
+    {
+      "path": "install/tldr-agent-bootstrap.sh",
+      "source": "install/tldr-agent-bootstrap.sh",
+      "sha256": "b145362e98635f5eb0ac0bf83ab118fbea1b2c1b6b7e6082d94475974232eb9c",
+      "bytes": 4576,
+      "mode": "755"
+    },
+    {
+      "path": "LICENSE",
+      "source": "LICENSE",
+      "sha256": "0c437e069a3e1f0983fd2334e5a997ba54cacac387e6060e968d818eb04c4d38",
+      "bytes": 1070,
+      "mode": "644"
+    },
+    {
+      "path": "package-lock.json",
+      "source": "package-lock.json",
+      "sha256": "9de0fb4a8754e5e81e1ed504f65da9f8d3d79e0a3e516dba7df83640888e080b",
+      "bytes": 40318,
+      "mode": "644"
+    },
+    {
+      "path": "package.json",
+      "source": "package.json",
+      "sha256": "44bdbe301c2757fe645bcc7f93f60a89d1360db4a416a069d35739e588e45daf",
+      "bytes": 13523,
+      "mode": "644"
+    },
+    {
+      "path": "README.md",
+      "source": "README.md",
+      "sha256": "3822a637c689444f874beb9af144e66dcb091e2ca1bf8bea021bc9b8dd9dc6fc",
+      "bytes": 2538,
+      "mode": "644"
+    },
+    {
+      "path": "release/activation-manifest.json",
+      "source": "release/activation-manifest.json",
+      "sha256": "b9ab93a04a997ca466378b491b438013bcbdf3d6b7b32530fa32d2019dc642f4",
+      "bytes": 1807,
+      "mode": "644"
+    },
+    {
+      "path": "release/licenses/node-LICENSE",
+      "source": "release/licenses/node-LICENSE",
+      "sha256": "c738ae413cf561f174e34f6961f8ca458aae2369a73640dda6234c629b98bcc4",
+      "bytes": 145485,
+      "mode": "644"
+    },
+    {
+      "path": "release/payloads/arm64/node.tar.gz",
+      "source": "release/payloads/arm64/node.tar.gz",
+      "sha256": "61130f394c1630d211dd50aecc4353d379480f36d3ac913cd85dbba1aed585c6",
+      "bytes": 50068815,
+      "mode": "644"
+    },
+    {
+      "path": "release/payloads/arm64/tldr-agent.tar.gz",
+      "source": "release/payloads/arm64/tldr-agent.tar.gz",
+      "sha256": "c3432d74b41ee9b96aae7e14e54fee36cde25c68cd89e2646a7ccfa1c5e4b6cf",
+      "bytes": 426868,
+      "mode": "644"
+    },
+    {
+      "path": "release/payloads/arm64/TldrAgentAegis.pkg",
+      "source": "release/payloads/arm64/TldrAgentAegis.pkg",
+      "sha256": "1fb82a6aec622a8670f32531d15b6928f10fed3b7db5ac688babc4625e9f0bab",
+      "bytes": 305697,
+      "mode": "644"
+    },
+    {
+      "path": "release/payloads/x86_64/node.tar.gz",
+      "source": "release/payloads/x86_64/node.tar.gz",
+      "sha256": "58e99022c2ff89395576cc7fd4d98cea24bb68081475d5f88b801ee8729fb026",
+      "bytes": 51246936,
+      "mode": "644"
+    },
+    {
+      "path": "release/payloads/x86_64/tldr-agent.tar.gz",
+      "source": "release/payloads/x86_64/tldr-agent.tar.gz",
+      "sha256": "c3432d74b41ee9b96aae7e14e54fee36cde25c68cd89e2646a7ccfa1c5e4b6cf",
+      "bytes": 426868,
+      "mode": "644"
+    },
+    {
+      "path": "release/payloads/x86_64/TldrAgentAegis.pkg",
+      "source": "release/payloads/x86_64/TldrAgentAegis.pkg",
+      "sha256": "2f4ac93ea7036335f7299a6cf00b0fc2df67e53a144084b4f3a4de5c81fa97e8",
+      "bytes": 348258,
+      "mode": "644"
+    },
+    {
+      "path": "release/starport-release.json",
+      "source": "release/starport-release.json",
+      "sha256": "f088c25d7dec5daf4c0fa593bbd43ecd5164d05fc04956d96dc5d2fd37b24fc6",
+      "bytes": 1568,
+      "mode": "644"
+    },
+    {
+      "path": "scripts/verify-public-release.mjs",
+      "source": "release/public-repo/verify-public-release.mjs",
+      "sha256": "560c19fec3866cc8b0dc5bf2d32d3c848151f2e2e524a501fd38a9b91c20c4af",
+      "bytes": 3850,
+      "mode": "644"
+    },
+    {
+      "path": "SECURITY.md",
+      "source": "SECURITY.md",
+      "sha256": "a70d9915071d909b33d9450f9379f75f5906b4fcbe36fb69dbc1edf2ad97a998",
+      "bytes": 1690,
+      "mode": "644"
+    },
+    {
+      "path": "skills/tldr/SKILL.md",
+      "source": "skills/tldr/SKILL.md",
+      "sha256": "2467c71adf3634ddf6f81a5160741d6178dd4aeadf42c9b15793d65e88a5fb54",
+      "bytes": 8179,
+      "mode": "644"
+    },
+    {
+      "path": "src/adapters/claude.yaml",
+      "source": "src/adapters/claude.yaml",
+      "sha256": "e80bfbed4eb4855043d939dd32feba8aa5e704ac496798390117b31d562cf0ed",
+      "bytes": 706,
+      "mode": "644"
+    },
+    {
+      "path": "src/adapters/codex.yaml",
+      "source": "src/adapters/codex.yaml",
+      "sha256": "9ea485964543dd6795e82919de15ba55caa0c34ef99f96a36feaa08268e9619b",
+      "bytes": 684,
+      "mode": "644"
+    },
+    {
+      "path": "src/helm-daemon.mjs",
+      "source": "src/helm-daemon.mjs",
+      "sha256": "695c732ec7141ac0a18a0a3b9df20148543645fc968e2ce5bb5e86a1a4891189",
+      "bytes": 1648,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/adapter_session_identity.mjs",
+      "source": "src/lib/adapter_session_identity.mjs",
+      "sha256": "b48a78e6c94cae4b16163e58d572f11b2263e70f0c5d6ee239a6234c07b9dd55",
+      "bytes": 5850,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/adapters/capture.mjs",
+      "source": "src/lib/adapters/capture.mjs",
+      "sha256": "46fdeafc4ca36b7daa6525a8999de8c5c153c0aa39e5d2589ffada90808086b8",
+      "bytes": 2339,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/adapters/manifest_loader.mjs",
+      "source": "src/lib/adapters/manifest_loader.mjs",
+      "sha256": "fb8ff9925a3bb3f18c866ed5c4a36fced40ac9cc4ac7717e4ae6700b19611eb6",
+      "bytes": 12164,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/adapters/registry.mjs",
+      "source": "src/lib/adapters/registry.mjs",
+      "sha256": "13975ee9bfaa5d807606e1f5f50bb35555910f6693ddba5ac8ddfe5df626c9b0",
+      "bytes": 1079,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/adapters/template.mjs",
+      "source": "src/lib/adapters/template.mjs",
+      "sha256": "05bdc0c121e1c111f7b62fe456c158004018ad017321a4b3a7f16eed152cd073",
+      "bytes": 912,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/aegis_client.mjs",
+      "source": "src/lib/aegis_client.mjs",
+      "sha256": "2b33dc3f2050ebcd1543bdc1ceca37fcc0eca90080b1dbb55a33af07b50a9be0",
+      "bytes": 8922,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/aegis_inbound_bridge_process.mjs",
+      "source": "src/lib/aegis_inbound_bridge_process.mjs",
+      "sha256": "4ab2deb024d433159f26642e830407f1b46291f4a5cc98dba02f2fe34f2e0773",
+      "bytes": 341,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/aegis_native_distribution.mjs",
+      "source": "src/lib/aegis_native_distribution.mjs",
+      "sha256": "3d1de439381a8c88d2cea5de032118242bd25f82d402ace69c9cc11e45d85cb6",
+      "bytes": 17708,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/aegis_native_setup_runtime.mjs",
+      "source": "src/lib/aegis_native_setup_runtime.mjs",
+      "sha256": "37db5d331ea5416429e2ad9d4bdc5466710af0a809c1bc8bfdc5a3428b69929b",
+      "bytes": 10594,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/aegis_protocol.mjs",
+      "source": "src/lib/aegis_protocol.mjs",
+      "sha256": "55f6b024971699ade4231c59ecc9869cb515268ea0e97eda93ec35d6b20671d9",
+      "bytes": 14853,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/aegis_source_release_install.mjs",
+      "source": "src/lib/aegis_source_release_install.mjs",
+      "sha256": "145df23f96b6b4230652e19cc888e7bd133aad2ecc9be09bd3835dfb064123d2",
+      "bytes": 3337,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/agent_run_session.mjs",
+      "source": "src/lib/agent_run_session.mjs",
+      "sha256": "5beaa8715c0989d4e3bfe81808e6c53d4a292962a2dfa32c28b16ccd97cf89b0",
+      "bytes": 2675,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/ariadne_followup.mjs",
+      "source": "src/lib/ariadne_followup.mjs",
+      "sha256": "f60658958f21da1178a699e338004770392fb44a0f8f2f3e5c2dbab3aa2fcf87",
+      "bytes": 10540,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/ariadne_notice.mjs",
+      "source": "src/lib/ariadne_notice.mjs",
+      "sha256": "598b5d842b8c68840a690cc81904cafb524b96c11b55df3ebb13b47b8153c9d0",
+      "bytes": 2734,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/bootstrap_hooks.mjs",
+      "source": "src/lib/bootstrap_hooks.mjs",
+      "sha256": "c2ee0edd173ffc936783403a14cb8278e09598cc4a41185e1310e447660d1e72",
+      "bytes": 10162,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/comms_dispatcher_owner_reconcile.mjs",
+      "source": "src/lib/comms_dispatcher_owner_reconcile.mjs",
+      "sha256": "b968c9550f2114545f485975df8937a3b581c6fa91d9d55c0fedda2fee5cd60a",
+      "bytes": 1527,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/comms_dispatcher.mjs",
+      "source": "src/lib/comms_dispatcher.mjs",
+      "sha256": "dbacdc56ecb3f6bdfcf0fc23a677be7aad6e0aee0e83abcc1cd011770fcb836f",
+      "bytes": 29906,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/daemon_child_commands.mjs",
+      "source": "src/lib/daemon_child_commands.mjs",
+      "sha256": "333664722db2875c8b279f4773cb014aaa97c506cb7a136b90ae4b3786558de7",
+      "bytes": 5196,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/daemon_entrypoint.mjs",
+      "source": "src/lib/daemon_entrypoint.mjs",
+      "sha256": "85922b6450fff56059f9417c1e550a56ae7cac332f98b9ad1fbaf13f368df3aa",
+      "bytes": 4049,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/daemon_inbox_poll_phase.mjs",
+      "source": "src/lib/daemon_inbox_poll_phase.mjs",
+      "sha256": "66ec52849fd1f77cba9707659f9f608029b7b4db6a6ecdcd46cb201d7cd6b0f9",
+      "bytes": 5478,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/daemon_inbox_poll_scheduler.mjs",
+      "source": "src/lib/daemon_inbox_poll_scheduler.mjs",
+      "sha256": "3a3ec0a22b0bad870a7d5a175e959eb1c94a1b01158ae6b04a977f99561489de",
+      "bytes": 2781,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/daemon_mail_child_phases.mjs",
+      "source": "src/lib/daemon_mail_child_phases.mjs",
+      "sha256": "f11ab7ca7528d186457044ea3ddf5f6406d17d5908c778a762bc2f24bfd3b30c",
+      "bytes": 5411,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/durable_file_io.mjs",
+      "source": "src/lib/durable_file_io.mjs",
+      "sha256": "49069c9996723a98d95aef35003e93a5cca7c10824a9109a8030a9407f00a666",
+      "bytes": 3205,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/durable_session_identity.mjs",
+      "source": "src/lib/durable_session_identity.mjs",
+      "sha256": "5ce2a5373822bed5d5b2267d3cf261be42695a0bf32c7af83b1ee192381121a3",
+      "bytes": 608,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/helm_home.mjs",
+      "source": "src/lib/helm_home.mjs",
+      "sha256": "b3de93f49c90382315aca0f1f3c2638ccad397b7e8a67683afd10809561bec81",
+      "bytes": 176,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/identity_state.mjs",
+      "source": "src/lib/identity_state.mjs",
+      "sha256": "2a1b94588c4670b32a9b0515e7d2c4614e9313f8cf773d9ca4b25ccfc8933c3b",
+      "bytes": 13720,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/inbox_cli.mjs",
+      "source": "src/lib/inbox_cli.mjs",
+      "sha256": "7c96ec7c3a84e3cf042a4487fc7a26ffc53937559704064b207b2c9c858333c4",
+      "bytes": 7142,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/json_io.mjs",
+      "source": "src/lib/json_io.mjs",
+      "sha256": "35d73bab47d2c1bf6b657ff88184992a5f436c5a09e94809b7f4edba2782e5af",
+      "bytes": 2217,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/node_exec.mjs",
+      "source": "src/lib/node_exec.mjs",
+      "sha256": "d03523296b97ca8d60f471a599f9401c5eaf5047985f5253dda67245bc28d15b",
+      "bytes": 5811,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/node_sqlite_warning.mjs",
+      "source": "src/lib/node_sqlite_warning.mjs",
+      "sha256": "db3435f305a792067e51730b09f2916baa6ebc455d236bf6484d6be35b0873f1",
+      "bytes": 2324,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/outbound_effect_identity.mjs",
+      "source": "src/lib/outbound_effect_identity.mjs",
+      "sha256": "1fbf6a8aafef132adca2c85e6d8b9ac626770199a4d1ff5d6161cb37e8730346",
+      "bytes": 1626,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/outbound_guard.mjs",
+      "source": "src/lib/outbound_guard.mjs",
+      "sha256": "a51a623bca7fcdde920b9ddd6872537c45ab207097440dac763f635a94c0626d",
+      "bytes": 1646,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/process_liveness.mjs",
+      "source": "src/lib/process_liveness.mjs",
+      "sha256": "6a887cb1c7a22d10c5a5aaa2bd6ce417c43fb16dead7c2a9dfe48fa9fd61ad8d",
+      "bytes": 3064,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/reply_obligation_resume.mjs",
+      "source": "src/lib/reply_obligation_resume.mjs",
+      "sha256": "74fee7d5e74a721bb63fff333de748a660c4559efc1ea6f722827d2992c3c89f",
+      "bytes": 9700,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/reply_obligation_sla.mjs",
+      "source": "src/lib/reply_obligation_sla.mjs",
+      "sha256": "c91461479b27a91d4f34072847b9afe9f6fdd3b820d9e9d5d165ced3ccda4c1b",
+      "bytes": 14711,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/resource_sampler.mjs",
+      "source": "src/lib/resource_sampler.mjs",
+      "sha256": "6e8e1f236be0ede0bdbdd6116d7f6630c1909f326a8f99d78ac8b270d1d772ab",
+      "bytes": 8045,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/runtime_store_backup.mjs",
+      "source": "src/lib/runtime_store_backup.mjs",
+      "sha256": "be53d50eded7e2813f94ff4881b87bada96ef1017000df90fac5e03bda13932b",
+      "bytes": 3640,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/runtime_store_beacon_migration.mjs",
+      "source": "src/lib/runtime_store_beacon_migration.mjs",
+      "sha256": "31f9cf25b6edda5b08a558b0f3b9942cfb298a3bcd36c8e41c5932996927fa9f",
+      "bytes": 4005,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/runtime_store_fast_path.mjs",
+      "source": "src/lib/runtime_store_fast_path.mjs",
+      "sha256": "50871ca22b18884d128483fce923b754db36e437fb8abedca96bc7505f4d662f",
+      "bytes": 1056,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/runtime_store_halcyon_migrations.mjs",
+      "source": "src/lib/runtime_store_halcyon_migrations.mjs",
+      "sha256": "33872100e9f3d293f5a08f301c27e0aaa8c267cc1fad5bcfbf99818d3457922f",
+      "bytes": 4897,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/runtime_store_permissions.mjs",
+      "source": "src/lib/runtime_store_permissions.mjs",
+      "sha256": "7cf7a93d160b108c42fe4d4aa7419599c6d315e8fda57c943f6b8e43622ac99c",
+      "bytes": 441,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/runtime_store_readiness_events.mjs",
+      "source": "src/lib/runtime_store_readiness_events.mjs",
+      "sha256": "7b91c5d3e3ea545c71c357fd9f0feb1b581687c1c0804ea99c8bd65481fdb422",
+      "bytes": 1343,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/runtime_store_retry.mjs",
+      "source": "src/lib/runtime_store_retry.mjs",
+      "sha256": "b323a11a6aee26233d79f62851f1d273197e2258558f05dcf2d519d08fc90101",
+      "bytes": 8717,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/runtime_store_transaction.mjs",
+      "source": "src/lib/runtime_store_transaction.mjs",
+      "sha256": "f68ac128a85e695ba7eb9e6ef6f90c894f5a80425dfb1a2b8ae8941c09695bb0",
+      "bytes": 975,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/runtime_store.mjs",
+      "source": "src/lib/runtime_store.mjs",
+      "sha256": "5b2118e8a601a3e43e1710dcf7cba669ca48f0de890f913746e154eef68e2cf4",
+      "bytes": 35263,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/safety_events.mjs",
+      "source": "src/lib/safety_events.mjs",
+      "sha256": "3a298ecce0b2a5c0a7c9b222dc27ed132c1f7aad5fc9d1faefd1a45f2a59a2d4",
+      "bytes": 1468,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/session_inbox.mjs",
+      "source": "src/lib/session_inbox.mjs",
+      "sha256": "ee6466b7ea9a3f8a7b3f23059780b4db62f28b9a05e8e1177e333e5bcd39c681",
+      "bytes": 1019,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/session_owner_state.mjs",
+      "source": "src/lib/session_owner_state.mjs",
+      "sha256": "764e9ea0ee8c97e3e79541c882b1892bdac655cfdea78d6abd4760ad565a5588",
+      "bytes": 3896,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/session_revive.mjs",
+      "source": "src/lib/session_revive.mjs",
+      "sha256": "bfc7291063d0bf45ed5e7e5b622ef988115abc86068e3fe53573c9eacfe09f32",
+      "bytes": 2939,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/starport_aegis_package.mjs",
+      "source": "src/lib/starport_aegis_package.mjs",
+      "sha256": "de0340101de30b68fd825b362fe788b710f2b7504600dae966db68b21bc8bc88",
+      "bytes": 1209,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/starport_native_lifecycle.mjs",
+      "source": "src/lib/starport_native_lifecycle.mjs",
+      "sha256": "7d414219467f33c37d9b42a740a715b07d583d96f5f06a78fa1c62726c37c4cc",
+      "bytes": 2556,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/starport_onboarding.mjs",
+      "source": "src/lib/starport_onboarding.mjs",
+      "sha256": "b4144beb8f11c81c2a4beee77a6d1ab704a69ccdb0df143bc47bf1f2bb4e7997",
+      "bytes": 2821,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/starport_orchestrator.mjs",
+      "source": "src/lib/starport_orchestrator.mjs",
+      "sha256": "545777e62219c7a0504afe63a00fb2540ae8226bcf86ef31b6434509710f40d7",
+      "bytes": 4239,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/starport_release_contract.mjs",
+      "source": "src/lib/starport_release_contract.mjs",
+      "sha256": "86eab319567d0adf9a7c4ac2e20f8d797eb0d71caa5ba80509fcb24f6d8b4865",
+      "bytes": 5178,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/starport_runtime.mjs",
+      "source": "src/lib/starport_runtime.mjs",
+      "sha256": "7892757a0e759c07177c4458521c20b65c557dee88707638e16249e58815c9e7",
+      "bytes": 7391,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/store.mjs",
+      "source": "src/lib/store.mjs",
+      "sha256": "a2320ce793f48305160cb3f69e04e62edb5d6ce5c69511339b781f27d7096bdf",
+      "bytes": 17096,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/blocked_unread.mjs",
+      "source": "src/lib/substrate/blocked_unread.mjs",
+      "sha256": "8dc7a490c752b8efde22572c97e260efa74da0aad67bdb83a2d3caba23a361df",
+      "bytes": 9029,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/canonical_store_sqlite_messages.mjs",
+      "source": "src/lib/substrate/canonical_store_sqlite_messages.mjs",
+      "sha256": "5683d31afe8581044ed3ac75f21e87c2d7083a8f16c0ca30047c073a2b5ada3f",
+      "bytes": 5443,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/canonical_store_sqlite_ownership.mjs",
+      "source": "src/lib/substrate/canonical_store_sqlite_ownership.mjs",
+      "sha256": "eab78e80e983355f493731e76e5bf54b030f0e821b03108342a98449c3ba9b15",
+      "bytes": 4465,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/canonical_store_sqlite.mjs",
+      "source": "src/lib/substrate/canonical_store_sqlite.mjs",
+      "sha256": "ddf559cb99ccf4092966d884c008914fe6f775c239480acbc904ecee706aecbb",
+      "bytes": 11978,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/canonical_store.mjs",
+      "source": "src/lib/substrate/canonical_store.mjs",
+      "sha256": "eff42ddaacd9f72cd2eba35d58b8825def2968d49fd64affef2658fdb0548702",
+      "bytes": 5908,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/email_post_send_effects.mjs",
+      "source": "src/lib/substrate/email_post_send_effects.mjs",
+      "sha256": "966f8b34d188cad143ace7888cf28417b833188c902732975d76f5a726a93cd9",
+      "bytes": 936,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/events.mjs",
+      "source": "src/lib/substrate/events.mjs",
+      "sha256": "af8068cfb53b360a1bcf6a364cbd186ac75be2084341ea8b463fe2897d7b1b93",
+      "bytes": 3792,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/failed_delivery_retry.mjs",
+      "source": "src/lib/substrate/failed_delivery_retry.mjs",
+      "sha256": "f178a91ec9199d3310abf20ed4ddcb19c766908aeb84dfe825671458f9e37272",
+      "bytes": 1798,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/file_mutex.mjs",
+      "source": "src/lib/substrate/file_mutex.mjs",
+      "sha256": "01cabf13a6b3657b6c8550245a373c0e49bb7b7e3982ba2b7f3ba75b718ba9b6",
+      "bytes": 5447,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/idempotency.mjs",
+      "source": "src/lib/substrate/idempotency.mjs",
+      "sha256": "e7d539d503e6603522f2ce11c88239e5b14e0e783a3a8cc7189af3536af0be16",
+      "bytes": 6096,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/identity.mjs",
+      "source": "src/lib/substrate/identity.mjs",
+      "sha256": "9df12c93ca1811ba8fa6c5cce711f934ac40036ba3d6023056f1b2c67c225f6e",
+      "bytes": 1882,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/kernel.mjs",
+      "source": "src/lib/substrate/kernel.mjs",
+      "sha256": "421ac07d0b5d1766c76e79ac938063574eb0571829ae8c57ad01e0af747158a9",
+      "bytes": 39021,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/outbound_effect_options.mjs",
+      "source": "src/lib/substrate/outbound_effect_options.mjs",
+      "sha256": "df14eebe835baef40bcbd6c675b4bd2acd97f6e8ca6fe1ebc032c362e27676e5",
+      "bytes": 1845,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/reserved_delivery.mjs",
+      "source": "src/lib/substrate/reserved_delivery.mjs",
+      "sha256": "41c8152851289d1fba64ef70989b1297dd2f158960a3ea4a086a0e663f882cf9",
+      "bytes": 2913,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/resume_handoff.mjs",
+      "source": "src/lib/substrate/resume_handoff.mjs",
+      "sha256": "03d0b5e3618bd45ea74d7af6c1805ba768e46b4b620c272cbf67b790926a832e",
+      "bytes": 9799,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/resume_session.mjs",
+      "source": "src/lib/substrate/resume_session.mjs",
+      "sha256": "fde4e38243f2dc60077668edda558593e281419e7d5a02f8ed678af5719a5f1e",
+      "bytes": 7473,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/thread_ownership.mjs",
+      "source": "src/lib/substrate/thread_ownership.mjs",
+      "sha256": "94620ebf8f1dfda2e9f576758546dff31a736a705059b64f20df9d39cde39399",
+      "bytes": 4900,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/substrate/transport_interface.mjs",
+      "source": "src/lib/substrate/transport_interface.mjs",
+      "sha256": "c3bae72763f7d3b3e76c05ef545a38ea9d8725b6fdf1bea2c8737e8dda116ce7",
+      "bytes": 1586,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tachyon_dispatcher.mjs",
+      "source": "src/lib/tachyon_dispatcher.mjs",
+      "sha256": "b194ea191a4f4d9124f671433891ee083d8aefbc86ab2c08b2f358b63a87879a",
+      "bytes": 4832,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tachyon_eligibility.mjs",
+      "source": "src/lib/tachyon_eligibility.mjs",
+      "sha256": "de3ba141d031eefc3e751ee3afc628e60a36120c7b4d95181f40c8737299a5a8",
+      "bytes": 5426,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tachyon_listener_delivery.mjs",
+      "source": "src/lib/tachyon_listener_delivery.mjs",
+      "sha256": "a910a255256b228a141038449e6899783812c1b7a03708c301ab8f0bd7afad3c",
+      "bytes": 9625,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tachyon_listener_read.mjs",
+      "source": "src/lib/tachyon_listener_read.mjs",
+      "sha256": "93febf47c22d93067383c3c82097390f896b0c8708d9205fd686a35ef258e2ad",
+      "bytes": 2925,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tachyon_listener_wait_state.mjs",
+      "source": "src/lib/tachyon_listener_wait_state.mjs",
+      "sha256": "e75cc96c23667571a9feebe4d785aa321cf942c12bb62c58e297d2b24f9d97a2",
+      "bytes": 1624,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tachyon_listener.mjs",
+      "source": "src/lib/tachyon_listener.mjs",
+      "sha256": "815fa3fc9a66af96961d47655bf70fa706a565f59d491ff42c3267d06d454762",
+      "bytes": 8307,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_ariadne.mjs",
+      "source": "src/lib/tldr_agent_ariadne.mjs",
+      "sha256": "a2ba8b90172c00bec975abe972600416d7243ddcb3b672a3e38a14a4ff453c90",
+      "bytes": 6644,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_beacon_cancel.mjs",
+      "source": "src/lib/tldr_agent_beacon_cancel.mjs",
+      "sha256": "a95ed40726cd51c1d4849ab2072d2c5d4879bb211fb94f046ff9442bc4d1eb8d",
+      "bytes": 2166,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_beacon_complete.mjs",
+      "source": "src/lib/tldr_agent_beacon_complete.mjs",
+      "sha256": "b27fb8ce2793a4bd362aa4dfcec6a98f990ead8a64d16784dffa98d4b2c22255",
+      "bytes": 5650,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_beacon_marker.mjs",
+      "source": "src/lib/tldr_agent_beacon_marker.mjs",
+      "sha256": "1d38bb277cce4b0bb78719e199e13e12e72274ffb948d8a9633a57e7a14cce5a",
+      "bytes": 12231,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_beacon_message_evidence.mjs",
+      "source": "src/lib/tldr_agent_beacon_message_evidence.mjs",
+      "sha256": "205b61344d94426b06a0971d80621ba59555cacc25e525aa2ff6c088135a1f7a",
+      "bytes": 7470,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_beacon_outbound_effect.mjs",
+      "source": "src/lib/tldr_agent_beacon_outbound_effect.mjs",
+      "sha256": "b431139d23dcf686a2385173edadbb726b425076da0f83c5230cf26057fbde70",
+      "bytes": 7225,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_beacon_require.mjs",
+      "source": "src/lib/tldr_agent_beacon_require.mjs",
+      "sha256": "48842b307f48ef4b8df1fd1bc27a7937cce2d54dcc459ebe13886b5366d80ba8",
+      "bytes": 5874,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_beacon_stop_index.mjs",
+      "source": "src/lib/tldr_agent_beacon_stop_index.mjs",
+      "sha256": "b715a3c8b6cd93595db198b2d3f7ac6b8b3e1967700b856f54daee2760d188d4",
+      "bytes": 4575,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_beacon_stop.mjs",
+      "source": "src/lib/tldr_agent_beacon_stop.mjs",
+      "sha256": "2df2723d6323423e0e492bd4cd30a67d40e1d9d157821a51fedfe9348d04bea3",
+      "bytes": 8574,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_cli_contract.mjs",
+      "source": "src/lib/tldr_agent_cli_contract.mjs",
+      "sha256": "f3444dd40e08e7cdbd1688cf33d4a8bd4ffc26ccf6468f5dce89fbe173b34102",
+      "bytes": 1447,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_cli_envelope.mjs",
+      "source": "src/lib/tldr_agent_cli_envelope.mjs",
+      "sha256": "2a882818b11018a7fd424290c00c67a23f41fad3add1fa7c7793a2928b20d31a",
+      "bytes": 542,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_cli.mjs",
+      "source": "src/lib/tldr_agent_cli.mjs",
+      "sha256": "1cad106057f8291f15e3c79b2e30eb350adc1c7f335c39aa20a84a4ee2de097d",
+      "bytes": 11755,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_controlled_process.mjs",
+      "source": "src/lib/tldr_agent_controlled_process.mjs",
+      "sha256": "11b3b318a96ceb131f260838d7d74122152be0d1ef40c6aae60eec6730808b00",
+      "bytes": 5756,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_daemon_foreground.mjs",
+      "source": "src/lib/tldr_agent_daemon_foreground.mjs",
+      "sha256": "fe8a8ca7cbbe246fd156825047e1489fdccd8f1aca1289828432b9ee282c5d94",
+      "bytes": 714,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_daemon_health.mjs",
+      "source": "src/lib/tldr_agent_daemon_health.mjs",
+      "sha256": "b11c4d3b6bb3294dbd4a495bfa27af28219ac421ab0b20334a9420382f01f0e6",
+      "bytes": 12339,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_daemon_loop.mjs",
+      "source": "src/lib/tldr_agent_daemon_loop.mjs",
+      "sha256": "1e5f9c26f50a6f0e6690140e2829ad184f59f15bbe9ca7328efd3b0570e9a9e1",
+      "bytes": 6216,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_daemon_mode.mjs",
+      "source": "src/lib/tldr_agent_daemon_mode.mjs",
+      "sha256": "4314cb9abe0080979f46da9b80f8270df8b7fbdd3829f9635feb40cb9036574f",
+      "bytes": 461,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_daemon_phase_timeouts.mjs",
+      "source": "src/lib/tldr_agent_daemon_phase_timeouts.mjs",
+      "sha256": "d8ffe1d2cdc447f2ba52e7067c53b88cd4ed202ffb6a5cb7fbc568d2681fa33b",
+      "bytes": 1572,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_daemon_scope.mjs",
+      "source": "src/lib/tldr_agent_daemon_scope.mjs",
+      "sha256": "64ed9764034e8e6a9ff4c599af70b625063fd41aae316ff20673e365ef221c19",
+      "bytes": 421,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_diagnostic_cli.mjs",
+      "source": "src/lib/tldr_agent_diagnostic_cli.mjs",
+      "sha256": "ac7bbecdb750fe7f3a3df3f33f8dd0f2b24fcd8acde3ed1c47749c3a0e3126eb",
+      "bytes": 1054,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_diagnostic_schema.mjs",
+      "source": "src/lib/tldr_agent_diagnostic_schema.mjs",
+      "sha256": "7813808c033b162a4aca7fd3a262e7443b5ef2c09145363cc43d3c3ade6d1836",
+      "bytes": 6835,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_diagnostics.mjs",
+      "source": "src/lib/tldr_agent_diagnostics.mjs",
+      "sha256": "b1a2b18e46b0964309e40fb085145d5409b132443803392a4a48090091b56c0f",
+      "bytes": 10263,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_exact_resume.mjs",
+      "source": "src/lib/tldr_agent_exact_resume.mjs",
+      "sha256": "1a7dcfb2a47a5c649e6ab89fb3eba37f5acaba126702fc751b2fc8348a04f22d",
+      "bytes": 2269,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_followup_cli.mjs",
+      "source": "src/lib/tldr_agent_followup_cli.mjs",
+      "sha256": "34f329c1d246304b0413fe21e01d452d405fed9c6649eaea7bb58c1b3e69e5d6",
+      "bytes": 7308,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_inbound_claim.mjs",
+      "source": "src/lib/tldr_agent_inbound_claim.mjs",
+      "sha256": "480937a1a9008f7b3ec2f249c02838ddf7e28cf646af3a4727b8a641e25f79d5",
+      "bytes": 3190,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_inbound_lifecycle.mjs",
+      "source": "src/lib/tldr_agent_inbound_lifecycle.mjs",
+      "sha256": "20afb90276d25e2eee855cae8b640e97320ea399b40004346e85e8d49ec8c40c",
+      "bytes": 1361,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_launchd_definition.mjs",
+      "source": "src/lib/tldr_agent_launchd_definition.mjs",
+      "sha256": "692f31e6770bda152779cc25b5a2ba8d6cd3cd0a0c3f73eb47f595bad92cfc73",
+      "bytes": 1209,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_launchd_lifecycle.mjs",
+      "source": "src/lib/tldr_agent_launchd_lifecycle.mjs",
+      "sha256": "e7aa6f5e20123f6de46be61d836b7c1c0e5fdbf33f25f09c525838962706efde",
+      "bytes": 10537,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_message_dispatch.mjs",
+      "source": "src/lib/tldr_agent_message_dispatch.mjs",
+      "sha256": "c36aa6b099f834a5525e1257efec6154beeca263df1f22a7c07f2d7eb973a272",
+      "bytes": 2152,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_owner_cli.mjs",
+      "source": "src/lib/tldr_agent_owner_cli.mjs",
+      "sha256": "57b58e5ffe2c0c155822524e8e7eee6aa11badcd5ad43ad45a4c9bfff9c3e7ec",
+      "bytes": 3363,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_read_boundary.mjs",
+      "source": "src/lib/tldr_agent_read_boundary.mjs",
+      "sha256": "f599082b11236636017f25d05256d5fb7f302a9a92ebf266d24846be2f6c691a",
+      "bytes": 543,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_reply_satisfaction.mjs",
+      "source": "src/lib/tldr_agent_reply_satisfaction.mjs",
+      "sha256": "71e071f84fd12e255c44f239c104fad6cb24836fd7e579c2dddea496438a052c",
+      "bytes": 1645,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_resume_supervisor.mjs",
+      "source": "src/lib/tldr_agent_resume_supervisor.mjs",
+      "sha256": "7fee1266ad2c60283115ac11c1b55b8d8daefb9a2d8a3a044de62faf32d8d1ef",
+      "bytes": 7778,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_runtime_identity.mjs",
+      "source": "src/lib/tldr_agent_runtime_identity.mjs",
+      "sha256": "8c14142e1f8a711c8489f7d844af87fec6873824efca48761458999c59a240dd",
+      "bytes": 3588,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_runtime.mjs",
+      "source": "src/lib/tldr_agent_runtime.mjs",
+      "sha256": "6511e7cf3685806d446384b42566e024c2dc03f56f66902bbe57c71afacbcd85",
+      "bytes": 4858,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_source_lifecycle.mjs",
+      "source": "src/lib/tldr_agent_source_lifecycle.mjs",
+      "sha256": "cc425c2e757bc063028ef2cdbdd4b5cec8b7c0aebbbd65d7ea0b20fd286b687b",
+      "bytes": 3019,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_supervised_child.mjs",
+      "source": "src/lib/tldr_agent_supervised_child.mjs",
+      "sha256": "798ce9d1242aa1af6982872911c5d4ab3b4bc2a05d0fbc60eeea90e8cfa4beca",
+      "bytes": 6228,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/transports/email.mjs",
+      "source": "src/lib/transports/email.mjs",
+      "sha256": "d2b24b29e1f0fe061739736e48ef0ae13bd8c863413b9c5d6c69bdec14680c06",
+      "bytes": 73743,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/transports/email/inbound_body.mjs",
+      "source": "src/lib/transports/email/inbound_body.mjs",
+      "sha256": "817337b7f880f8f83cb7462a0706382c5cea6a7a4f5f1f5d0a7f8d62276fdd7a",
+      "bytes": 1627,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/transports/email/inbound_dead_letter.mjs",
+      "source": "src/lib/transports/email/inbound_dead_letter.mjs",
+      "sha256": "6b58211a36bdae9f40d90366e34e43c96edab9ccb761de06d49fc4e14da603ba",
+      "bytes": 1570,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/transports/email/render/email.mjs",
+      "source": "src/lib/transports/email/render/email.mjs",
+      "sha256": "08e5810aedc7664cbe76fca16ac4c480f82f182f0b29ee4be5af53243053f357",
+      "bytes": 13578,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/transports/email/render/glyphs.mjs",
+      "source": "src/lib/transports/email/render/glyphs.mjs",
+      "sha256": "7009717531a96cebfbc415f321813ea559fe592bb7663fcdf897371a3f5edd88",
+      "bytes": 2399,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/transports/email/render/html.mjs",
+      "source": "src/lib/transports/email/render/html.mjs",
+      "sha256": "da253f2a64122cfe79d4558e0e37fd73a2086a19ee14ce135c056af3efd51d94",
+      "bytes": 14060,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/transports/email/render/markdown_inline.mjs",
+      "source": "src/lib/transports/email/render/markdown_inline.mjs",
+      "sha256": "8e0b14521664e2aa2ffa73a47dc64baefb048c417239985452f1058e22d2ac7d",
+      "bytes": 6157,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/transports/email/render/markdown.mjs",
+      "source": "src/lib/transports/email/render/markdown.mjs",
+      "sha256": "a554bd03da787b8fc1029b704a0db2f82714265031360a78a5d44842dea278b9",
+      "bytes": 9869,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/transports/email/render/panel.mjs",
+      "source": "src/lib/transports/email/render/panel.mjs",
+      "sha256": "8f383fddb0d3b627fef112b75a83dd55f6a65cb7476ec419939cadc33f0a7b94",
+      "bytes": 1960,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/transports/email/render/text.mjs",
+      "source": "src/lib/transports/email/render/text.mjs",
+      "sha256": "d85768ebead67d859afe10a201477886f295ea5a45087ee2431727f4897139c4",
+      "bytes": 7102,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/transports/email/render/tldr.mjs",
+      "source": "src/lib/transports/email/render/tldr.mjs",
+      "sha256": "13adc2c21959a867fa1c86a127fbd44e5b03806cd316196ec2a2de8ca9fb332a",
+      "bytes": 5729,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/transports/email/render/tokens.mjs",
+      "source": "src/lib/transports/email/render/tokens.mjs",
+      "sha256": "a4ae255b1cdc004dd8e1b6266762c3353e30e7fa66b7e1928c78b33a255d8336",
+      "bytes": 4089,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/transports/email/runtime_overrides.mjs",
+      "source": "src/lib/transports/email/runtime_overrides.mjs",
+      "sha256": "9cd081cbf1236e5a39503df4d2f639e748ceaab0bfddc2340a65251f003a236f",
+      "bytes": 1989,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/transports/email/templates.mjs",
+      "source": "src/lib/transports/email/templates.mjs",
+      "sha256": "cd67ffe61ba53ce81e126f1630d0cd6acdf5d12b7bff08522faec3592f0c5e6c",
+      "bytes": 7984,
+      "mode": "644"
+    },
+    {
+      "path": "src/starport.mjs",
+      "source": "src/starport.mjs",
+      "sha256": "177d676e1e5c4d80218de39bb48466e41658074b95d9c81d33dcfb8942577ddf",
+      "bytes": 2227,
+      "mode": "644"
+    },
+    {
+      "path": "src/tldr-agent-private-runner.mjs",
+      "source": "src/tldr-agent-private-runner.mjs",
+      "sha256": "c05b80e5e0da9bacc4ec8d2b678712503e493bfa38f524c2279abff2bc954983",
+      "bytes": 4890,
+      "mode": "644"
+    },
+    {
+      "path": "src/tldr-agent.mjs",
+      "source": "src/tldr-agent.mjs",
+      "sha256": "d57fd93a01b7f0d303467d00b61347fa94c49de6544123cba0384de6f47b410d",
+      "bytes": 2811,
+      "mode": "755"
+    }
+  ]
+}

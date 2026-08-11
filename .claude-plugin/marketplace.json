@@ -1,0 +1,21 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "codename",
+  "description": "First-party plugins from Codename, Inc.",
+  "owner": {
+    "name": "Codename, Inc."
+  },
+  "plugins": [
+    {
+      "name": "tldr",
+      "description": "Private owner email and exact-session reply continuity for Claude Code.",
+      "source": {
+        "source": "npm",
+        "package": "@joenandez/tldr",
+        "version": "0.1.0-rc.1"
+      },
+      "category": "productivity",
+      "homepage": "https://github.com/joenandez/tldr#readme"
+    }
+  ]
+}

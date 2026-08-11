@@ -1,0 +1,46 @@
+name: claude
+version: 1
+
+command:
+  argv:
+    [
+      claude,
+      -p,
+      --verbose,
+      --output-format,
+      stream-json,
+      --session-id,
+      "{{session_id}}",
+      "{{prompt}}",
+    ]
+  env:
+    CLAUDE_NONINTERACTIVE: "1"
+
+session_id:
+  mintable: true
+
+capabilities:
+  session_start_hook: true
+  structured_output: true
+  exact_resume: true
+  stdin_resume: true
+
+provider_version:
+  argv: [claude, --version]
+
+resume:
+  command: claude
+  argv:
+    [
+      --resume,
+      "{{session_id}}",
+      --dangerously-skip-permissions,
+      -p,
+      --verbose,
+      --output-format,
+      stream-json,
+    ]
+  stdin: generated_brief
+  structured_output: true
+  cwd: "{{job.cwd}}"
+  caveats: []

@@ -1,0 +1,40 @@
+name: codex
+version: 1
+
+command:
+  argv: [codex, exec, --json, "{{prompt}}"]
+  env: {}
+
+session_id:
+  capture:
+    strategy: stdout_parse
+    from: stdout
+    parse: jsonl
+    match: { type: thread.started }
+    path: $.thread_id
+
+capabilities:
+  session_start_hook: true
+  structured_output: true
+  exact_resume: true
+  stdin_resume: true
+
+provider_version:
+  argv: [codex, --version]
+
+resume:
+  command: codex
+  argv:
+    [
+      exec,
+      --json,
+      resume,
+      --skip-git-repo-check,
+      --dangerously-bypass-approvals-and-sandbox,
+      "{{session_id}}",
+      "-",
+    ]
+  stdin: generated_brief
+  structured_output: true
+  cwd: "{{job.cwd}}"
+  caveats: ["cwd-scoped"]
