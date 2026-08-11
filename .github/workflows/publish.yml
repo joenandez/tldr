@@ -55,6 +55,4 @@ jobs:
           node -e 'const value=JSON.parse(process.argv[1]); if (!value.ok || value.data?.state !== "setup-required" || value.data?.next_action !== "setup" || value.error !== null) process.exit(1)' "$output"
 
       - name: Publish the verified release candidate
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: npm publish "${{ steps.pack.outputs.tarball }}" --access public --tag next --provenance

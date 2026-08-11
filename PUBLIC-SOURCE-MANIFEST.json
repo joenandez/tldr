@@ -6,7 +6,7 @@
   },
   "source": {
     "repository": "tldr-internal",
-    "commit": "7c8832dab0ffda282f9520d80d6164f608ef35fe"
+    "commit": "ba59fa37fff104e59ff88170baa49ef6dcb3920f"
   },
   "files": [
     {
@@ -26,8 +26,8 @@
     {
       "path": ".github/workflows/publish.yml",
       "source": "release/public-repo/publish.yml",
-      "sha256": "4486d5b1f844e14b8b661e8dccca0a0876c3d38554923183b1336ecdfc92501e",
-      "bytes": 2077,
+      "sha256": "419e2a969aa61c01c2fe93a106b5b39304964e89414ae614e409fc819100d7ec",
+      "bytes": 2012,
       "mode": "644"
     },
     {
