@@ -10,13 +10,12 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-
 import {
   requestAegisSetupStateSafe,
   requestAegisStatusSafe,
 } from "./aegis_client.mjs";
-
-const PACKAGE_RELEASE = "0.1.0-rc.2";
+import { sanitizeInstallerEnvironment } from "./aegis_installer_environment.mjs";
+const PACKAGE_RELEASE = "0.1.0-rc.3";
 const RELEASE_MANIFEST_SCHEMA = 2;
 const BROKER_PROTOCOL_VERSION = 2;
 const SETUP_STATE_SCHEMA_VERSION = 2;
@@ -446,11 +445,12 @@ async function fetchBytes(url) {
   return Buffer.from(await response.arrayBuffer());
 }
 
-function checked(command, args) {
+function checked(command, args, options = {}) {
   const result = spawnSync(command, args, {
     encoding: "utf8",
     stdio: "pipe",
     timeout: 300_000,
+    ...options,
   });
   if (result.status !== 0) throw new Error("Aegis package verification failed");
   return `${result.stdout}\n${result.stderr}`;
@@ -514,15 +514,15 @@ function findPackageIdentifiers(root) {
   return identifiers;
 }
 
-function inspectFixedEnvironment() {
-  return Object.freeze({
+const inspectFixedEnvironment = () =>
+  Object.freeze({
     installedAppExists: existsSync(FIXED_SETUP_APP),
     repositoryBuildExists: existsSync(REPOSITORY_BUILD_URL),
   });
-}
 
 export function openInstallerAndWait(path) {
-  checked("/usr/bin/open", ["-W", path]);
+  const env = sanitizeInstallerEnvironment();
+  checked("/usr/bin/open", ["-W", path], { env });
 }
 
 function launchFixedSetup(path) {

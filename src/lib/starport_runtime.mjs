@@ -87,6 +87,13 @@ function unavailableOnboarding() {
   });
 }
 
+function shouldInstallBundledAegis({ appExists, nativeStatus }) {
+  return (
+    !appExists ||
+    !["ready", "pending_verification", "unconfigured"].includes(nativeStatus)
+  );
+}
+
 export function createStarportComponentInspector({
   home,
   sourceRoot,
@@ -200,7 +207,15 @@ export async function createProductionStarportRuntime({
   const installAegis = installBundledAegis ?? bundledAegisInstaller({ home });
   const sourceAdapter = Object.freeze({
     async install() {
-      if (!existsSync(AEGIS_APP)) await installAegis();
+      const observed = await nativeService.status();
+      if (
+        shouldInstallBundledAegis({
+          appExists: existsSync(AEGIS_APP),
+          nativeStatus: observed?.data?.status,
+        })
+      ) {
+        await installAegis();
+      }
       return sourceLifecycle.install();
     },
     uninstall: () => sourceLifecycle.uninstall(),
@@ -241,4 +256,5 @@ export const _internals = Object.freeze({
   AEGIS_TEAM_ID,
   normalizedArchitecture,
   resolveSetupSession,
+  shouldInstallBundledAegis,
 });

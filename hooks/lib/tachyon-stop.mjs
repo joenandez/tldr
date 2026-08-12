@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import "../../src/lib/node_sqlite_warning.mjs";
+
 import {
   existsSync,
   mkdirSync,

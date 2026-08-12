@@ -2,24 +2,24 @@
   "schema_version": 1,
   "package": {
     "name": "@joenandez/tldr",
-    "version": "0.1.0-rc.2"
+    "version": "0.1.0-rc.3"
   },
   "source": {
     "repository": "tldr-internal",
-    "commit": "8b73ee6211c19a515347b5144da8da2ede359043"
+    "commit": "5e13c6450e28df0259f338f7d15fdaee91c05122"
   },
   "files": [
     {
       "path": ".claude-plugin/marketplace.json",
       "source": ".claude-plugin/marketplace.json",
-      "sha256": "9846f61ccdb7224afd74a971577e92c4867a323e8d57f76eefe981e792b6a6c2",
+      "sha256": "df223d394337c1818ec5307604a73476cefade3e8f886d1673a45ea2eab85354",
       "bytes": 568,
       "mode": "644"
     },
     {
       "path": ".claude-plugin/plugin.json",
       "source": ".claude-plugin/plugin.json",
-      "sha256": "188dd0f6498ad48d42c33b4816b1f3b997b6ccf47e390c9f6de5d676b2712ed3",
+      "sha256": "4dedd2cf56059407e1d811aa4eb8908d5d8810f36c427fa61f0296c86c7c47d6",
       "bytes": 623,
       "mode": "644"
     },
@@ -96,8 +96,8 @@
     {
       "path": "hooks/lib/tachyon-stop.mjs",
       "source": "hooks/lib/tachyon-stop.mjs",
-      "sha256": "3c3a31a88ebc55fadb02fab779292b721daa10c0b34b3d0009644adba76e253c",
-      "bytes": 14479,
+      "sha256": "bbf4d6762aba7a3985f6c579d0e90bb8c27f4087ee49a46a54c2328945f5096e",
+      "bytes": 14528,
       "mode": "644"
     },
     {
@@ -173,28 +173,28 @@
     {
       "path": "package-lock.json",
       "source": "package-lock.json",
-      "sha256": "828fa57e1cf72f855085b3c8681401623ffff26de5096f251698172cfd24899c",
+      "sha256": "7569a58bd66ca0fe0e760ca25257c7afbd47efe20df0899bdf1e954f692bbe87",
       "bytes": 40318,
       "mode": "644"
     },
     {
       "path": "package.json",
       "source": "package.json",
-      "sha256": "071e249de6a2436b2777d688090bb1ba4c9e28768e2a36ee3fdcb2f5090a8b26",
-      "bytes": 13668,
+      "sha256": "5f5c71079f633bfd822bd1fbbdf531bef9e306337d7157b6fa9b5537c6547581",
+      "bytes": 13715,
       "mode": "644"
     },
     {
       "path": "README.md",
       "source": "README.md",
-      "sha256": "74974f470053f82502ee0118c020ceb146cc875d49570dc59e0e89b2e4531b48",
+      "sha256": "41e173a66e5d0d9570ed14332ffdd097e4c33d8f3d5c44e82cf3504b86af202b",
       "bytes": 2530,
       "mode": "644"
     },
     {
       "path": "release/activation-manifest.json",
       "source": "release/activation-manifest.json",
-      "sha256": "a1a623eb46b54f15720c7b792c6d456d65444460fe3d8ec24d7a50c63c53f016",
+      "sha256": "2f9388b7ff6c123900d80fe0d31a7f2ec4d50f259742a43efedc6b01b872fc3d",
       "bytes": 1807,
       "mode": "644"
     },
@@ -215,15 +215,15 @@
     {
       "path": "release/payloads/arm64/tldr-agent.tar.gz",
       "source": "release/payloads/arm64/tldr-agent.tar.gz",
-      "sha256": "f14fa42f5ab44a08c4507c9f50ad9713641f4ec8b80b09679c3c92f305db3f11",
-      "bytes": 427198,
+      "sha256": "4e6100e65ed85ccf61a20908cc4632adf1d3ac6cb0eb04354a8d6ed9dc48f351",
+      "bytes": 428343,
       "mode": "644"
     },
     {
       "path": "release/payloads/arm64/TldrAgentAegis.pkg",
       "source": "release/payloads/arm64/TldrAgentAegis.pkg",
-      "sha256": "5f96d5da42282156cb8ecb48c8243571f00c18a1423120dd0904ac30034d8fd9",
-      "bytes": 306023,
+      "sha256": "95508ec56af40b021ee2bf9db85bcef1d2cae2d2b1406bd45aa617b9619c253c",
+      "bytes": 290880,
       "mode": "644"
     },
     {
@@ -236,21 +236,21 @@
     {
       "path": "release/payloads/x86_64/tldr-agent.tar.gz",
       "source": "release/payloads/x86_64/tldr-agent.tar.gz",
-      "sha256": "f14fa42f5ab44a08c4507c9f50ad9713641f4ec8b80b09679c3c92f305db3f11",
-      "bytes": 427198,
+      "sha256": "4e6100e65ed85ccf61a20908cc4632adf1d3ac6cb0eb04354a8d6ed9dc48f351",
+      "bytes": 428343,
       "mode": "644"
     },
     {
       "path": "release/payloads/x86_64/TldrAgentAegis.pkg",
       "source": "release/payloads/x86_64/TldrAgentAegis.pkg",
-      "sha256": "a6f2ef30dd82f07e8d4e302451864a6b675ac5d34bed6734258983a77e185cd2",
-      "bytes": 348101,
+      "sha256": "65c77920b8ef1b60078c263c09aa3c4e8fdfc822caa4a725609db383e0b2f260",
+      "bytes": 333850,
       "mode": "644"
     },
     {
       "path": "release/starport-release.json",
       "source": "release/starport-release.json",
-      "sha256": "60b047872ac5b8d81ba114fd137c926599187f318be4a40b625631dec8d0a4e4",
+      "sha256": "ec6207e3d0852ebdf7dafbe063e092e777fbf57fb3eabca0548b5d0411fe076f",
       "bytes": 1556,
       "mode": "644"
     },
@@ -346,10 +346,17 @@
       "mode": "644"
     },
     {
+      "path": "src/lib/aegis_installer_environment.mjs",
+      "source": "src/lib/aegis_installer_environment.mjs",
+      "sha256": "3e87145040293d976c99dca159f27ea4800a7970ee0d1b4877ceb739364d4e3f",
+      "bytes": 496,
+      "mode": "644"
+    },
+    {
       "path": "src/lib/aegis_native_distribution.mjs",
       "source": "src/lib/aegis_native_distribution.mjs",
-      "sha256": "00e0b8b56524afeb50a503a0d3ecefddfe376aaa94b0f7d4a3685c9675c6a639",
-      "bytes": 17731,
+      "sha256": "971d0aa2d299cf2967de17323b585a5edf39b6f2e36c8a9c4c0da7155c6c11c3",
+      "bytes": 17888,
       "mode": "644"
     },
     {
@@ -642,8 +649,8 @@
     {
       "path": "src/lib/starport_aegis_package.mjs",
       "source": "src/lib/starport_aegis_package.mjs",
-      "sha256": "611c850d8c7abbd9eeac02f9192c14d5c22649601cb60e26969ffcd05a58d853",
-      "bytes": 1707,
+      "sha256": "730883520bd5f54b988350a40dc0436905990a5b16db832270fb050e56cf5252",
+      "bytes": 2532,
       "mode": "644"
     },
     {
@@ -677,8 +684,8 @@
     {
       "path": "src/lib/starport_runtime.mjs",
       "source": "src/lib/starport_runtime.mjs",
-      "sha256": "7892757a0e759c07177c4458521c20b65c557dee88707638e16249e58815c9e7",
-      "bytes": 7391,
+      "sha256": "b42d1509f36449a1df437538449bef500f816ec23d02cc333e4ba0f923fab000",
+      "bytes": 7796,
       "mode": "644"
     },
     {

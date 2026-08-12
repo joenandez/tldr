@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "phase": "source",
-  "release": "0.1.0-rc.2",
+  "release": "0.1.0-rc.3",
   "source_commit": null,
   "npm": {
     "package": "@joenandez/tldr",
-    "version": "0.1.0-rc.2",
+    "version": "0.1.0-rc.3",
     "publication": {
       "status": "pending",
       "dist_integrity": null,

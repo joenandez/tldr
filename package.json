@@ -1,6 +1,6 @@
 {
   "name": "@joenandez/tldr",
-  "version": "0.1.0-rc.2",
+  "version": "0.1.0-rc.3",
   "description": "Private owner email continuity for local AI agent sessions.",
   "license": "MIT",
   "author": "Joe Fernandez",
@@ -76,6 +76,7 @@
     "src/helm-daemon.mjs",
     "src/lib/adapter_session_identity.mjs",
     "src/lib/aegis_native_distribution.mjs",
+    "src/lib/aegis_installer_environment.mjs",
     "src/lib/aegis_native_setup_runtime.mjs",
     "src/lib/aegis_source_release_install.mjs",
     "src/lib/aegis_inbound_bridge_process.mjs",
