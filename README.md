@@ -4,7 +4,7 @@ tldr; gives each Claude Code session a private email thread with its verified ow
 
 ## 🚧 CAUTION 🚧 - Pre-Alpha
 
-tldr; is in active development and probably won't work. 
+tldr; is in active development and probably won't work.
 
 ## Requirements
 

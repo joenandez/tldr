@@ -2,7 +2,7 @@
 set -eu
 
 package_root=""
-operation="status"
+operation="configure"
 tldr_agent_home=${TLDR_AGENT_HOME:-${HOME}/.tldr-agent}
 install_root="${tldr_agent_home}/install"
 
@@ -48,7 +48,7 @@ if [ -x "$runtime_node" ] && [ -f "$entrypoint" ] && \
 fi
 
 case "$operation" in
-  setup|repair) ;;
+  setup|configure|repair) ;;
   *)
     printf '%s\n' '{"ok":true,"data":{"state":"setup-required","next_action":"setup"},"error":null}'
     exit 0

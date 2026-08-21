@@ -122,7 +122,11 @@ export function createStarportOrchestrator({
     setup,
     status,
     async configure() {
-      const configured = await native.configure?.();
+      let configured = await native.configure?.();
+      if (configured?.error?.code === "NATIVE_SETUP_NOT_INSTALLED") {
+        await source?.install?.();
+        configured = await native.configure?.();
+      }
       if (configured?.ok === false) return configured;
       return status();
     },

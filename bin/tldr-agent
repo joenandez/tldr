@@ -12,7 +12,7 @@ fi
 plugin_root=$(CDPATH= cd -- "$(dirname -- "$script_path")/.." && pwd -P)
 TLDR_AGENT_PLUGIN_ROOT=$plugin_root
 export TLDR_AGENT_PLUGIN_ROOT
-operation=${1:-status}
+operation=${1:-configure}
 case "$operation" in
   setup|status|configure|repair|uninstall)
     if [ "$#" -gt 0 ]; then shift; fi

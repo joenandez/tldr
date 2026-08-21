@@ -2,24 +2,24 @@
   "schema_version": 1,
   "package": {
     "name": "@joenandez/tldr",
-    "version": "0.1.0-rc.3"
+    "version": "0.1.0-rc.4"
   },
   "source": {
     "repository": "tldr-internal",
-    "commit": "5e13c6450e28df0259f338f7d15fdaee91c05122"
+    "commit": "9b7cce5d4062047e7a201569be9145e638bef5f9"
   },
   "files": [
     {
       "path": ".claude-plugin/marketplace.json",
       "source": ".claude-plugin/marketplace.json",
-      "sha256": "df223d394337c1818ec5307604a73476cefade3e8f886d1673a45ea2eab85354",
+      "sha256": "7f6de729ff4e3f0f72042bccc8e5c5674e5edf3b00d57f85551e30d4b2a0218e",
       "bytes": 568,
       "mode": "644"
     },
     {
       "path": ".claude-plugin/plugin.json",
       "source": ".claude-plugin/plugin.json",
-      "sha256": "4dedd2cf56059407e1d811aa4eb8908d5d8810f36c427fa61f0296c86c7c47d6",
+      "sha256": "b1c7af2388a0910bf4cf72ca6d812286e3af2a4c93c3d811eda72f014aa75c5a",
       "bytes": 623,
       "mode": "644"
     },
@@ -33,8 +33,8 @@
     {
       "path": "bin/tldr-agent",
       "source": "bin/tldr-agent",
-      "sha256": "0dfca987a53ea0337d7fa5b29af16022f9b2d1525d35a8445bda0cd72afe96a9",
-      "bytes": 1769,
+      "sha256": "07ef1c0ae9d90264c580014379f728f9d7604226b10735cf3f57799a08627b68",
+      "bytes": 1772,
       "mode": "755"
     },
     {
@@ -159,8 +159,8 @@
     {
       "path": "install/tldr-agent-bootstrap.sh",
       "source": "install/tldr-agent-bootstrap.sh",
-      "sha256": "b145362e98635f5eb0ac0bf83ab118fbea1b2c1b6b7e6082d94475974232eb9c",
-      "bytes": 4576,
+      "sha256": "e03633dab87eacf403532f51e8e41e2f86e9387d0e9cfa5b1bb78f5d0065a38b",
+      "bytes": 4589,
       "mode": "755"
     },
     {
@@ -173,28 +173,28 @@
     {
       "path": "package-lock.json",
       "source": "package-lock.json",
-      "sha256": "7569a58bd66ca0fe0e760ca25257c7afbd47efe20df0899bdf1e954f692bbe87",
+      "sha256": "7a5acc02c04b1104f047133d48da973dff06db283ed358c7f7d33778b7c82de2",
       "bytes": 40318,
       "mode": "644"
     },
     {
       "path": "package.json",
       "source": "package.json",
-      "sha256": "5f5c71079f633bfd822bd1fbbdf531bef9e306337d7157b6fa9b5537c6547581",
+      "sha256": "b15837f68a9d9498f35261605d65a364976cb80125c3dba53d16a09986bfab6a",
       "bytes": 13715,
       "mode": "644"
     },
     {
       "path": "README.md",
       "source": "README.md",
-      "sha256": "41e173a66e5d0d9570ed14332ffdd097e4c33d8f3d5c44e82cf3504b86af202b",
-      "bytes": 2530,
+      "sha256": "c39f504b01b7c79e1d9f5ab5bdb246abfee075150ff118dc5bedc36272fa9dad",
+      "bytes": 2621,
       "mode": "644"
     },
     {
       "path": "release/activation-manifest.json",
       "source": "release/activation-manifest.json",
-      "sha256": "2f9388b7ff6c123900d80fe0d31a7f2ec4d50f259742a43efedc6b01b872fc3d",
+      "sha256": "127f41aa37ef5a934fdaedd6e20372954b8774272ff04229d9b3fc63c79720e6",
       "bytes": 1807,
       "mode": "644"
     },
@@ -215,15 +215,15 @@
     {
       "path": "release/payloads/arm64/tldr-agent.tar.gz",
       "source": "release/payloads/arm64/tldr-agent.tar.gz",
-      "sha256": "4e6100e65ed85ccf61a20908cc4632adf1d3ac6cb0eb04354a8d6ed9dc48f351",
-      "bytes": 428343,
+      "sha256": "9f6e505b16fb7b792919848835ca90bb5c5906561065879f21b6b3bd12fe2272",
+      "bytes": 428021,
       "mode": "644"
     },
     {
       "path": "release/payloads/arm64/TldrAgentAegis.pkg",
       "source": "release/payloads/arm64/TldrAgentAegis.pkg",
-      "sha256": "95508ec56af40b021ee2bf9db85bcef1d2cae2d2b1406bd45aa617b9619c253c",
-      "bytes": 290880,
+      "sha256": "358845695810f7b34d05bc8dbc71d1ac219f0a5dc975e77db88fe8a9078dbc96",
+      "bytes": 291542,
       "mode": "644"
     },
     {
@@ -236,21 +236,21 @@
     {
       "path": "release/payloads/x86_64/tldr-agent.tar.gz",
       "source": "release/payloads/x86_64/tldr-agent.tar.gz",
-      "sha256": "4e6100e65ed85ccf61a20908cc4632adf1d3ac6cb0eb04354a8d6ed9dc48f351",
-      "bytes": 428343,
+      "sha256": "9f6e505b16fb7b792919848835ca90bb5c5906561065879f21b6b3bd12fe2272",
+      "bytes": 428021,
       "mode": "644"
     },
     {
       "path": "release/payloads/x86_64/TldrAgentAegis.pkg",
       "source": "release/payloads/x86_64/TldrAgentAegis.pkg",
-      "sha256": "65c77920b8ef1b60078c263c09aa3c4e8fdfc822caa4a725609db383e0b2f260",
-      "bytes": 333850,
+      "sha256": "307064b0ca7d4fbfdaea9e4dc0f9d5fef5e8e4ad51590f72fd72971087fad065",
+      "bytes": 334454,
       "mode": "644"
     },
     {
       "path": "release/starport-release.json",
       "source": "release/starport-release.json",
-      "sha256": "ec6207e3d0852ebdf7dafbe063e092e777fbf57fb3eabca0548b5d0411fe076f",
+      "sha256": "6b14ce1203fd7eebfbdaa6435b3df958d2a965c9f3ed2d455557bea023b9d3f4",
       "bytes": 1556,
       "mode": "644"
     },
@@ -355,7 +355,7 @@
     {
       "path": "src/lib/aegis_native_distribution.mjs",
       "source": "src/lib/aegis_native_distribution.mjs",
-      "sha256": "971d0aa2d299cf2967de17323b585a5edf39b6f2e36c8a9c4c0da7155c6c11c3",
+      "sha256": "ca459108f5032fd063b5fa03bd55fdb71acbfe7df2f9534924b0ef8a9a6d15ea",
       "bytes": 17888,
       "mode": "644"
     },
@@ -670,8 +670,8 @@
     {
       "path": "src/lib/starport_orchestrator.mjs",
       "source": "src/lib/starport_orchestrator.mjs",
-      "sha256": "56b4075921f8e692516c5dc2fd1a8fd04570a183dfc29f6e8c40bf4968ead002",
-      "bytes": 4235,
+      "sha256": "690509f1d075279a93731a2d6d743fb796580ceca2385bf18f90dd867dcabca4",
+      "bytes": 4395,
       "mode": "644"
     },
     {
@@ -1223,8 +1223,8 @@
     {
       "path": "src/starport.mjs",
       "source": "src/starport.mjs",
-      "sha256": "4328403a9fd90af2a8cd54266fe82293be7590186daa97e96d5b985f7ba18f3b",
-      "bytes": 2949,
+      "sha256": "729d8c0f9c8c517d8925ee7c2e0dac91a600472ef61637565ccc343d5703daab",
+      "bytes": 3145,
       "mode": "644"
     },
     {
