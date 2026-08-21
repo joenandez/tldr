@@ -2,6 +2,10 @@
 
 tldr; gives each Claude Code session a private email thread with its verified owner. The owner can reply from anywhere, and tldr; continues the originating session in its original directory without exposing an email address or provider credential to the agent.
 
+## 🚧 CAUTION 🚧 - Pre-Alpha
+
+tldr; is in active development and probably won't work. 
+
 ## Requirements
 
 - macOS 13 or newer on Apple silicon or Intel
