@@ -6,6 +6,7 @@ import {
   openInstallerAndWait,
   verifyPackageWithMacOS,
 } from "./aegis_native_distribution.mjs";
+import { requireGuiSession } from "./tldr_agent_gui_session.mjs";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const MINIMUM_MACOS = "13.0";
@@ -66,6 +67,7 @@ export async function installVerifiedLocalAegisPackage({
     );
   }
   try {
+    requireGuiSession();
     await installPackage(packagePath, artifact);
     if (!(await inspectInstallation({ artifact }))) {
       throw new Error("Aegis installer closed without a healthy installation");

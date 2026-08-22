@@ -2,7 +2,17 @@
 set -eu
 
 package_root=""
-operation="configure"
+tldr_default_operation() {
+  if [ "${TLDR_AGENT_ASSUME_GUI_SESSION:-}" = "0" ]; then printf 'status'; return; fi
+  if [ "${TLDR_AGENT_ASSUME_GUI_SESSION:-}" = "1" ]; then printf 'configure'; return; fi
+  if [ -n "${CI:-}" ]; then printf 'status'; return; fi
+  if [ "$(/bin/launchctl managername 2>/dev/null || true)" = "Aqua" ]; then
+    printf 'configure'
+  else
+    printf 'status'
+  fi
+}
+operation="$(tldr_default_operation)"
 tldr_agent_home=${TLDR_AGENT_HOME:-${HOME}/.tldr-agent}
 install_root="${tldr_agent_home}/install"
 

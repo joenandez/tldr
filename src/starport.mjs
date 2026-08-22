@@ -3,6 +3,7 @@
 // Must stay first: installs the node:sqlite ExperimentalWarning filter before
 // the Starport runtime imports node:sqlite through its dependency graph.
 import "./lib/node_sqlite_warning.mjs";
+import { defaultStarportOperation } from "./lib/tldr_agent_gui_session.mjs";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -91,7 +92,7 @@ export async function main(
     },
   } = {},
 ) {
-  const operation = args[0] ?? "configure";
+  const operation = args[0] ?? defaultStarportOperation();
   if (args.slice(1).some((argument) => argument !== "--json")) {
     const invalid = unsupported();
     write(`${JSON.stringify(invalid)}\n`);

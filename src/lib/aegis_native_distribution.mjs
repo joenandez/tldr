@@ -15,7 +15,7 @@ import {
   requestAegisStatusSafe,
 } from "./aegis_client.mjs";
 import { sanitizeInstallerEnvironment } from "./aegis_installer_environment.mjs";
-const PACKAGE_RELEASE = "0.1.0-rc.4";
+const PACKAGE_RELEASE = "0.1.0-rc.5";
 const RELEASE_MANIFEST_SCHEMA = 2;
 const BROKER_PROTOCOL_VERSION = 2;
 const SETUP_STATE_SCHEMA_VERSION = 2;

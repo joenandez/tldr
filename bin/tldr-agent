@@ -12,7 +12,17 @@ fi
 plugin_root=$(CDPATH= cd -- "$(dirname -- "$script_path")/.." && pwd -P)
 TLDR_AGENT_PLUGIN_ROOT=$plugin_root
 export TLDR_AGENT_PLUGIN_ROOT
-operation=${1:-configure}
+tldr_default_operation() {
+  if [ "${TLDR_AGENT_ASSUME_GUI_SESSION:-}" = "0" ]; then printf 'status'; return; fi
+  if [ "${TLDR_AGENT_ASSUME_GUI_SESSION:-}" = "1" ]; then printf 'configure'; return; fi
+  if [ -n "${CI:-}" ]; then printf 'status'; return; fi
+  if [ "$(/bin/launchctl managername 2>/dev/null || true)" = "Aqua" ]; then
+    printf 'configure'
+  else
+    printf 'status'
+  fi
+}
+operation=${1:-$(tldr_default_operation)}
 case "$operation" in
   setup|status|configure|repair|uninstall)
     if [ "$#" -gt 0 ]; then shift; fi
