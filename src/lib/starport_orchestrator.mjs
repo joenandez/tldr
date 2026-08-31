@@ -7,6 +7,12 @@ const COMPONENTS = Object.freeze([
   "outbound",
 ]);
 
+const EMAIL_ROUTE = Object.freeze({
+  selector: "email",
+  label: "Email",
+  capabilities: Object.freeze(["send", "reply"]),
+});
+
 function success(state, components, nextAction, remediation = null) {
   return Object.freeze({
     ok: true,
@@ -54,6 +60,7 @@ export function createStarportOrchestrator({
   native,
   onboarding,
   source,
+  tightbeam = null,
 } = {}) {
   if (
     typeof inspectComponents !== "function" ||
@@ -61,6 +68,31 @@ export function createStarportOrchestrator({
     typeof onboarding?.status !== "function"
   ) {
     throw new TypeError("Starport orchestrator dependencies are incomplete");
+  }
+
+  async function preflightTightbeam() {
+    if (typeof tightbeam?.preflight !== "function") return null;
+    const result = await tightbeam.preflight();
+    return result?.ok === false ? result : null;
+  }
+
+  async function registerEmailChannel() {
+    if (typeof tightbeam?.registerEmailChannel !== "function") return null;
+    const result = await tightbeam.registerEmailChannel(EMAIL_ROUTE);
+    return result?.ok === false ? result : null;
+  }
+
+  async function registerReadyEmailChannel(state) {
+    if (
+      ![
+        "onboarding-verified",
+        "ready-unverified",
+        "onboarding-reconciling",
+      ].includes(state)
+    ) {
+      return null;
+    }
+    return registerEmailChannel();
   }
 
   async function status() {
@@ -95,22 +127,36 @@ export function createStarportOrchestrator({
   }
 
   async function setup() {
+    const preflightFailure = await preflightTightbeam();
+    if (preflightFailure) return preflightFailure;
     const before = await status();
     if (before.data.state === "onboarding-verified") {
       const configured = await native.configure?.();
       if (configured?.ok === false) return configured;
-      return status();
+      const after = await status();
+      const registrationFailure = await registerReadyEmailChannel(
+        after.data.state,
+      );
+      return registrationFailure ?? after;
     }
     if (
       before.data.state === "ready-unverified" ||
       before.data.state === "onboarding-reconciling"
     ) {
+      const registrationFailure = await registerReadyEmailChannel(
+        before.data.state,
+      );
+      if (registrationFailure) return registrationFailure;
       await onboarding.send?.();
       return status();
     }
     await source?.install?.();
     await native.setup?.();
     const after = await status();
+    const registrationFailure = await registerReadyEmailChannel(
+      after.data.state,
+    );
+    if (registrationFailure) return registrationFailure;
     if (after.data.state === "ready-unverified") {
       await onboarding.send?.();
       return status();
@@ -131,9 +177,15 @@ export function createStarportOrchestrator({
       return status();
     },
     async repair() {
+      const preflightFailure = await preflightTightbeam();
+      if (preflightFailure) return preflightFailure;
       await source?.install?.();
       await native.repair?.();
-      return status();
+      const after = await status();
+      const registrationFailure = await registerReadyEmailChannel(
+        after.data.state,
+      );
+      return registrationFailure ?? after;
     },
     async uninstall() {
       const result = await native.uninstall?.();
@@ -165,4 +217,4 @@ export function createStarportOrchestrator({
   });
 }
 
-export const _internals = Object.freeze({ COMPONENTS });
+export const _internals = Object.freeze({ COMPONENTS, EMAIL_ROUTE });

@@ -164,7 +164,6 @@ export function runInboxPollChild({
   daemonInstanceId,
   signal,
   timeoutMs,
-  dispatchCaptured = true,
 } = {}) {
   return runHelmTasksJsonChild({
     schedulerScriptPath,
@@ -172,43 +171,6 @@ export function runInboxPollChild({
     daemonInstanceId,
     signal,
     timeoutMs,
-    args: [
-      "__tldr-agent-inbox-poll",
-      ...(dispatchCaptured ? ["--dispatch-captured"] : []),
-    ],
-  });
-}
-
-export function runInboxDispatchChild({
-  schedulerScriptPath,
-  scope,
-  daemonInstanceId,
-  signal,
-  timeoutMs,
-} = {}) {
-  return runHelmTasksJsonChild({
-    schedulerScriptPath,
-    scope,
-    daemonInstanceId,
-    signal,
-    timeoutMs,
-    args: ["__tldr-agent-inbox-dispatch"],
-  });
-}
-
-export function runReplyObligationChild({
-  schedulerScriptPath,
-  scope,
-  daemonInstanceId,
-  signal,
-  timeoutMs,
-} = {}) {
-  return runHelmTasksJsonChild({
-    schedulerScriptPath,
-    scope,
-    daemonInstanceId,
-    signal,
-    timeoutMs,
-    args: ["__tldr-agent-reply-obligations"],
+    args: ["__tldr-agent-channel-poll"],
   });
 }

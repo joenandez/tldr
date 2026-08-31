@@ -710,13 +710,15 @@ export const emailTransport = {
             canonicalRow.thread_id,
             writerSessionId,
           );
-          const parent = ownership.ok
-            ? findParentExternalId(
-                scope,
-                canonicalRow.thread_id,
-                canonicalRow.message_id,
-              )
-            : null;
+          const parent =
+            ctx.tightbeamProviderParent ||
+            (ownership.ok
+              ? findParentExternalId(
+                  scope,
+                  canonicalRow.thread_id,
+                  canonicalRow.message_id,
+                )
+              : null);
           if (!parent?.external_id || !parent.external_thread_id) {
             throw emailNotSent();
           }
@@ -738,11 +740,13 @@ export const emailTransport = {
           });
         }
       } else if (canonicalRow.kind === "reply") {
-        const parent = findParentExternalId(
-          scope,
-          canonicalRow.thread_id,
-          canonicalRow.message_id,
-        );
+        const parent =
+          ctx.tightbeamProviderParent ||
+          findParentExternalId(
+            scope,
+            canonicalRow.thread_id,
+            canonicalRow.message_id,
+          );
         if (!parent) {
           const err = emailNotSent();
           logOutcome({
@@ -893,6 +897,103 @@ export const emailTransport = {
       };
     }
 
+    // Attachment policy is a provider-facing decision, not a canonical
+    // writer. Keep it ahead of the Tightbeam bridge so the bridge receives
+    // only usable text and attachment-only replies get their established
+    // resend-as-text remediation instead of a retry/dead-letter loop.
+    let attachmentNotice = null;
+    if (
+      attachmentCount > 0 &&
+      typeof externalMessageId === "string" &&
+      typeof externalThreadId === "string"
+    ) {
+      attachmentNotice = await sendAttachmentNotice({
+        state: hasUsableText ? "attachment_ignored" : "attachment_only",
+        externalMessageId,
+        externalThreadId,
+        config: brokerAuthorized
+          ? null
+          : await resolveTransportConfig({
+              explicit: ctx.emailConfig,
+              resolver: ctx.resolveAgentMailConfig,
+            }),
+        owner: verifiedOwnerEmail,
+        brokerAuthorized,
+        invokeBroker:
+          ctx[BROKER_OUTBOUND_REQUEST_CONTEXT] ?? requestAegisOutbound,
+      });
+      if (!hasUsableText) {
+        return {
+          canonicalRow: null,
+          dispatchResult: null,
+          attachment_only: true,
+          attachment_count: attachmentCount,
+          attachment_notice: {
+            external_id: attachmentNotice.messageId,
+            external_thread_id: attachmentNotice.threadId,
+          },
+        };
+      }
+    }
+
+    // Tightbeam is the canonical inbound writer once the email bridge is
+    // configured. Keep every hostile-envelope decision above this branch so
+    // untrusted provider input reaches neither substrate, and bind the
+    // provider thread before constructing any local message record.
+    if (!ctx.tightbeamInbound) {
+      // The email bridge is the sole production canonical writer. Do not let
+      // a missing bridge revive the retired local inbox/dispatch substrate.
+      return {
+        canonicalRow: null,
+        dispatchResult: null,
+        recovery_required: true,
+        reason: "tightbeam_bridge_required",
+      };
+    }
+
+    if (ctx.tightbeamInbound) {
+      if (
+        typeof externalMessageId !== "string" ||
+        typeof externalThreadId !== "string" ||
+        !hasUsableText
+      ) {
+        return {
+          canonicalRow: null,
+          dispatchResult: null,
+          recovery_required: true,
+          reason: "inbound_payload_incomplete",
+        };
+      }
+      const binding =
+        await ctx.tightbeamInbound.findThreadBinding(externalThreadId);
+      if (!binding) {
+        return {
+          canonicalRow: null,
+          dispatchResult: null,
+          recovery_required: true,
+          reason: "thread_recovery_required",
+        };
+      }
+      const published = await ctx.tightbeamInbound.publishInboundEmail({
+        binding,
+        provider_message_id: externalMessageId,
+        body: text,
+      });
+      if (published?.ok !== true) {
+        return {
+          canonicalRow: null,
+          dispatchResult: null,
+          recovery_required: true,
+          reason: published?.code || "tightbeam_publish_failed",
+        };
+      }
+      return {
+        canonicalRow: null,
+        dispatchResult: null,
+        tightbeam_message_id: published.message_id,
+      };
+    }
+
     scope = resolveScopeForExternalThread({
       fallbackScope: scope,
       externalThreadId,
@@ -973,43 +1074,6 @@ export const emailTransport = {
       };
     }
     const kind = "reply";
-    let attachmentNotice = null;
-    if (attachmentCount > 0) {
-      attachmentNotice = await sendAttachmentNotice({
-        state: hasUsableText ? "attachment_ignored" : "attachment_only",
-        externalMessageId,
-        externalThreadId,
-        config: brokerAuthorized
-          ? null
-          : await resolveTransportConfig({
-              explicit: ctx.emailConfig,
-              resolver: ctx.resolveAgentMailConfig,
-            }),
-        owner: verifiedOwnerEmail,
-        brokerAuthorized,
-        invokeBroker:
-          ctx[BROKER_OUTBOUND_REQUEST_CONTEXT] ?? requestAegisOutbound,
-      });
-      if (!hasUsableText) {
-        logInboundNormalized({
-          canonicalRow: null,
-          scope,
-          durationMs: Date.now() - startedAt,
-          status: "success",
-        });
-        return {
-          canonicalRow: null,
-          dispatchResult: null,
-          attachment_only: true,
-          attachment_count: attachmentCount,
-          attachment_notice: {
-            external_id: attachmentNotice.messageId,
-            external_thread_id: attachmentNotice.threadId,
-          },
-        };
-      }
-    }
-
     const canonicalRow = {
       message_id: makeMessageId(),
       thread_id: substrateThreadId,
@@ -1306,6 +1370,7 @@ export async function pollInbox({
   messageLimit = 250,
   resolveAgentMailConfig = null,
   aegisInboundMode = null,
+  tightbeamInbound = null,
 } = {}) {
   const aegisTestOverrides = getAegisBrokerTestOverrides(exec);
   const aegisRequired =
@@ -1693,6 +1758,7 @@ export async function pollInbox({
             ? aegisTestOverrides.requestOutbound
             : null,
           [TRUSTED_OWNER_CONTEXT]: verifiedOwnerEmail,
+          ...(tightbeamInbound ? { tightbeamInbound } : {}),
         }),
         timeoutMs,
         "inbox_poll_timeout",
@@ -1937,6 +2003,7 @@ export async function reconcileInboxThread({
   configOverride = null,
   resolveAgentMailConfig = null,
   aegisInboundMode = null,
+  tightbeamInbound = null,
 } = {}) {
   if (!threadId || typeof threadId !== "string") {
     return { ok: false, error: "thread_id_required" };
@@ -2156,6 +2223,7 @@ export async function reconcileInboxThread({
           ? aegisTestOverrides.requestOutbound
           : null,
         [TRUSTED_OWNER_CONTEXT]: verifiedOwnerEmail,
+        ...(tightbeamInbound ? { tightbeamInbound } : {}),
       });
       // GH#24 — an idempotent re-observation is not a fresh write.
       if (inboundResult?.canonicalRow && !inboundResult?.idempotent)

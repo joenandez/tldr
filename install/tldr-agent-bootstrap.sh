@@ -119,8 +119,7 @@ trap cleanup EXIT HUP INT TERM
 /usr/bin/tar -xzf "$runtime_archive" --strip-components=1 -C "$stage/runtime"
 /usr/bin/tar -xzf "$source_archive" -C "$stage/tldr-agent"
 [ -x "$stage/runtime/bin/node" ] && \
-  [ -f "$stage/tldr-agent/src/starport.mjs" ] && \
-  [ -f "$stage/tldr-agent/src/tldr-agent.mjs" ] || {
+  [ -f "$stage/tldr-agent/src/starport.mjs" ] || {
   echo "tldr-agent activation: activated release incomplete" >&2
   exit 69
 }

@@ -28,6 +28,8 @@ assert.equal(
 );
 assert.equal(packageJson.publishConfig.access, "public");
 assert.equal(packageJson.publishConfig.provenance, true);
+assert.deepEqual(packageJson.os, ["darwin"]);
+assert.deepEqual(packageJson.cpu, ["arm64"]);
 assert.deepEqual(packageJson.bin, { "tldr-agent": "./bin/tldr-agent" });
 assert.equal(plugin.name, "tldr");
 assert.equal(plugin.displayName, "tldr;");
@@ -35,10 +37,7 @@ assert.equal(plugin.version, packageJson.version);
 assert.equal(marketplace.plugins[0].source.package, packageJson.name);
 assert.equal(marketplace.plugins[0].source.version, packageJson.version);
 assert.equal(activation.release, packageJson.version);
-assert.deepEqual(Object.keys(activation.architectures).sort(), [
-  "arm64",
-  "x86_64",
-]);
+assert.deepEqual(Object.keys(activation.architectures).sort(), ["arm64"]);
 
 const tracked = execFileSync("git", ["ls-files", "-z"], {
   cwd: root,

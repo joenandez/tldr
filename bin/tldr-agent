@@ -31,22 +31,5 @@ case "$operation" in
       --operation "${operation}" "$@"
     ;;
 esac
-
-tldr_agent_home=${TLDR_AGENT_HOME:-${HOME}/.tldr-agent}
-install_root="${tldr_agent_home}/install"
-runtime_node="${install_root}/runtime/bin/node"
-message_entrypoint="${install_root}/tldr-agent/src/tldr-agent.mjs"
-installed_manifest="${install_root}/activation-manifest.json"
-plugin_manifest="${plugin_root}/release/activation-manifest.json"
-if [ -x "$runtime_node" ] && [ -f "$message_entrypoint" ] && \
-   [ -f "$installed_manifest" ] && [ -f "$plugin_manifest" ]; then
-  installed_release=$(/usr/bin/plutil -extract release raw -o - "$installed_manifest" 2>/dev/null || true)
-  plugin_release=$(/usr/bin/plutil -extract release raw -o - "$plugin_manifest" 2>/dev/null || true)
-  if [ -n "$installed_release" ] && [ "$installed_release" = "$plugin_release" ]; then
-    PATH="${install_root}/runtime/bin:/usr/bin:/bin"
-    export PATH TLDR_AGENT_HOME
-    exec "$runtime_node" "$message_entrypoint" "$@"
-  fi
-fi
-printf '%s\n' '{"ok":false,"data":null,"error":{"code":"STARPORT_SETUP_REQUIRED","message":"tldr; setup is required before messaging.","retryable":false,"remediation":"Set up tldr;"}}'
-exit 69
+printf '%s\n' '{"ok":false,"data":null,"error":{"code":"STARPORT_OPERATION_UNSUPPORTED","message":"tldr; supports lifecycle operations only.","retryable":false,"remediation":"Check tldr;"}}'
+exit 2

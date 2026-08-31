@@ -1,20 +1,23 @@
 #!/usr/bin/env node
 
-// Bounded daemon child entrypoint for the tldr; product's poll and inbound-dispatch
-// phases. Exact session resume is owned directly by resume_session.mjs.
-
-// Must stay first: installs the node:sqlite ExperimentalWarning filter before
-// any module that imports node:sqlite is evaluated.
+// This private scheduler is not a messaging CLI. It only bridges the verified
+// AgentMail surface to the registered Tightbeam email route.
 import "./lib/node_sqlite_warning.mjs";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { parseArgs, output, fail } from "./lib/json_io.mjs";
+import { fail, output, parseArgs } from "./lib/json_io.mjs";
 import { resolveDaemonCommandScope } from "./lib/tldr_agent_daemon_scope.mjs";
 
-const PRIVATE_INBOX_POLL_VERB = "__tldr-agent-inbox-poll";
-const PRIVATE_INBOX_DISPATCH_VERB = "__tldr-agent-inbox-dispatch";
-const PRIVATE_REPLY_OBLIGATIONS_VERB = "__tldr-agent-reply-obligations";
+const CHANNEL_POLL_VERB = "__tldr-agent-channel-poll";
+
+export function reportOutboundFailure(outbound) {
+  if (outbound?.ok !== false || outbound.code === "claim_unavailable") return;
+  throw Object.assign(new Error("Tightbeam email delivery failed"), {
+    code: outbound.error || outbound.code || "email_delivery_failed",
+    details: outbound,
+  });
+}
 
 function withScope(scope, data = {}) {
   return {
@@ -33,63 +36,63 @@ async function assertPrivateRuntimeEnabled() {
   assertHelmHomeSafe();
 }
 
-async function pollOwnerInbox({ flags, scope }) {
-  await assertPrivateRuntimeEnabled();
-  const email = await import("./lib/transports/email.mjs");
-  const dispatchCaptured = flags["dispatch-captured"]
-    ? async ({ scope: routedScope }) => {
-        const dispatcher = await import("./lib/comms_dispatcher.mjs");
-        return dispatcher.tickDispatcher({ scope: routedScope || scope });
-      }
-    : null;
-  const result = await email.pollInbox({
+export async function pollChannel({ scope, dependencies = null }) {
+  await (
+    dependencies?.assertPrivateRuntimeEnabled || assertPrivateRuntimeEnabled
+  )();
+  const loaded = dependencies
+    ? dependencies
+    : await Promise.all([
+        import("./lib/transports/email.mjs"),
+        import("./lib/tightbeam_channel.mjs"),
+        import("./lib/tightbeam_email_adapter.mjs"),
+      ]).then(([email, channel, adapter]) => ({
+        channel: channel.createTightbeamChannel(),
+        createAdapter: adapter.createTightbeamEmailAdapter,
+        pollInbox: email.pollInbox,
+        send: email.emailTransport.send,
+      }));
+  const channel = loaded.channel;
+  const preflight = await channel.preflight();
+  if (preflight?.ok !== true) {
+    throw Object.assign(
+      new Error(preflight?.error?.remediation || "Tightbeam preflight failed"),
+      {
+        code: preflight?.error?.code || "tightbeam_preflight_failed",
+        details: {
+          remediation:
+            preflight?.error?.remediation || "Tightbeam preflight failed",
+        },
+      },
+    );
+  }
+  const outbound = await loaded
+    .createAdapter({
+      channel,
+      send: loaded.send,
+    })
+    .deliverOnce();
+  const inbound = await loaded.pollInbox({
     scope,
-    dispatch: !flags["no-dispatch"],
-    dispatchCaptured,
+    dispatch: true,
+    tightbeamInbound: {
+      findThreadBinding: channel.findThreadBinding,
+      publishInboundEmail: channel.publishInboundEmail,
+    },
   });
-  if (!result?.ok) {
-    throw Object.assign(new Error(result?.hint || "owner inbox poll failed"), {
-      code: result?.error || "inbox_poll_failed",
-      details: result || {},
-    });
+  reportOutboundFailure(outbound);
+  if (!inbound?.ok) {
+    throw Object.assign(
+      new Error(
+        inbound?.hint || outbound?.error || "Tightbeam email channel failed",
+      ),
+      {
+        code: inbound?.error || outbound?.error || "tightbeam_channel_failed",
+        details: { inbound, outbound },
+      },
+    );
   }
-  return withScope(scope, result);
-}
-
-async function dispatchOwnerInbox({ scope }) {
-  await assertPrivateRuntimeEnabled();
-  const dispatcher = await import("./lib/comms_dispatcher.mjs");
-  const result = await dispatcher.tickDispatcher({ scope });
-  if (!result?.ok) {
-    throw Object.assign(new Error(result?.error || "inbox dispatch failed"), {
-      code: "inbox_dispatch_failed",
-      details: result || {},
-    });
-  }
-  return withScope(scope, {
-    results: [{ ...result, cwd: scope.cwd, scope_id: scope.scope_id }],
-  });
-}
-
-async function processReplyObligations({ scope }) {
-  await assertPrivateRuntimeEnabled();
-  const { tickReplyObligations } = await import(
-    "./lib/reply_obligation_sla.mjs"
-  );
-  const result = await tickReplyObligations({ scope });
-  return withScope(scope, {
-    processed: result?.processed ?? 0,
-    satisfied: result?.satisfied ?? 0,
-    late_satisfied: result?.late_satisfied ?? 0,
-    alive_owner_overdue: result?.alive_owner_overdue ?? 0,
-    dead_owner_resumes_started: result?.dead_owner_resumes_started ?? 0,
-    resume_failed_no_reply: result?.resume_failed_no_reply ?? 0,
-    ack_soft_missed: result?.ack_soft_missed ?? 0,
-    ack_hard_missed_alive_owner: result?.ack_hard_missed_alive_owner ?? 0,
-    ack_hard_missed_alive_unknown_owner:
-      result?.ack_hard_missed_alive_unknown_owner ?? 0,
-    resume_failed_no_ack: result?.resume_failed_no_ack ?? 0,
-  });
+  return withScope(scope, { inbound, outbound });
 }
 
 export async function runPrivateRunner(argv = process.argv.slice(2)) {
@@ -100,32 +103,24 @@ export async function runPrivateRunner(argv = process.argv.slice(2)) {
     cwd:
       flags.scope || flags.cwd || process.env.HELM_SCOPE_CWD || process.cwd(),
   });
+  if (command !== CHANNEL_POLL_VERB) {
+    fail(
+      "private",
+      "command_removed",
+      "This command is not part of tldr;.",
+      withScope(scope),
+      pretty,
+    );
+    return 2;
+  }
   try {
-    let data = null;
-    if (command === PRIVATE_INBOX_POLL_VERB) {
-      data = await pollOwnerInbox({ flags, scope });
-    } else if (command === PRIVATE_INBOX_DISPATCH_VERB) {
-      data = await dispatchOwnerInbox({ scope });
-    } else if (command === PRIVATE_REPLY_OBLIGATIONS_VERB) {
-      data = await processReplyObligations({ scope });
-    }
-    if (!data) {
-      fail(
-        "private",
-        "command_removed",
-        "This command is not part of tldr;.",
-        withScope(scope),
-        pretty,
-      );
-      return 2;
-    }
-    output(command, true, data, [], pretty);
+    output(command, true, await pollChannel({ scope }), [], pretty);
     return 0;
   } catch (error) {
     fail(
-      command || "private",
+      command,
       error?.code || "runtime_error",
-      "tldr; private continuity failed.",
+      error?.details?.remediation || "tldr; channel bridge failed.",
       withScope(scope, error?.details || {}),
       pretty,
     );
@@ -145,3 +140,5 @@ const isMain = (() => {
   }
 })();
 if (isMain) process.exitCode = await runPrivateRunner();
+
+export const _internals = Object.freeze({ CHANNEL_POLL_VERB });

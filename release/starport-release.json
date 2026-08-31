@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "phase": "source",
-  "release": "0.1.0-rc.5",
+  "release": "1.0.0",
   "source_commit": null,
   "npm": {
     "package": "@joenandez/tldr",
-    "version": "0.1.0-rc.5",
+    "version": "1.0.0",
     "publication": {
       "status": "pending",
       "dist_integrity": null,
@@ -34,11 +34,6 @@
         "archive": "node-v22.23.2-darwin-arm64.tar.gz",
         "sha256": "61130f394c1630d211dd50aecc4353d379480f36d3ac913cd85dbba1aed585c6",
         "bytes": 50068815
-      },
-      "x86_64": {
-        "archive": "node-v22.23.2-darwin-x64.tar.gz",
-        "sha256": "58e99022c2ff89395576cc7fd4d98cea24bb68081475d5f88b801ee8729fb026",
-        "bytes": 51246936
       }
     }
   },
@@ -46,8 +41,18 @@
     "protocol_version": 2,
     "setup_schema_version": 2,
     "minimum_macos": "13.0",
-    "architectures": ["arm64", "x86_64"],
+    "architectures": ["arm64"],
     "source_commit": null
+  },
+  "tightbeam": {
+    "package": "tightbeam",
+    "version": "0.2.0",
+    "protocol": {
+      "min": "1.0",
+      "max": "1"
+    },
+    "state_schema_version": 14,
+    "required_capability": "channels.v1"
   },
   "dependencies": {
     "yaml": "2.8.3",

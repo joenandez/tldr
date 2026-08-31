@@ -15,7 +15,7 @@ import {
   requestAegisStatusSafe,
 } from "./aegis_client.mjs";
 import { sanitizeInstallerEnvironment } from "./aegis_installer_environment.mjs";
-const PACKAGE_RELEASE = "0.1.0-rc.5";
+const PACKAGE_RELEASE = "1.0.0";
 const RELEASE_MANIFEST_SCHEMA = 2;
 const BROKER_PROTOCOL_VERSION = 2;
 const SETUP_STATE_SCHEMA_VERSION = 2;
@@ -27,7 +27,7 @@ const REPOSITORY_BUILD_URL = new URL(
   "../../native/aegis-broker/build",
   import.meta.url,
 );
-const ARCHITECTURES = new Set(["arm64", "x86_64"]);
+const ARCHITECTURES = new Set(["arm64"]);
 const SHA256 = /^[a-f0-9]{64}$/;
 
 function invalid(reason) {
@@ -65,9 +65,9 @@ export function validateReleaseManifest(
     manifest.status !== "accepted" ||
     !validReleaseComponent(manifest.tldr_agent, manifest) ||
     !Array.isArray(manifest.node_runtimes) ||
-    manifest.node_runtimes.length !== 2 ||
+    manifest.node_runtimes.length !== ARCHITECTURES.size ||
     !Array.isArray(manifest.artifacts) ||
-    manifest.artifacts.length !== 2
+    manifest.artifacts.length !== ARCHITECTURES.size
   ) {
     return invalid("manifest version or release incompatible");
   }
@@ -149,7 +149,7 @@ export function selectHostArtifact(manifest, architecture = process.arch) {
   const validation = validateReleaseManifest(manifest);
   if (!validation.ok)
     throw new Error(`Aegis manifest incompatible: ${validation.error}`);
-  const normalized = architecture === "x64" ? "x86_64" : architecture;
+  const normalized = architecture;
   const artifact = manifest.artifacts.find(
     (candidate) => candidate.architecture === normalized,
   );

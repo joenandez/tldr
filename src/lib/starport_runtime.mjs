@@ -13,15 +13,15 @@ import { resolveTldrAgentScope } from "./store.mjs";
 import { installVerifiedLocalAegisPackage } from "./starport_aegis_package.mjs";
 import { createStarportOnboarding } from "./starport_onboarding.mjs";
 import { createStarportOrchestrator } from "./starport_orchestrator.mjs";
+import { createTightbeamChannel } from "./tightbeam_channel.mjs";
 
 const AEGIS_APP =
   "/Library/Application Support/Codename/Aegis/TldrAgentAegis.app";
 const AEGIS_TEAM_ID = "VVG962SM5J";
-const ARCHITECTURES = new Set(["arm64", "x86_64"]);
+const ARCHITECTURES = new Set(["arm64"]);
 
 function normalizedArchitecture(architecture = process.arch) {
-  const value = architecture === "x64" ? "x86_64" : architecture;
-  return ARCHITECTURES.has(value) ? value : null;
+  return ARCHITECTURES.has(architecture) ? architecture : null;
 }
 
 function safeJson(path) {
@@ -188,6 +188,7 @@ export async function createProductionStarportRuntime({
   onboarding = null,
   inspectComponents = null,
   installBundledAegis = null,
+  tightbeam = null,
 } = {}) {
   const home = resolve(env.TLDR_AGENT_HOME || join(userHome, ".tldr-agent"));
   env.TLDR_AGENT_HOME = home;
@@ -226,6 +227,7 @@ export async function createProductionStarportRuntime({
     cwd: session?.identity?.cwd || process.cwd(),
     tldrAgentHome: home,
   });
+  const tightbeamService = tightbeam ?? createTightbeamChannel({ home });
   const onboardingService =
     onboarding ??
     (session
@@ -233,6 +235,8 @@ export async function createProductionStarportRuntime({
           sessionId: session.sessionId,
           scope,
           home,
+          dispatchMessage: ({ body, idempotencyKey }) =>
+            tightbeamService.dispatchWelcome({ body, idempotencyKey }),
         })
       : unavailableOnboarding());
   const inspector =
@@ -248,6 +252,7 @@ export async function createProductionStarportRuntime({
     native: nativeService,
     onboarding: onboardingService,
     source: sourceAdapter,
+    tightbeam: tightbeamService,
   });
 }
 

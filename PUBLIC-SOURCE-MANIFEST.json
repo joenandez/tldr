@@ -2,39 +2,32 @@
   "schema_version": 1,
   "package": {
     "name": "@joenandez/tldr",
-    "version": "0.1.0-rc.5"
+    "version": "1.0.0"
   },
   "source": {
     "repository": "tldr-internal",
-    "commit": "b633d26214785563147ac0c49c3cfb472bd13fff"
+    "commit": "8af8dad03ef9748e86c768246a4cf06d2c1638a7"
   },
   "files": [
     {
       "path": ".claude-plugin/marketplace.json",
       "source": ".claude-plugin/marketplace.json",
-      "sha256": "86cdc28b919259592172c56a314c218ebdb34e3dabf58daedd2b3c1561ee94cd",
-      "bytes": 568,
+      "sha256": "a55d075bf33fc3177d67f722b17bca62083db0128be57163385b6a4a63613784",
+      "bytes": 563,
       "mode": "644"
     },
     {
       "path": ".claude-plugin/plugin.json",
       "source": ".claude-plugin/plugin.json",
-      "sha256": "9d548c5e0c867247cc456b749267df69465694f0131036cbc6c98494c6d9cf3e",
-      "bytes": 623,
-      "mode": "644"
-    },
-    {
-      "path": ".github/workflows/publish.yml",
-      "source": "release/public-repo/publish.yml",
-      "sha256": "f4f1f95e2fd5b04200c634f2860070fdb47dc7d47f7a16c45b6c385c64a77f93",
-      "bytes": 2357,
+      "sha256": "ba58f90334018e3543e53805f4d925887f2b819e93e996db8d640225edf1e68d",
+      "bytes": 618,
       "mode": "644"
     },
     {
       "path": "bin/tldr-agent",
       "source": "bin/tldr-agent",
-      "sha256": "6152a0b08c1accfde655745d0f5349f505932fab3292b0aba73badbb333e1878",
-      "bytes": 2179,
+      "sha256": "bed1f6061fb6260d58ea22990be5ab05ada9d7f233910eb4119c05460f34f350",
+      "bytes": 1272,
       "mode": "755"
     },
     {
@@ -159,8 +152,8 @@
     {
       "path": "install/tldr-agent-bootstrap.sh",
       "source": "install/tldr-agent-bootstrap.sh",
-      "sha256": "f5e88d6cca4035bcf23007baf4574106788cbbc8e0c35ba264c3d5b0a107bb02",
-      "bytes": 4996,
+      "sha256": "131b9666b42f427763e1c1821f1842f6ba6caa706919dd7a0e556b3775b9d4aa",
+      "bytes": 4943,
       "mode": "755"
     },
     {
@@ -173,29 +166,29 @@
     {
       "path": "package-lock.json",
       "source": "package-lock.json",
-      "sha256": "5fe331b2f8ae7c260fe2b4ceef1ab58e5429919e253d2d9ea82780dfc5fdf063",
-      "bytes": 40318,
+      "sha256": "c3b926a4710d40ebe2001798fb9410be848d68e184be635dbdc3092180bce331",
+      "bytes": 40388,
       "mode": "644"
     },
     {
       "path": "package.json",
       "source": "package.json",
-      "sha256": "11f9f7531d75dcc4295d4c2a5cf12cf85da015f81fcf63001e3a3bc90d9dc397",
-      "bytes": 13795,
+      "sha256": "79a078d38786b18a1791a29d60d20c7f10989b4e1f1c4afaeaf14cc3850d784e",
+      "bytes": 10330,
       "mode": "644"
     },
     {
       "path": "README.md",
       "source": "README.md",
-      "sha256": "c39f504b01b7c79e1d9f5ab5bdb246abfee075150ff118dc5bedc36272fa9dad",
-      "bytes": 2621,
+      "sha256": "33ef9d9d0344337ea014702cecbdbd4b2aca2a6924e8bbe14764d9ff8dc5339c",
+      "bytes": 2612,
       "mode": "644"
     },
     {
       "path": "release/activation-manifest.json",
       "source": "release/activation-manifest.json",
-      "sha256": "5bfc912baf3a873cd03c120b710446b81080ed048629f9531d0f463f17b407dc",
-      "bytes": 1807,
+      "sha256": "f3fa4b419bf52069da19384ae62110ec042eb9b479bf092f84697047d32f2c63",
+      "bytes": 1185,
       "mode": "644"
     },
     {
@@ -215,50 +208,29 @@
     {
       "path": "release/payloads/arm64/tldr-agent.tar.gz",
       "source": "release/payloads/arm64/tldr-agent.tar.gz",
-      "sha256": "70aaf4c9d30c4d586ddb01a6d83da2c0eb1b830f9d5f295cf2dedbafbbbc2fb8",
-      "bytes": 428762,
+      "sha256": "e1e6ccd8a694682fc750d6ee89d1f2897b769124fea237d204005cc137cbee8a",
+      "bytes": 367350,
       "mode": "644"
     },
     {
       "path": "release/payloads/arm64/TldrAgentAegis.pkg",
       "source": "release/payloads/arm64/TldrAgentAegis.pkg",
-      "sha256": "df7e3e7b30e99a76002c280dd5ebe5eda0f102de4f2a252534677d408099b3d7",
-      "bytes": 291640,
-      "mode": "644"
-    },
-    {
-      "path": "release/payloads/x86_64/node.tar.gz",
-      "source": "release/payloads/x86_64/node.tar.gz",
-      "sha256": "58e99022c2ff89395576cc7fd4d98cea24bb68081475d5f88b801ee8729fb026",
-      "bytes": 51246936,
-      "mode": "644"
-    },
-    {
-      "path": "release/payloads/x86_64/tldr-agent.tar.gz",
-      "source": "release/payloads/x86_64/tldr-agent.tar.gz",
-      "sha256": "70aaf4c9d30c4d586ddb01a6d83da2c0eb1b830f9d5f295cf2dedbafbbbc2fb8",
-      "bytes": 428762,
-      "mode": "644"
-    },
-    {
-      "path": "release/payloads/x86_64/TldrAgentAegis.pkg",
-      "source": "release/payloads/x86_64/TldrAgentAegis.pkg",
-      "sha256": "ef05d3069631212bc3750f73f4e9d57513986d66336422c844db4c93ca3f9d9e",
-      "bytes": 334355,
+      "sha256": "c5a6be015c87f2b71ace1c41d8f6eb1b2f2a2db7afbe97b945872b80ba729c87",
+      "bytes": 291376,
       "mode": "644"
     },
     {
       "path": "release/starport-release.json",
       "source": "release/starport-release.json",
-      "sha256": "409ce248ab3d94dc1537493c452dbc23099e34af887be3e60da2db3a19b9e10e",
-      "bytes": 1556,
+      "sha256": "80d933667a79b61fa5c29f605be6030c9450914e06738d5ae9d1418c2ec3c1ce",
+      "bytes": 1552,
       "mode": "644"
     },
     {
       "path": "scripts/verify-public-release.mjs",
       "source": "release/public-repo/verify-public-release.mjs",
-      "sha256": "560c19fec3866cc8b0dc5bf2d32d3c848151f2e2e524a501fd38a9b91c20c4af",
-      "bytes": 3850,
+      "sha256": "cea27774283f49c287f4d8f9b76007c09de3900fe878fbe74e1875011fb6a34b",
+      "bytes": 3925,
       "mode": "644"
     },
     {
@@ -271,8 +243,8 @@
     {
       "path": "skills/tldr/SKILL.md",
       "source": "skills/tldr/SKILL.md",
-      "sha256": "2467c71adf3634ddf6f81a5160741d6178dd4aeadf42c9b15793d65e88a5fb54",
-      "bytes": 8179,
+      "sha256": "29d5f617dc523706cde348b0abdf51dd5d7e81fbdc084790edf0f050dabd5503",
+      "bytes": 2395,
       "mode": "644"
     },
     {
@@ -294,41 +266,6 @@
       "source": "src/helm-daemon.mjs",
       "sha256": "695c732ec7141ac0a18a0a3b9df20148543645fc968e2ce5bb5e86a1a4891189",
       "bytes": 1648,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/adapter_session_identity.mjs",
-      "source": "src/lib/adapter_session_identity.mjs",
-      "sha256": "b48a78e6c94cae4b16163e58d572f11b2263e70f0c5d6ee239a6234c07b9dd55",
-      "bytes": 5850,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/adapters/capture.mjs",
-      "source": "src/lib/adapters/capture.mjs",
-      "sha256": "46fdeafc4ca36b7daa6525a8999de8c5c153c0aa39e5d2589ffada90808086b8",
-      "bytes": 2339,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/adapters/manifest_loader.mjs",
-      "source": "src/lib/adapters/manifest_loader.mjs",
-      "sha256": "fb8ff9925a3bb3f18c866ed5c4a36fced40ac9cc4ac7717e4ae6700b19611eb6",
-      "bytes": 12164,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/adapters/registry.mjs",
-      "source": "src/lib/adapters/registry.mjs",
-      "sha256": "13975ee9bfaa5d807606e1f5f50bb35555910f6693ddba5ac8ddfe5df626c9b0",
-      "bytes": 1079,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/adapters/template.mjs",
-      "source": "src/lib/adapters/template.mjs",
-      "sha256": "05bdc0c121e1c111f7b62fe456c158004018ad017321a4b3a7f16eed152cd073",
-      "bytes": 912,
       "mode": "644"
     },
     {
@@ -355,8 +292,8 @@
     {
       "path": "src/lib/aegis_native_distribution.mjs",
       "source": "src/lib/aegis_native_distribution.mjs",
-      "sha256": "44b803a0ab9c925876d6ebad29b61a1a0682238b58b77f9202ad90d4f903edb1",
-      "bytes": 17888,
+      "sha256": "c1a362602a3320c611b7196a91ea8ab5570cafe11ae4ab5795a6c6d4543d88b6",
+      "bytes": 17871,
       "mode": "644"
     },
     {
@@ -409,24 +346,10 @@
       "mode": "644"
     },
     {
-      "path": "src/lib/comms_dispatcher_owner_reconcile.mjs",
-      "source": "src/lib/comms_dispatcher_owner_reconcile.mjs",
-      "sha256": "b968c9550f2114545f485975df8937a3b581c6fa91d9d55c0fedda2fee5cd60a",
-      "bytes": 1527,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/comms_dispatcher.mjs",
-      "source": "src/lib/comms_dispatcher.mjs",
-      "sha256": "dbacdc56ecb3f6bdfcf0fc23a677be7aad6e0aee0e83abcc1cd011770fcb836f",
-      "bytes": 29906,
-      "mode": "644"
-    },
-    {
       "path": "src/lib/daemon_child_commands.mjs",
       "source": "src/lib/daemon_child_commands.mjs",
-      "sha256": "333664722db2875c8b279f4773cb014aaa97c506cb7a136b90ae4b3786558de7",
-      "bytes": 5196,
+      "sha256": "93c600e49c32bddf7fb8549294d4653a4a79b3cae0183e147c9e6bb6e8911858",
+      "bytes": 4503,
       "mode": "644"
     },
     {
@@ -453,8 +376,8 @@
     {
       "path": "src/lib/daemon_mail_child_phases.mjs",
       "source": "src/lib/daemon_mail_child_phases.mjs",
-      "sha256": "f11ab7ca7528d186457044ea3ddf5f6406d17d5908c778a762bc2f24bfd3b30c",
-      "bytes": 5411,
+      "sha256": "00fc8e79d115ccfd6f4e47c86c125c15cea52f143b7a4896e637d2e774997715",
+      "bytes": 2201,
       "mode": "644"
     },
     {
@@ -486,13 +409,6 @@
       "mode": "644"
     },
     {
-      "path": "src/lib/inbox_cli.mjs",
-      "source": "src/lib/inbox_cli.mjs",
-      "sha256": "7c96ec7c3a84e3cf042a4487fc7a26ffc53937559704064b207b2c9c858333c4",
-      "bytes": 7142,
-      "mode": "644"
-    },
-    {
       "path": "src/lib/json_io.mjs",
       "source": "src/lib/json_io.mjs",
       "sha256": "35d73bab47d2c1bf6b657ff88184992a5f436c5a09e94809b7f4edba2782e5af",
@@ -521,31 +437,10 @@
       "mode": "644"
     },
     {
-      "path": "src/lib/outbound_guard.mjs",
-      "source": "src/lib/outbound_guard.mjs",
-      "sha256": "a51a623bca7fcdde920b9ddd6872537c45ab207097440dac763f635a94c0626d",
-      "bytes": 1646,
-      "mode": "644"
-    },
-    {
       "path": "src/lib/process_liveness.mjs",
       "source": "src/lib/process_liveness.mjs",
       "sha256": "6a887cb1c7a22d10c5a5aaa2bd6ce417c43fb16dead7c2a9dfe48fa9fd61ad8d",
       "bytes": 3064,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/reply_obligation_resume.mjs",
-      "source": "src/lib/reply_obligation_resume.mjs",
-      "sha256": "74fee7d5e74a721bb63fff333de748a660c4559efc1ea6f722827d2992c3c89f",
-      "bytes": 9700,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/reply_obligation_sla.mjs",
-      "source": "src/lib/reply_obligation_sla.mjs",
-      "sha256": "c91461479b27a91d4f34072847b9afe9f6fdd3b820d9e9d5d165ced3ccda4c1b",
-      "bytes": 14711,
       "mode": "644"
     },
     {
@@ -626,27 +521,6 @@
       "mode": "644"
     },
     {
-      "path": "src/lib/session_inbox.mjs",
-      "source": "src/lib/session_inbox.mjs",
-      "sha256": "ee6466b7ea9a3f8a7b3f23059780b4db62f28b9a05e8e1177e333e5bcd39c681",
-      "bytes": 1019,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/session_owner_state.mjs",
-      "source": "src/lib/session_owner_state.mjs",
-      "sha256": "764e9ea0ee8c97e3e79541c882b1892bdac655cfdea78d6abd4760ad565a5588",
-      "bytes": 3896,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/session_revive.mjs",
-      "source": "src/lib/session_revive.mjs",
-      "sha256": "bfc7291063d0bf45ed5e7e5b622ef988115abc86068e3fe53573c9eacfe09f32",
-      "bytes": 2939,
-      "mode": "644"
-    },
-    {
       "path": "src/lib/starport_aegis_package.mjs",
       "source": "src/lib/starport_aegis_package.mjs",
       "sha256": "b5896a1035f74eef075153bc4e34ff240c3f3b7f632fd39dea47a6277584963c",
@@ -663,29 +537,29 @@
     {
       "path": "src/lib/starport_onboarding.mjs",
       "source": "src/lib/starport_onboarding.mjs",
-      "sha256": "b4144beb8f11c81c2a4beee77a6d1ab704a69ccdb0df143bc47bf1f2bb4e7997",
-      "bytes": 2821,
+      "sha256": "cc81c77e14b701976ad55a881d8761ea62968987ec9ed579fe512b219346eead",
+      "bytes": 2198,
       "mode": "644"
     },
     {
       "path": "src/lib/starport_orchestrator.mjs",
       "source": "src/lib/starport_orchestrator.mjs",
-      "sha256": "690509f1d075279a93731a2d6d743fb796580ceca2385bf18f90dd867dcabca4",
-      "bytes": 4395,
+      "sha256": "04b777671377a437d3a7ac106cdfd7cd9353d35da96516b510d7ac737e266c30",
+      "bytes": 6118,
       "mode": "644"
     },
     {
       "path": "src/lib/starport_release_contract.mjs",
       "source": "src/lib/starport_release_contract.mjs",
-      "sha256": "86eab319567d0adf9a7c4ac2e20f8d797eb0d71caa5ba80509fcb24f6d8b4865",
-      "bytes": 5178,
+      "sha256": "1d59f10484f33977764c8ca1e0b5095a559d52ff06cc23d76b0bbb31c6f6e0f1",
+      "bytes": 5716,
       "mode": "644"
     },
     {
       "path": "src/lib/starport_runtime.mjs",
       "source": "src/lib/starport_runtime.mjs",
-      "sha256": "b42d1509f36449a1df437538449bef500f816ec23d02cc333e4ba0f923fab000",
-      "bytes": 7796,
+      "sha256": "3f92ba1ff3df8e39c2eb169278f7fb8bd80c557e0ccfeb109ebe429e5980617d",
+      "bytes": 8056,
       "mode": "644"
     },
     {
@@ -731,13 +605,6 @@
       "mode": "644"
     },
     {
-      "path": "src/lib/substrate/email_post_send_effects.mjs",
-      "source": "src/lib/substrate/email_post_send_effects.mjs",
-      "sha256": "966f8b34d188cad143ace7888cf28417b833188c902732975d76f5a726a93cd9",
-      "bytes": 936,
-      "mode": "644"
-    },
-    {
       "path": "src/lib/substrate/events.mjs",
       "source": "src/lib/substrate/events.mjs",
       "sha256": "af8068cfb53b360a1bcf6a364cbd186ac75be2084341ea8b463fe2897d7b1b93",
@@ -745,66 +612,10 @@
       "mode": "644"
     },
     {
-      "path": "src/lib/substrate/failed_delivery_retry.mjs",
-      "source": "src/lib/substrate/failed_delivery_retry.mjs",
-      "sha256": "f178a91ec9199d3310abf20ed4ddcb19c766908aeb84dfe825671458f9e37272",
-      "bytes": 1798,
-      "mode": "644"
-    },
-    {
       "path": "src/lib/substrate/file_mutex.mjs",
       "source": "src/lib/substrate/file_mutex.mjs",
       "sha256": "01cabf13a6b3657b6c8550245a373c0e49bb7b7e3982ba2b7f3ba75b718ba9b6",
       "bytes": 5447,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/substrate/idempotency.mjs",
-      "source": "src/lib/substrate/idempotency.mjs",
-      "sha256": "e7d539d503e6603522f2ce11c88239e5b14e0e783a3a8cc7189af3536af0be16",
-      "bytes": 6096,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/substrate/identity.mjs",
-      "source": "src/lib/substrate/identity.mjs",
-      "sha256": "9df12c93ca1811ba8fa6c5cce711f934ac40036ba3d6023056f1b2c67c225f6e",
-      "bytes": 1882,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/substrate/kernel.mjs",
-      "source": "src/lib/substrate/kernel.mjs",
-      "sha256": "421ac07d0b5d1766c76e79ac938063574eb0571829ae8c57ad01e0af747158a9",
-      "bytes": 39021,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/substrate/outbound_effect_options.mjs",
-      "source": "src/lib/substrate/outbound_effect_options.mjs",
-      "sha256": "df14eebe835baef40bcbd6c675b4bd2acd97f6e8ca6fe1ebc032c362e27676e5",
-      "bytes": 1845,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/substrate/reserved_delivery.mjs",
-      "source": "src/lib/substrate/reserved_delivery.mjs",
-      "sha256": "41c8152851289d1fba64ef70989b1297dd2f158960a3ea4a086a0e663f882cf9",
-      "bytes": 2913,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/substrate/resume_handoff.mjs",
-      "source": "src/lib/substrate/resume_handoff.mjs",
-      "sha256": "03d0b5e3618bd45ea74d7af6c1805ba768e46b4b620c272cbf67b790926a832e",
-      "bytes": 9799,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/substrate/resume_session.mjs",
-      "source": "src/lib/substrate/resume_session.mjs",
-      "sha256": "fde4e38243f2dc60077668edda558593e281419e7d5a02f8ed678af5719a5f1e",
-      "bytes": 7473,
       "mode": "644"
     },
     {
@@ -822,13 +633,6 @@
       "mode": "644"
     },
     {
-      "path": "src/lib/tachyon_dispatcher.mjs",
-      "source": "src/lib/tachyon_dispatcher.mjs",
-      "sha256": "b194ea191a4f4d9124f671433891ee083d8aefbc86ab2c08b2f358b63a87879a",
-      "bytes": 4832,
-      "mode": "644"
-    },
-    {
       "path": "src/lib/tachyon_eligibility.mjs",
       "source": "src/lib/tachyon_eligibility.mjs",
       "sha256": "de3ba141d031eefc3e751ee3afc628e60a36120c7b4d95181f40c8737299a5a8",
@@ -840,13 +644,6 @@
       "source": "src/lib/tachyon_listener_delivery.mjs",
       "sha256": "a910a255256b228a141038449e6899783812c1b7a03708c301ab8f0bd7afad3c",
       "bytes": 9625,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tachyon_listener_read.mjs",
-      "source": "src/lib/tachyon_listener_read.mjs",
-      "sha256": "93febf47c22d93067383c3c82097390f896b0c8708d9205fd686a35ef258e2ad",
-      "bytes": 2925,
       "mode": "644"
     },
     {
@@ -864,24 +661,45 @@
       "mode": "644"
     },
     {
+      "path": "src/lib/tightbeam_channel_runtime.mjs",
+      "source": "src/lib/tightbeam_channel_runtime.mjs",
+      "sha256": "391e04e7146a729e28f6321125ce583654d94d1afca0c2d6d465b44c6b6cb4db",
+      "bytes": 3349,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tightbeam_channel.mjs",
+      "source": "src/lib/tightbeam_channel.mjs",
+      "sha256": "38b586896bb1a38a5998e24f6b547814ac96b688d0c971404dbe06c163ca0791",
+      "bytes": 8125,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tightbeam_email_adapter.mjs",
+      "source": "src/lib/tightbeam_email_adapter.mjs",
+      "sha256": "ccd714cdcb48b1c8a6ce46d0a5b6c2042e7056b97eb579abd7a2c42d11786097",
+      "bytes": 3976,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tightbeam_email_delivery_channel.mjs",
+      "source": "src/lib/tightbeam_email_delivery_channel.mjs",
+      "sha256": "c2caf57c365e20a539389c4bb0d42cef44ed69b3f20e00dce3c8e7839a958bcd",
+      "bytes": 9325,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tightbeam_welcome_dispatch.mjs",
+      "source": "src/lib/tightbeam_welcome_dispatch.mjs",
+      "sha256": "bb4d84bc2471b099e80fbc7cefc656f5326f0069b61a6e7e1d71e1be64a061f6",
+      "bytes": 3512,
+      "mode": "644"
+    },
+    {
       "path": "src/lib/tldr_agent_ariadne.mjs",
       "source": "src/lib/tldr_agent_ariadne.mjs",
       "sha256": "a2ba8b90172c00bec975abe972600416d7243ddcb3b672a3e38a14a4ff453c90",
       "bytes": 6644,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_beacon_cancel.mjs",
-      "source": "src/lib/tldr_agent_beacon_cancel.mjs",
-      "sha256": "a95ed40726cd51c1d4849ab2072d2c5d4879bb211fb94f046ff9442bc4d1eb8d",
-      "bytes": 2166,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_beacon_complete.mjs",
-      "source": "src/lib/tldr_agent_beacon_complete.mjs",
-      "sha256": "b27fb8ce2793a4bd362aa4dfcec6a98f990ead8a64d16784dffa98d4b2c22255",
-      "bytes": 5650,
       "mode": "644"
     },
     {
@@ -906,13 +724,6 @@
       "mode": "644"
     },
     {
-      "path": "src/lib/tldr_agent_beacon_require.mjs",
-      "source": "src/lib/tldr_agent_beacon_require.mjs",
-      "sha256": "48842b307f48ef4b8df1fd1bc27a7937cce2d54dcc459ebe13886b5366d80ba8",
-      "bytes": 5874,
-      "mode": "644"
-    },
-    {
       "path": "src/lib/tldr_agent_beacon_stop_index.mjs",
       "source": "src/lib/tldr_agent_beacon_stop_index.mjs",
       "sha256": "b715a3c8b6cd93595db198b2d3f7ac6b8b3e1967700b856f54daee2760d188d4",
@@ -924,41 +735,6 @@
       "source": "src/lib/tldr_agent_beacon_stop.mjs",
       "sha256": "2df2723d6323423e0e492bd4cd30a67d40e1d9d157821a51fedfe9348d04bea3",
       "bytes": 8574,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_cli_contract.mjs",
-      "source": "src/lib/tldr_agent_cli_contract.mjs",
-      "sha256": "f3444dd40e08e7cdbd1688cf33d4a8bd4ffc26ccf6468f5dce89fbe173b34102",
-      "bytes": 1447,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_cli_envelope.mjs",
-      "source": "src/lib/tldr_agent_cli_envelope.mjs",
-      "sha256": "2a882818b11018a7fd424290c00c67a23f41fad3add1fa7c7793a2928b20d31a",
-      "bytes": 542,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_cli.mjs",
-      "source": "src/lib/tldr_agent_cli.mjs",
-      "sha256": "1cad106057f8291f15e3c79b2e30eb350adc1c7f335c39aa20a84a4ee2de097d",
-      "bytes": 11755,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_controlled_process.mjs",
-      "source": "src/lib/tldr_agent_controlled_process.mjs",
-      "sha256": "11b3b318a96ceb131f260838d7d74122152be0d1ef40c6aae60eec6730808b00",
-      "bytes": 5756,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_daemon_foreground.mjs",
-      "source": "src/lib/tldr_agent_daemon_foreground.mjs",
-      "sha256": "fe8a8ca7cbbe246fd156825047e1489fdccd8f1aca1289828432b9ee282c5d94",
-      "bytes": 714,
       "mode": "644"
     },
     {
@@ -997,13 +773,6 @@
       "mode": "644"
     },
     {
-      "path": "src/lib/tldr_agent_diagnostic_cli.mjs",
-      "source": "src/lib/tldr_agent_diagnostic_cli.mjs",
-      "sha256": "ac7bbecdb750fe7f3a3df3f33f8dd0f2b24fcd8acde3ed1c47749c3a0e3126eb",
-      "bytes": 1054,
-      "mode": "644"
-    },
-    {
       "path": "src/lib/tldr_agent_diagnostic_schema.mjs",
       "source": "src/lib/tldr_agent_diagnostic_schema.mjs",
       "sha256": "7813808c033b162a4aca7fd3a262e7443b5ef2c09145363cc43d3c3ade6d1836",
@@ -1018,38 +787,10 @@
       "mode": "644"
     },
     {
-      "path": "src/lib/tldr_agent_exact_resume.mjs",
-      "source": "src/lib/tldr_agent_exact_resume.mjs",
-      "sha256": "1a7dcfb2a47a5c649e6ab89fb3eba37f5acaba126702fc751b2fc8348a04f22d",
-      "bytes": 2269,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_followup_cli.mjs",
-      "source": "src/lib/tldr_agent_followup_cli.mjs",
-      "sha256": "34f329c1d246304b0413fe21e01d452d405fed9c6649eaea7bb58c1b3e69e5d6",
-      "bytes": 7308,
-      "mode": "644"
-    },
-    {
       "path": "src/lib/tldr_agent_gui_session.mjs",
       "source": "src/lib/tldr_agent_gui_session.mjs",
       "sha256": "06674802e36a8f7d4d3455118232342eede476a2742430e56236fe3296d8266d",
       "bytes": 1674,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_inbound_claim.mjs",
-      "source": "src/lib/tldr_agent_inbound_claim.mjs",
-      "sha256": "480937a1a9008f7b3ec2f249c02838ddf7e28cf646af3a4727b8a641e25f79d5",
-      "bytes": 3190,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_inbound_lifecycle.mjs",
-      "source": "src/lib/tldr_agent_inbound_lifecycle.mjs",
-      "sha256": "20afb90276d25e2eee855cae8b640e97320ea399b40004346e85e8d49ec8c40c",
-      "bytes": 1361,
       "mode": "644"
     },
     {
@@ -1067,38 +808,10 @@
       "mode": "644"
     },
     {
-      "path": "src/lib/tldr_agent_message_dispatch.mjs",
-      "source": "src/lib/tldr_agent_message_dispatch.mjs",
-      "sha256": "c36aa6b099f834a5525e1257efec6154beeca263df1f22a7c07f2d7eb973a272",
-      "bytes": 2152,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_owner_cli.mjs",
-      "source": "src/lib/tldr_agent_owner_cli.mjs",
-      "sha256": "57b58e5ffe2c0c155822524e8e7eee6aa11badcd5ad43ad45a4c9bfff9c3e7ec",
-      "bytes": 3363,
-      "mode": "644"
-    },
-    {
       "path": "src/lib/tldr_agent_read_boundary.mjs",
       "source": "src/lib/tldr_agent_read_boundary.mjs",
       "sha256": "f599082b11236636017f25d05256d5fb7f302a9a92ebf266d24846be2f6c691a",
       "bytes": 543,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_reply_satisfaction.mjs",
-      "source": "src/lib/tldr_agent_reply_satisfaction.mjs",
-      "sha256": "71e071f84fd12e255c44f239c104fad6cb24836fd7e579c2dddea496438a052c",
-      "bytes": 1645,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_resume_supervisor.mjs",
-      "source": "src/lib/tldr_agent_resume_supervisor.mjs",
-      "sha256": "7fee1266ad2c60283115ac11c1b55b8d8daefb9a2d8a3a044de62faf32d8d1ef",
-      "bytes": 7778,
       "mode": "644"
     },
     {
@@ -1109,13 +822,6 @@
       "mode": "644"
     },
     {
-      "path": "src/lib/tldr_agent_runtime.mjs",
-      "source": "src/lib/tldr_agent_runtime.mjs",
-      "sha256": "6511e7cf3685806d446384b42566e024c2dc03f56f66902bbe57c71afacbcd85",
-      "bytes": 4858,
-      "mode": "644"
-    },
-    {
       "path": "src/lib/tldr_agent_source_lifecycle.mjs",
       "source": "src/lib/tldr_agent_source_lifecycle.mjs",
       "sha256": "cc425c2e757bc063028ef2cdbdd4b5cec8b7c0aebbbd65d7ea0b20fd286b687b",
@@ -1123,17 +829,10 @@
       "mode": "644"
     },
     {
-      "path": "src/lib/tldr_agent_supervised_child.mjs",
-      "source": "src/lib/tldr_agent_supervised_child.mjs",
-      "sha256": "798ce9d1242aa1af6982872911c5d4ab3b4bc2a05d0fbc60eeea90e8cfa4beca",
-      "bytes": 6228,
-      "mode": "644"
-    },
-    {
       "path": "src/lib/transports/email.mjs",
       "source": "src/lib/transports/email.mjs",
-      "sha256": "d2b24b29e1f0fe061739736e48ef0ae13bd8c863413b9c5d6c69bdec14680c06",
-      "bytes": 73743,
+      "sha256": "5ba030bb36c012e6eb21328537ea8ffc641c35aa7de35e096400591e8d27c61c",
+      "bytes": 76117,
       "mode": "644"
     },
     {
@@ -1237,16 +936,9 @@
     {
       "path": "src/tldr-agent-private-runner.mjs",
       "source": "src/tldr-agent-private-runner.mjs",
-      "sha256": "c05b80e5e0da9bacc4ec8d2b678712503e493bfa38f524c2279abff2bc954983",
-      "bytes": 4890,
+      "sha256": "43f63b0309cabbd67a140f5e969f9656e4a161e4086a06c19f69c00071b069ec",
+      "bytes": 4312,
       "mode": "644"
-    },
-    {
-      "path": "src/tldr-agent.mjs",
-      "source": "src/tldr-agent.mjs",
-      "sha256": "d57fd93a01b7f0d303467d00b61347fa94c49de6544123cba0384de6f47b410d",
-      "bytes": 2811,
-      "mode": "755"
     }
   ]
 }

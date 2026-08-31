@@ -8,7 +8,7 @@ tldr; is in active development and probably won't work.
 
 ## Requirements
 
-- macOS 13 or newer on Apple silicon or Intel
+- macOS 13 or newer on Apple silicon
 - Claude Code with plugin marketplace support
 - An AgentMail account and API key for private enrollment in the signed Aegis app
 

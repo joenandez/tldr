@@ -32,11 +32,24 @@ function sameVersion(packageJson, plugin, marketplace, release) {
   );
 }
 
+function tightbeamContractComplete(tightbeam) {
+  return Boolean(
+    tightbeam?.package === "tightbeam" &&
+      tightbeam.version === "0.2.0" &&
+      tightbeam.protocol?.min === "1.0" &&
+      tightbeam.protocol?.max === "1" &&
+      tightbeam.state_schema_version === 14 &&
+      tightbeam.required_capability === "channels.v1",
+  );
+}
+
 function sourceContractComplete({ packageJson, plugin, marketplace, release }) {
   const source = marketplace.plugins?.[0]?.source;
   return Boolean(
     packageJson.name === "@joenandez/tldr" &&
       packageJson.private === undefined &&
+      JSON.stringify(packageJson.os) === JSON.stringify(["darwin"]) &&
+      JSON.stringify(packageJson.cpu) === JSON.stringify(["arm64"]) &&
       packageJson.publishConfig?.access === "public" &&
       packageJson.publishConfig?.provenance === true &&
       packageJson.bin?.["tldr-agent"] === "./bin/tldr-agent" &&
@@ -56,12 +69,14 @@ function sourceContractComplete({ packageJson, plugin, marketplace, release }) {
       SHA256.test(release.node?.runtimes?.arm64?.sha256 ?? "") &&
       Number.isSafeInteger(release.node?.runtimes?.arm64?.bytes) &&
       release.node.runtimes.arm64.bytes > 0 &&
-      SHA256.test(release.node?.runtimes?.x86_64?.sha256 ?? "") &&
-      Number.isSafeInteger(release.node?.runtimes?.x86_64?.bytes) &&
-      release.node.runtimes.x86_64.bytes > 0 &&
+      JSON.stringify(Object.keys(release.node?.runtimes ?? {}).sort()) ===
+        JSON.stringify(["arm64"]) &&
       release.aegis?.protocol_version === 2 &&
       release.aegis?.setup_schema_version === 2 &&
       release.aegis?.minimum_macos === "13.0" &&
+      JSON.stringify(release.aegis?.architectures) ===
+        JSON.stringify(["arm64"]) &&
+      tightbeamContractComplete(release.tightbeam) &&
       release.dependencies?.yaml === "2.8.3" &&
       release.dependencies?.agentmail === "0.4.20" &&
       release.dependencies?.c8 === "10.1.3",
@@ -124,7 +139,7 @@ export function validatePublishedStarportArtifact({
   }
   if (
     acceptance?.host !== "clean-macos" ||
-    !["arm64", "x86_64"].includes(acceptance?.architecture) ||
+    acceptance?.architecture !== "arm64" ||
     acceptance?.ambient_node !== false ||
     !SEMVER.test(acceptance?.claude_code_version ?? "") ||
     JSON.stringify(acceptance?.steps) !==
