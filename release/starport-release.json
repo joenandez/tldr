@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
   "phase": "source",
-  "release": "1.0.0",
+  "release": "1.0.1",
   "source_commit": null,
   "npm": {
     "package": "@joenandez/tldr",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "publication": {
       "status": "pending",
       "dist_integrity": null,
@@ -45,14 +45,19 @@
     "source_commit": null
   },
   "tightbeam": {
-    "package": "tightbeam",
-    "version": "0.2.0",
-    "protocol": {
-      "min": "1.0",
-      "max": "1"
+    "compatibility": {
+      "protocol": {
+        "min": "1.0",
+        "max": "1"
+      },
+      "requiredCapabilities": ["channels.v1"]
     },
-    "state_schema_version": 14,
-    "required_capability": "channels.v1"
+    "qualification": {
+      "version": "0.2.0",
+      "sourceCommit": "70ef86da746e59d650d8b02109715fb32b438d5e",
+      "treeDigest": "sha256:b7d2bddbd4f2b9c8bcc449b79cf062ee653b7e0c64d5a8d50ebf9830d79d3474",
+      "tarballSha256": "18390c9a25ed95e2aac206a15168c5e27d6308e6bcc6c39ed9f356596d807675"
+    }
   },
   "dependencies": {
     "yaml": "2.8.3",

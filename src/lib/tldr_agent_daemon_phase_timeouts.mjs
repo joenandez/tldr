@@ -1,10 +1,8 @@
 export const DEFAULT_TLDR_AGENT_PHASE_TIMEOUT_MS = 5000;
 export const DEFAULT_TLDR_AGENT_CHILD_GRACE_MS = 5000;
-export const TLDR_AGENT_MAIL_PHASE_SEQUENCE = Object.freeze([
-  "inbox_poll",
-  "reply_obligation_sla",
-  "comms_dispatcher",
-]);
+// Tightbeam owns reply obligations and dispatch. The tldr; daemon retains only
+// the provider-to-channel bridge poll.
+export const TLDR_AGENT_MAIL_PHASE_SEQUENCE = Object.freeze(["inbox_poll"]);
 
 function numericTimeout(value, fallback) {
   const timeout = Number(value);

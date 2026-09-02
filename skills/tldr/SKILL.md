@@ -1,6 +1,6 @@
 ---
 name: tldr
-description: "Use tldr; to set up, check, configure, repair, or uninstall the Claude plugin. It handles signed Aegis enrollment and Tightbeam email-channel registration without exposing private identity settings."
+description: "Use tldr; to set up, check, configure, repair, or uninstall the installed plugin. It handles signed Aegis enrollment and Tightbeam email-channel registration without exposing private identity settings."
 version: 3
 ---
 
@@ -13,7 +13,7 @@ message and delivery authority.
 
 ## Lifecycle front door
 
-Run only the bundled plugin launcher:
+Run only the bundled plugin launcher. Claude Code resolves its own plugin root:
 
 ```bash
 "${CLAUDE_PLUGIN_ROOT}/bin/tldr-agent" setup --json
@@ -23,12 +23,23 @@ Run only the bundled plugin launcher:
 "${CLAUDE_PLUGIN_ROOT}/bin/tldr-agent" uninstall --json
 ```
 
+Codex resolves its own plugin root:
+
+```bash
+"${PLUGIN_ROOT}/bin/tldr-agent" setup --json
+"${PLUGIN_ROOT}/bin/tldr-agent" status --json
+"${PLUGIN_ROOT}/bin/tldr-agent" configure --json
+"${PLUGIN_ROOT}/bin/tldr-agent" repair --json
+"${PLUGIN_ROOT}/bin/tldr-agent" uninstall --json
+```
+
 Map `set up` and `Continue setting up tldr;` to `setup`; `check` and “is
 tldr; ready?” to `status`; owner or provider changes to `configure`; broken,
 unavailable, or explicit repair requests to `repair`; and removal to
 `uninstall`. Report the returned safe state and its single remediation. Do not
 probe private files, invent a second recovery path, or invoke a globally
-installed executable.
+installed executable. If the host cannot resolve its plugin root, report that
+the bundled launcher context is unavailable and stop.
 
 Setup acquires and verifies the app-owned runtime, then hands private enrollment
 to the signed Aegis app. Tell the user before Aegis opens. Email and AgentMail

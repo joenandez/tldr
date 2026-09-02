@@ -6,11 +6,12 @@ import {
   AUTHORITY,
   ENDPOINT_SESSION,
   PRINCIPAL_REF,
-  TIGHTBEAM_CONTRACT,
+  TIGHTBEAM_COMPATIBILITY,
   commandFailure,
   defaultIdentityStore,
   expectedPreflightArgs,
   inboundKey,
+  launcherUnavailable,
   productionRun,
   unavailable,
 } from "./tightbeam_channel_runtime.mjs";
@@ -20,7 +21,14 @@ export function createTightbeamChannel({
   run = productionRun,
   loadIdentity,
   saveIdentity,
-  command = process.env.TIGHTBEAM_BIN || "tightbeam",
+  command = process.env.TIGHTBEAM_BIN ||
+    join(
+      process.env.HOME ?? homedir(),
+      ".tightbeam",
+      "install",
+      "bin",
+      "tightbeam",
+    ),
   home = resolve(process.env.TLDR_AGENT_HOME || join(homedir(), ".tldr-agent")),
 } = {}) {
   const store = defaultIdentityStore(home);
@@ -34,7 +42,15 @@ export function createTightbeamChannel({
       credentials: null,
       args: expectedPreflightArgs(),
     });
-    return commandFailure(result) ? unavailable() : Object.freeze({ ok: true });
+    if (result === null) return launcherUnavailable();
+    if (result?.result?.compatible === false) {
+      return unavailable(
+        (result.result.checks ?? [])
+          .filter((check) => check?.ok === false)
+          .map((check) => check.field),
+      );
+    }
+    return result?.ok === true ? Object.freeze({ ok: true }) : result;
   }
 
   async function registerEmailChannel(route) {
@@ -306,5 +322,5 @@ export const _internals = Object.freeze({
   AUTHORITY,
   ENDPOINT_SESSION,
   PRINCIPAL_REF,
-  TIGHTBEAM_CONTRACT,
+  TIGHTBEAM_COMPATIBILITY,
 });

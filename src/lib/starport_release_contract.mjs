@@ -1,7 +1,12 @@
 import { createHash } from "node:crypto";
+import { TIGHTBEAM_COMPATIBILITY } from "./tightbeam_channel_runtime.mjs";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/;
+
+// The target-only release lane updates this explicit source contract together
+// with the runtime and release descriptor; a literal avoids a hidden pin.
+export const TIGHTBEAM_TARGET_VERSION = "0.2.0";
 
 export const STARPORT_ACCEPTANCE_STEPS = Object.freeze([
   "marketplace-add",
@@ -32,18 +37,37 @@ function sameVersion(packageJson, plugin, marketplace, release) {
   );
 }
 
-function tightbeamContractComplete(tightbeam) {
+function tightbeamContractComplete(
+  tightbeam,
+  expectedTargetVersion,
+  expectedQualification,
+) {
+  const compatibility = tightbeam?.compatibility;
+  const qualification = tightbeam?.qualification;
   return Boolean(
-    tightbeam?.package === "tightbeam" &&
-      tightbeam.version === "0.2.0" &&
-      tightbeam.protocol?.min === "1.0" &&
-      tightbeam.protocol?.max === "1" &&
-      tightbeam.state_schema_version === 14 &&
-      tightbeam.required_capability === "channels.v1",
+    compatibility?.protocol?.min === TIGHTBEAM_COMPATIBILITY.minProtocol &&
+      compatibility.protocol.max === TIGHTBEAM_COMPATIBILITY.maxProtocol &&
+      JSON.stringify(compatibility.requiredCapabilities) ===
+        JSON.stringify(TIGHTBEAM_COMPATIBILITY.requiredCapabilities) &&
+      qualification?.version === expectedTargetVersion &&
+      /^[a-f0-9]{40}$/.test(qualification.sourceCommit ?? "") &&
+      /^sha256:[a-f0-9]{64}$/.test(qualification.treeDigest ?? "") &&
+      SHA256.test(qualification.tarballSha256 ?? "") &&
+      (expectedQualification === undefined ||
+        JSON.stringify(qualification) ===
+          JSON.stringify(expectedQualification)),
   );
 }
 
-function sourceContractComplete({ packageJson, plugin, marketplace, release }) {
+function sourceContractComplete({
+  packageJson,
+  packageLock,
+  plugin,
+  marketplace,
+  release,
+  expectedTargetVersion,
+  expectedQualification,
+}) {
   const source = marketplace.plugins?.[0]?.source;
   return Boolean(
     packageJson.name === "@joenandez/tldr" &&
@@ -59,6 +83,9 @@ function sourceContractComplete({ packageJson, plugin, marketplace, release }) {
       source?.source === "npm" &&
       source.package === packageJson.name &&
       release.npm?.package === packageJson.name &&
+      (packageLock === undefined ||
+        (packageLock?.version === packageJson.version &&
+          packageLock?.packages?.[""]?.version === packageJson.version)) &&
       sameVersion(packageJson, plugin, marketplace, release) &&
       release.schema_version === 1 &&
       release.phase === "source" &&
@@ -76,7 +103,11 @@ function sourceContractComplete({ packageJson, plugin, marketplace, release }) {
       release.aegis?.minimum_macos === "13.0" &&
       JSON.stringify(release.aegis?.architectures) ===
         JSON.stringify(["arm64"]) &&
-      tightbeamContractComplete(release.tightbeam) &&
+      tightbeamContractComplete(
+        release.tightbeam,
+        expectedTargetVersion,
+        expectedQualification,
+      ) &&
       release.dependencies?.yaml === "2.8.3" &&
       release.dependencies?.agentmail === "0.4.20" &&
       release.dependencies?.c8 === "10.1.3",
@@ -100,7 +131,14 @@ function publicationComplete(release) {
 }
 
 export function validateStarportReleaseContract(input = {}) {
-  if (!sourceContractComplete(input)) refuse("source coordinates unresolved");
+  const expectedTargetVersion =
+    input.expectedTargetVersion ?? TIGHTBEAM_TARGET_VERSION;
+  if (
+    !SEMVER.test(expectedTargetVersion) ||
+    !sourceContractComplete({ ...input, expectedTargetVersion })
+  ) {
+    refuse("source coordinates unresolved");
+  }
   if (input.requirePublished === true && !publicationComplete(input.release)) {
     refuse("publication evidence unresolved");
   }

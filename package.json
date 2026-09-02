@@ -1,6 +1,6 @@
 {
   "name": "@joenandez/tldr",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "os": [
     "darwin"
   ],
@@ -200,6 +200,9 @@
     "release:public:export": "node scripts/export-public-release.mjs",
     "release:source-archive": "node scripts/build-starport-source-archive.mjs",
     "qa:aegis:candidate": "node scripts/prepare-aegis-qa-candidate.mjs",
+    "local:update": "node scripts/local-update.mjs",
+    "local:rollback": "node scripts/local-rollback.mjs",
+    "test:local-update": "node --test tests/test_local_update.mjs",
     "preflight": "scripts/preflight.sh"
   },
   "devDependencies": {

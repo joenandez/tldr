@@ -114,7 +114,19 @@ export function createTldrAgentInstallLifecycle({
       cleanupErrors.push(error);
     }
     try {
-      await launchd.unload();
+      const requestedStop = await launchd.unload();
+      const stopped =
+        typeof launchd.waitForUnloaded === "function"
+          ? await launchd.waitForUnloaded(requestedStop)
+          : requestedStop;
+      if (stopped?.loaded || stopped?.running || stopped?.previous_running) {
+        cleanupErrors.push(
+          lifecycleError(
+            "DAEMON_QUIESCE_TIMEOUT",
+            "tldr; failed daemon did not quiesce before rollback",
+          ),
+        );
+      }
     } catch (error) {
       cleanupErrors.push(error);
     }
@@ -147,9 +159,9 @@ export function createTldrAgentInstallLifecycle({
       const requestedStop = await launchd.unload();
       const stopped =
         typeof launchd.waitForUnloaded === "function"
-          ? await launchd.waitForUnloaded()
+          ? await launchd.waitForUnloaded(requestedStop)
           : requestedStop;
-      if (stopped?.loaded || stopped?.running) {
+      if (stopped?.loaded || stopped?.running || stopped?.previous_running) {
         throw lifecycleError(
           "DAEMON_QUIESCE_TIMEOUT",
           "tldr; daemon did not quiesce before update",
@@ -279,17 +291,30 @@ export function createTldrAgentLaunchdLifecycle({
     return status();
   };
   const unload = () => {
-    if (status().loaded) run(["bootout", target], [3]);
-    return status();
+    const before = status();
+    if (before.loaded) run(["bootout", target], [3]);
+    return { ...status(), previous_pid: before.pid };
   };
-  const waitForUnloaded = () => {
+  const waitForUnloaded = (requestedStop = null) => {
+    const previousPid = Number(requestedStop?.previous_pid);
+    const previousRunning = () =>
+      Number.isInteger(previousPid) &&
+      previousPid > 0 &&
+      isPidAlive(previousPid);
     const deadline = now() + quiesceTimeoutMs;
     let observed = status();
-    while ((observed.loaded || observed.running) && now() < deadline) {
+    while (
+      (observed.loaded || observed.running || previousRunning()) &&
+      now() < deadline
+    ) {
       sleepSync(25);
       observed = status();
     }
-    return observed;
+    return {
+      ...observed,
+      previous_pid: Number.isInteger(previousPid) ? previousPid : null,
+      previous_running: previousRunning(),
+    };
   };
   const load = () => {
     if (!existsSync(definitionPath)) install();
@@ -297,8 +322,14 @@ export function createTldrAgentLaunchdLifecycle({
     return status();
   };
   const reload = () => {
-    unload();
-    waitForUnloaded();
+    const requestedStop = unload();
+    const stopped = waitForUnloaded(requestedStop);
+    if (stopped.loaded || stopped.running || stopped.previous_running) {
+      throw lifecycleError(
+        "DAEMON_QUIESCE_TIMEOUT",
+        "tldr; daemon did not quiesce before reload",
+      );
+    }
     install();
     const deadline = now() + reloadTimeoutMs;
     let bootstrapped;

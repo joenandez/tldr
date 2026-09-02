@@ -129,8 +129,9 @@ fi
 /usr/bin/plutil -insert launch_source -string "${LAUNCH_SOURCE}" "${IDENTITY_TMP}"
 /usr/bin/plutil -insert session_started_at -string "${NOW}" "${IDENTITY_TMP}"
 PLUGIN_RELEASE=${CLAUDE_PLUGIN_VERSION:-unknown}
-if [ -n "${CLAUDE_PLUGIN_ROOT:-}" ] && [ -f "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json" ]; then
-  PLUGIN_RELEASE=$(/usr/bin/plutil -extract version raw -o - "${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json" 2>/dev/null || printf '%s' "${PLUGIN_RELEASE}")
+PLUGIN_INSTALL_ROOT=${PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}
+if [ -n "${PLUGIN_INSTALL_ROOT}" ] && [ -f "${PLUGIN_INSTALL_ROOT}/.claude-plugin/plugin.json" ]; then
+  PLUGIN_RELEASE=$(/usr/bin/plutil -extract version raw -o - "${PLUGIN_INSTALL_ROOT}/.claude-plugin/plugin.json" 2>/dev/null || printf '%s' "${PLUGIN_RELEASE}")
 fi
 /usr/bin/plutil -insert plugin_release -string "${PLUGIN_RELEASE}" "${IDENTITY_TMP}"
 /usr/bin/plutil -remove _tldr_agent_identity "${IDENTITY_TMP}"

@@ -2,32 +2,32 @@
   "schema_version": 1,
   "package": {
     "name": "@joenandez/tldr",
-    "version": "1.0.0"
+    "version": "1.0.1"
   },
   "source": {
     "repository": "tldr-internal",
-    "commit": "8af8dad03ef9748e86c768246a4cf06d2c1638a7"
+    "commit": "00a8e84ed4a3b7d62e18658872ec568a56511a84"
   },
   "files": [
     {
       "path": ".claude-plugin/marketplace.json",
       "source": ".claude-plugin/marketplace.json",
-      "sha256": "a55d075bf33fc3177d67f722b17bca62083db0128be57163385b6a4a63613784",
+      "sha256": "1808b58ba037ddb5bf70db7ccf77d0a11e3feb699c2da1f394d7dd91e10a73e6",
       "bytes": 563,
       "mode": "644"
     },
     {
       "path": ".claude-plugin/plugin.json",
       "source": ".claude-plugin/plugin.json",
-      "sha256": "ba58f90334018e3543e53805f4d925887f2b819e93e996db8d640225edf1e68d",
+      "sha256": "c70a39f6a330c3700ceeead93380de3740352ba39a1c212c973024a305392502",
       "bytes": 618,
       "mode": "644"
     },
     {
       "path": "bin/tldr-agent",
       "source": "bin/tldr-agent",
-      "sha256": "bed1f6061fb6260d58ea22990be5ab05ada9d7f233910eb4119c05460f34f350",
-      "bytes": 1272,
+      "sha256": "8fa20e19c36483fb550f9dccb6df804f68449f1a96184b44059904e5a3c6b070",
+      "bytes": 1864,
       "mode": "755"
     },
     {
@@ -117,8 +117,8 @@
     {
       "path": "hooks/tldr-agent-capture-session-identity.sh",
       "source": "hooks/tldr-agent-capture-session-identity.sh",
-      "sha256": "7c65c94ae69b8b47b66f0719d3a505b1c3481cd74f26e73f26584867781f911e",
-      "bytes": 6312,
+      "sha256": "7bb5dbaaf763d78d0621aafd5edb0ad95152f2226406ac77b1118a5247bb54e4",
+      "bytes": 6373,
       "mode": "755"
     },
     {
@@ -166,15 +166,15 @@
     {
       "path": "package-lock.json",
       "source": "package-lock.json",
-      "sha256": "c3b926a4710d40ebe2001798fb9410be848d68e184be635dbdc3092180bce331",
+      "sha256": "1abfdeea48f3086c9f48351072d9e220aa46b180027401a44723e530bdd8ae31",
       "bytes": 40388,
       "mode": "644"
     },
     {
       "path": "package.json",
       "source": "package.json",
-      "sha256": "79a078d38786b18a1791a29d60d20c7f10989b4e1f1c4afaeaf14cc3850d784e",
-      "bytes": 10330,
+      "sha256": "69cdf93b8bab03c61f0828b3d436002660ae07ae3b40831beebd76118a498d12",
+      "bytes": 10508,
       "mode": "644"
     },
     {
@@ -187,7 +187,7 @@
     {
       "path": "release/activation-manifest.json",
       "source": "release/activation-manifest.json",
-      "sha256": "f3fa4b419bf52069da19384ae62110ec042eb9b479bf092f84697047d32f2c63",
+      "sha256": "482809ef2bfea622ab7fdaf391a51f5d2068940687641a2636acbf706f76cf5c",
       "bytes": 1185,
       "mode": "644"
     },
@@ -208,22 +208,22 @@
     {
       "path": "release/payloads/arm64/tldr-agent.tar.gz",
       "source": "release/payloads/arm64/tldr-agent.tar.gz",
-      "sha256": "e1e6ccd8a694682fc750d6ee89d1f2897b769124fea237d204005cc137cbee8a",
-      "bytes": 367350,
+      "sha256": "6e53dbe587d2e6d8ddc0ebd63a43c7c10b77dc82df44d8d2ab8d48a5de981ed1",
+      "bytes": 369860,
       "mode": "644"
     },
     {
       "path": "release/payloads/arm64/TldrAgentAegis.pkg",
       "source": "release/payloads/arm64/TldrAgentAegis.pkg",
-      "sha256": "c5a6be015c87f2b71ace1c41d8f6eb1b2f2a2db7afbe97b945872b80ba729c87",
-      "bytes": 291376,
+      "sha256": "84dfad75baaa6ef2908fa46ff6dd0d976be4e72dd78b4d67a9536e7cddcb6dab",
+      "bytes": 291409,
       "mode": "644"
     },
     {
       "path": "release/starport-release.json",
       "source": "release/starport-release.json",
-      "sha256": "80d933667a79b61fa5c29f605be6030c9450914e06738d5ae9d1418c2ec3c1ce",
-      "bytes": 1552,
+      "sha256": "b911a9b9bca46b713087032b011f2fbefef555591f6ece46ed32bbb71c0916d8",
+      "bytes": 1817,
       "mode": "644"
     },
     {
@@ -243,8 +243,8 @@
     {
       "path": "skills/tldr/SKILL.md",
       "source": "skills/tldr/SKILL.md",
-      "sha256": "29d5f617dc523706cde348b0abdf51dd5d7e81fbdc084790edf0f050dabd5503",
-      "bytes": 2395,
+      "sha256": "e3c28a3394583ea21eefa15fcf8b525de31e558ff70016aa034dcf0e39fda53e",
+      "bytes": 2835,
       "mode": "644"
     },
     {
@@ -292,7 +292,7 @@
     {
       "path": "src/lib/aegis_native_distribution.mjs",
       "source": "src/lib/aegis_native_distribution.mjs",
-      "sha256": "c1a362602a3320c611b7196a91ea8ab5570cafe11ae4ab5795a6c6d4543d88b6",
+      "sha256": "25344c14d9be69590155397c5d243b6d4832778a8d678cc026c6de2c2d2dcd14",
       "bytes": 17871,
       "mode": "644"
     },
@@ -523,8 +523,8 @@
     {
       "path": "src/lib/starport_aegis_package.mjs",
       "source": "src/lib/starport_aegis_package.mjs",
-      "sha256": "b5896a1035f74eef075153bc4e34ff240c3f3b7f632fd39dea47a6277584963c",
-      "bytes": 2623,
+      "sha256": "4df597a693d975d760c41cf2db331587da850bb66d3da23706284ab8cc80c30c",
+      "bytes": 3947,
       "mode": "644"
     },
     {
@@ -551,15 +551,15 @@
     {
       "path": "src/lib/starport_release_contract.mjs",
       "source": "src/lib/starport_release_contract.mjs",
-      "sha256": "1d59f10484f33977764c8ca1e0b5095a559d52ff06cc23d76b0bbb31c6f6e0f1",
-      "bytes": 5716,
+      "sha256": "193ff85c9de234f6921cbebda7dade8d3076d7dd93cc43a9708f89087e800a4a",
+      "bytes": 7061,
       "mode": "644"
     },
     {
       "path": "src/lib/starport_runtime.mjs",
       "source": "src/lib/starport_runtime.mjs",
-      "sha256": "3f92ba1ff3df8e39c2eb169278f7fb8bd80c557e0ccfeb109ebe429e5980617d",
-      "bytes": 8056,
+      "sha256": "4856d4efedae25dabac263e598f55d1f4856b3c44d91177afc0ad308868bf647",
+      "bytes": 10856,
       "mode": "644"
     },
     {
@@ -663,15 +663,15 @@
     {
       "path": "src/lib/tightbeam_channel_runtime.mjs",
       "source": "src/lib/tightbeam_channel_runtime.mjs",
-      "sha256": "391e04e7146a729e28f6321125ce583654d94d1afca0c2d6d465b44c6b6cb4db",
-      "bytes": 3349,
+      "sha256": "2d8530bdae5ebc4a166dcaab8d77266ef05bb1b9911edf18697d0ddd0c0ec17d",
+      "bytes": 4772,
       "mode": "644"
     },
     {
       "path": "src/lib/tightbeam_channel.mjs",
       "source": "src/lib/tightbeam_channel.mjs",
-      "sha256": "38b586896bb1a38a5998e24f6b547814ac96b688d0c971404dbe06c163ca0791",
-      "bytes": 8125,
+      "sha256": "6ea3c90b8cf15afd86fcf775e52d194382d6cc26503f2f46bf18fdce01670e49",
+      "bytes": 8529,
       "mode": "644"
     },
     {
@@ -740,8 +740,8 @@
     {
       "path": "src/lib/tldr_agent_daemon_health.mjs",
       "source": "src/lib/tldr_agent_daemon_health.mjs",
-      "sha256": "b11c4d3b6bb3294dbd4a495bfa27af28219ac421ab0b20334a9420382f01f0e6",
-      "bytes": 12339,
+      "sha256": "3e90fc04bf2583764b8e4dc42a75302cd7cdd981029fa776ad40cb61cfe22af4",
+      "bytes": 12369,
       "mode": "644"
     },
     {
@@ -761,8 +761,8 @@
     {
       "path": "src/lib/tldr_agent_daemon_phase_timeouts.mjs",
       "source": "src/lib/tldr_agent_daemon_phase_timeouts.mjs",
-      "sha256": "d8ffe1d2cdc447f2ba52e7067c53b88cd4ed202ffb6a5cb7fbc568d2681fa33b",
-      "bytes": 1572,
+      "sha256": "47fc199723107b9daad74338fc1746fd62f4bd9fd5366da82251f063b49beb04",
+      "bytes": 1639,
       "mode": "644"
     },
     {
@@ -796,15 +796,15 @@
     {
       "path": "src/lib/tldr_agent_launchd_definition.mjs",
       "source": "src/lib/tldr_agent_launchd_definition.mjs",
-      "sha256": "692f31e6770bda152779cc25b5a2ba8d6cd3cd0a0c3f73eb47f595bad92cfc73",
-      "bytes": 1209,
+      "sha256": "4f854f64b0ddf5761c1a4a17ebd4b58199b74aba17ecdf6afb011fcefcff5c97",
+      "bytes": 1325,
       "mode": "644"
     },
     {
       "path": "src/lib/tldr_agent_launchd_lifecycle.mjs",
       "source": "src/lib/tldr_agent_launchd_lifecycle.mjs",
-      "sha256": "e7aa6f5e20123f6de46be61d836b7c1c0e5fdbf33f25f09c525838962706efde",
-      "bytes": 10537,
+      "sha256": "b875b3fc0ce8f0dedc8a782a39a7dcc57e971d7c80176d337827abd74358a72c",
+      "bytes": 11727,
       "mode": "644"
     },
     {
@@ -817,15 +817,15 @@
     {
       "path": "src/lib/tldr_agent_runtime_identity.mjs",
       "source": "src/lib/tldr_agent_runtime_identity.mjs",
-      "sha256": "8c14142e1f8a711c8489f7d844af87fec6873824efca48761458999c59a240dd",
-      "bytes": 3588,
+      "sha256": "1fe9cbe4f434972e8938937f784b76b63ed7744eab8d3ea373febf5564059729",
+      "bytes": 3947,
       "mode": "644"
     },
     {
       "path": "src/lib/tldr_agent_source_lifecycle.mjs",
       "source": "src/lib/tldr_agent_source_lifecycle.mjs",
-      "sha256": "cc425c2e757bc063028ef2cdbdd4b5cec8b7c0aebbbd65d7ea0b20fd286b687b",
-      "bytes": 3019,
+      "sha256": "33da40b4c8c830d0bb69eec6fbc2819afe97d77ccaa3c2b5c951a4d17fbfd74b",
+      "bytes": 3405,
       "mode": "644"
     },
     {
@@ -929,8 +929,8 @@
     {
       "path": "src/starport.mjs",
       "source": "src/starport.mjs",
-      "sha256": "9c8a7d567f2412aca52e3be379e25168fbda0d840bdbaedf08d0f28fb9cc4194",
-      "bytes": 3237,
+      "sha256": "5513faaf1ab04299792768d76b74ef45644480787f1c4ef51c5f784f33eaa191",
+      "bytes": 3599,
       "mode": "644"
     },
     {

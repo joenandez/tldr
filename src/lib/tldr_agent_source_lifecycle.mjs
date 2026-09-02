@@ -24,23 +24,30 @@ const ACTIVATABLE_AEGIS_STATES = new Set([
   "unconfigured",
 ]);
 
-export function requiresFreshPollForAegisStatus(status) {
+export function requiresFreshPollForAegisStatus(status, override = null) {
   if (!ACTIVATABLE_AEGIS_STATES.has(status)) {
     throw new Error(
       `tldr; Aegis state ${JSON.stringify(status)} blocks source activation`,
     );
   }
+  if (typeof override === "boolean") return override;
   return status === "ready";
 }
 
 export function productionPlist(
   schedulerScriptPath,
-  { home = getHelmHome() } = {},
+  {
+    home = getHelmHome(),
+    nodePath = process.execPath,
+    tightbeamBin = process.env.TIGHTBEAM_BIN || null,
+  } = {},
 ) {
   return renderTldrAgentProductionPlist({
     schedulerScriptPath,
     home,
     statusPort: TLDR_AGENT_STATUS_PORT,
+    nodePath,
+    tightbeamBin,
   });
 }
 
@@ -50,6 +57,9 @@ export function productionPlist(
 export function createTldrAgentSourceInstallLifecycle({
   home = getHelmHome(),
   pluginHooksOwned = false,
+  nodePath = process.execPath,
+  tightbeamBin = process.env.TIGHTBEAM_BIN || null,
+  requireFreshPoll = null,
   releaseOwnership = null,
   cleanupOwnedState = null,
   readAegisStatus = requestAegisStatusSafe,
@@ -61,7 +71,8 @@ export function createTldrAgentSourceInstallLifecycle({
   );
   const launchd = createTldrAgentLaunchdLifecycle({
     schedulerScriptPath,
-    renderDefinition: (path) => productionPlist(path, { home }),
+    renderDefinition: (path) =>
+      productionPlist(path, { home, nodePath, tightbeamBin }),
   });
   return createTldrAgentInstallLifecycle({
     runtimes: pluginHooksOwned ? [] : undefined,
@@ -77,7 +88,10 @@ export function createTldrAgentSourceInstallLifecycle({
         observeDaemon,
         home,
         port: TLDR_AGENT_STATUS_PORT,
-        requirePollFresh: requiresFreshPollForAegisStatus(aegisStatus),
+        requirePollFresh: requiresFreshPollForAegisStatus(
+          aegisStatus,
+          requireFreshPoll,
+        ),
         expectedRuntimeIdentity: {
           ...tldrAgentSourceIdentity(),
           schema_version: readTldrAgentRuntimeSchemaVersion(home),

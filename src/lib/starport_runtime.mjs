@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
@@ -57,11 +57,63 @@ function matchesFileRecord(root, record) {
   }
 }
 
+function matchesLocalFileRecord(root, record) {
+  if (
+    !root ||
+    !record ||
+    typeof record.path !== "string" ||
+    record.path.startsWith("/") ||
+    record.path.split("/").includes("..")
+  ) {
+    return false;
+  }
+  try {
+    const path = resolve(root, record.path);
+    if (!path.startsWith(`${resolve(root)}/`) || !statSync(path).isFile()) {
+      return false;
+    }
+    return (
+      createHash("sha256").update(readFileSync(path)).digest("hex") ===
+      record.sha256
+    );
+  } catch {
+    return false;
+  }
+}
+
 function releaseMatchesSource(sourceRoot, release) {
   const packageJson = safeJson(join(sourceRoot, "package.json"));
   return (
     packageJson?.name === "@joenandez/tldr" && packageJson.version === release
   );
+}
+
+function localSnapshotMatches(root) {
+  const manifest = safeJson(join(root || "", "LOCAL-SNAPSHOT-MANIFEST.json"));
+  if (!manifest?.sourceDigest || !Array.isArray(manifest.files)) return false;
+  try {
+    for (const entry of manifest.files) {
+      if (!matchesLocalFileRecord(root, entry)) return false;
+    }
+    const listed = manifest.files.map((entry) => entry.path).sort();
+    const walk = (path, base = path) =>
+      readdirSync(path, { withFileTypes: true })
+        .flatMap((entry) => {
+          const child = join(path, entry.name);
+          return entry.isDirectory()
+            ? walk(child, base)
+            : entry.isFile() || entry.isSymbolicLink()
+              ? [child.slice(base.length + 1)]
+              : [];
+        })
+        .sort();
+    const actual = walk(root).filter(
+      (path) => path !== "LOCAL-SNAPSHOT-MANIFEST.json",
+    );
+    return JSON.stringify(actual) === JSON.stringify(listed);
+  } catch {
+    return false;
+  }
 }
 
 function resolveSetupSession(env = process.env) {
@@ -148,6 +200,40 @@ export function createStarportComponentInspector({
   };
 }
 
+export function createLocalSnapshotComponentInspector({
+  home,
+  sourceRoot,
+  pluginRoot,
+  aegisApp = AEGIS_APP,
+  launchAgent = join(
+    homedir(),
+    "Library",
+    "LaunchAgents",
+    "ai.tldr-agent.daemon.plist",
+  ),
+  nodeExecutable = process.execPath,
+} = {}) {
+  return async () => {
+    const snapshotHealthy =
+      localSnapshotMatches(pluginRoot) &&
+      resolve(pluginRoot) === resolve(sourceRoot);
+    const installedNode = join(home, "install", "runtime", "bin", "node");
+    const nativeInstalled = existsSync(aegisApp);
+    return Object.freeze({
+      plugin: snapshotHealthy,
+      runtime:
+        snapshotHealthy && resolve(nodeExecutable) === resolve(installedNode),
+      hooks: snapshotHealthy,
+      service:
+        snapshotHealthy &&
+        existsSync(launchAgent) &&
+        readFileSync(launchAgent, "utf8").includes(resolve(sourceRoot)),
+      aegis: nativeInstalled,
+      outbound: nativeInstalled,
+    });
+  };
+}
+
 function bundledAegisInstaller({
   home,
   architecture = normalizedArchitecture(),
@@ -196,7 +282,10 @@ export async function createProductionStarportRuntime({
   env.HELM_CANONICAL_SQLITE = "1";
   delete env.HELM_CANONICAL_SQLITE_KILL_SWITCH;
 
-  const sourceRoot = join(home, "install", "tldr-agent");
+  const localSnapshotRoot = env.TLDR_AGENT_LOCAL_SNAPSHOT_ROOT
+    ? resolve(env.TLDR_AGENT_LOCAL_SNAPSHOT_ROOT)
+    : null;
+  const sourceRoot = localSnapshotRoot || join(home, "install", "tldr-agent");
   const activationManifest = join(home, "install", "activation-manifest.json");
   const activePluginRoot = env.TLDR_AGENT_PLUGIN_ROOT
     ? resolve(env.TLDR_AGENT_PLUGIN_ROOT)
@@ -241,12 +330,18 @@ export async function createProductionStarportRuntime({
       : unavailableOnboarding());
   const inspector =
     inspectComponents ??
-    createStarportComponentInspector({
-      home,
-      sourceRoot,
-      pluginRoot: activePluginRoot,
-      activationManifest,
-    });
+    (localSnapshotRoot
+      ? createLocalSnapshotComponentInspector({
+          home,
+          sourceRoot,
+          pluginRoot: activePluginRoot,
+        })
+      : createStarportComponentInspector({
+          home,
+          sourceRoot,
+          pluginRoot: activePluginRoot,
+          activationManifest,
+        }));
   return createStarportOrchestrator({
     inspectComponents: inspector,
     native: nativeService,

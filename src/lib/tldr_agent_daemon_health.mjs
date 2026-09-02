@@ -317,7 +317,7 @@ export async function waitForTldrAgentHealth({
   observeDaemon = null,
   home,
   port,
-  timeoutMs = 5_000,
+  timeoutMs = 30_000,
   requirePollFresh = true,
   fetchImpl = globalThis.fetch,
   now = Date.now,
@@ -356,6 +356,7 @@ export async function waitForTldrAgentHealth({
             "package_version",
             "source_revision",
             "source_dirty",
+            "source_digest",
             "schema_version",
           ].every(
             (key) => body?.runtime?.[key] === expectedRuntimeIdentity?.[key],

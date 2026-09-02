@@ -59,10 +59,21 @@ export function readTldrAgentRuntimeIdentity({
   const packagedRevision = FULL_REVISION.test(metadata.gitHead || "")
     ? metadata.gitHead
     : null;
+  const localSnapshot = metadata.tldrLocalSnapshot || null;
   return {
     package_version: String(metadata.version || "unknown"),
-    source_revision: checkout?.revision || packagedRevision,
-    source_dirty: checkout ? checkout.dirty : null,
+    source_revision: localSnapshot
+      ? packagedRevision
+      : checkout?.revision || packagedRevision,
+    source_dirty: localSnapshot
+      ? Boolean(localSnapshot.sourceDirty)
+      : checkout
+        ? checkout.dirty
+        : null,
+    source_digest:
+      typeof localSnapshot?.sourceDigest === "string"
+        ? localSnapshot.sourceDigest
+        : null,
     schema_version:
       Number.isInteger(Number(schemaVersion)) && schemaVersion !== null
         ? Number(schemaVersion)
@@ -79,6 +90,7 @@ export function tldrAgentSourceIdentity() {
       package_version: identity.package_version,
       source_revision: identity.source_revision,
       source_dirty: identity.source_dirty,
+      source_digest: identity.source_digest,
     });
   }
   return cachedSourceIdentity;

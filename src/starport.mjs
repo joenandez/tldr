@@ -32,6 +32,18 @@ function unsupported() {
 }
 
 function unavailable(error) {
+  if (error?.code === "STARPORT_INSTALLATION_INACCESSIBLE") {
+    return Object.freeze({
+      ok: false,
+      data: null,
+      error: Object.freeze({
+        code: "STARPORT_INSTALLATION_INACCESSIBLE",
+        message: "tldr; secure setup is installed but unavailable.",
+        retryable: false,
+        remediation: "Reinstall tldr;",
+      }),
+    });
+  }
   if (error?.code === "STARPORT_INSTALLATION_INCOMPLETE") {
     return Object.freeze({
       ok: false,

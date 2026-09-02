@@ -6,20 +6,27 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export const TIGHTBEAM_CONTRACT = Object.freeze({
-  package: "tightbeam",
-  version: "0.2.0",
+export const TIGHTBEAM_COMPATIBILITY = Object.freeze({
   minProtocol: "1.0",
   maxProtocol: "1",
-  schemaVersion: 14,
-  capability: "channels.v1",
+  requiredCapabilities: Object.freeze(["channels.v1"]),
 });
 export const AUTHORITY = "tldr-email";
 export const APPLICATION = "tldr-email";
 export const PRINCIPAL_REF = "verified-owner";
 export const ENDPOINT_SESSION = "tldr-email-owner";
 
-export function unavailable() {
+export function unavailable(failedDimensions = []) {
+  const dimensions = [
+    ...new Set(
+      failedDimensions.filter(
+        (dimension) => typeof dimension === "string" && dimension.length > 0,
+      ),
+    ),
+  ];
+  const diagnostic = dimensions.length
+    ? ` Failed compatibility dimension${dimensions.length === 1 ? "" : "s"}: ${dimensions.join(", ")}.`
+    : "";
   return Object.freeze({
     ok: false,
     data: null,
@@ -27,8 +34,21 @@ export function unavailable() {
       code: "TIGHTBEAM_INCOMPATIBLE",
       message: "tldr; requires a compatible Tightbeam installation.",
       retryable: false,
+      remediation: `Install Tightbeam with supported protocol ${TIGHTBEAM_COMPATIBILITY.minProtocol} through ${TIGHTBEAM_COMPATIBILITY.maxProtocol} and required capability ${TIGHTBEAM_COMPATIBILITY.requiredCapabilities.join(", ")}, then rerun setup.${diagnostic}`,
+    }),
+  });
+}
+
+export function launcherUnavailable() {
+  return Object.freeze({
+    ok: false,
+    data: null,
+    error: Object.freeze({
+      code: "TIGHTBEAM_UNAVAILABLE",
+      message: "tldr; cannot launch the activated Tightbeam installation.",
+      retryable: false,
       remediation:
-        "Install Tightbeam 0.2.0 with channels.v1 support, then rerun setup.",
+        "Activate Tightbeam, approve plugin trust, or start a new session, then rerun setup.",
     }),
   });
 }
@@ -87,7 +107,28 @@ export async function productionRun({ command, admin, credentials, args }) {
     ) {
       return { ok: true, result: { already_registered: true } };
     }
-    return null;
+    if (typeof error?.stdout === "string" && error.stdout.trim().length > 0) {
+      try {
+        return JSON.parse(error.stdout);
+      } catch {
+        // A launched command that emits malformed data is not a missing launcher.
+      }
+    }
+    if (
+      ["ENOENT", "EACCES", "EPERM"].includes(error?.code) ||
+      (error?.errno && !error?.stdout)
+    )
+      return null;
+    return {
+      ok: false,
+      data: null,
+      error: {
+        code: "TIGHTBEAM_OPERATION_FAILED",
+        message:
+          "tldr; launched Tightbeam but it did not return a valid response.",
+        retryable: false,
+      },
+    };
   }
 }
 
@@ -95,15 +136,13 @@ export function expectedPreflightArgs() {
   return [
     "preflight",
     "--min-protocol",
-    TIGHTBEAM_CONTRACT.minProtocol,
+    TIGHTBEAM_COMPATIBILITY.minProtocol,
     "--max-protocol",
-    TIGHTBEAM_CONTRACT.maxProtocol,
-    "--expect-schema",
-    String(TIGHTBEAM_CONTRACT.schemaVersion),
-    "--require-capability",
-    TIGHTBEAM_CONTRACT.capability,
-    "--expect-daemon-version",
-    TIGHTBEAM_CONTRACT.version,
+    TIGHTBEAM_COMPATIBILITY.maxProtocol,
+    ...TIGHTBEAM_COMPATIBILITY.requiredCapabilities.flatMap((capability) => [
+      "--require-capability",
+      capability,
+    ]),
   ];
 }
 

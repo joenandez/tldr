@@ -19,18 +19,48 @@ function lifecycleError(code, message, cause) {
 }
 
 function inspectInstalledAegis({ artifact }) {
-  if (!existsSync(FIXED_AEGIS_APP)) return false;
+  const appVisible = existsSync(FIXED_AEGIS_APP);
   const receipt = spawnSync(
     "/usr/sbin/pkgutil",
     ["--pkg-info", artifact.package_identifier],
     { stdio: "ignore", timeout: 5_000 },
   );
-  if (receipt.status !== 0) return false;
   const service = spawnSync("/bin/launchctl", ["print", BROKER_LABEL], {
     stdio: "ignore",
     timeout: 5_000,
   });
-  return service.status === 0;
+  return Object.freeze({
+    app_visible: appVisible,
+    receipt_present: receipt.status === 0,
+    broker_ready: service.status === 0,
+  });
+}
+
+function installationSignals(value) {
+  if (value && typeof value === "object") {
+    return Object.freeze({
+      app_visible: value.app_visible === true,
+      receipt_present: value.receipt_present === true,
+      broker_ready: value.broker_ready === true,
+    });
+  }
+  const healthy = value === true;
+  return Object.freeze({
+    app_visible: healthy,
+    receipt_present: healthy,
+    broker_ready: healthy,
+  });
+}
+
+function logInstallationVisibility(signals) {
+  const fields = Object.entries(signals)
+    .map(([name, value]) => `${name}=${value}`)
+    .join(" ");
+  spawnSync(
+    "/usr/bin/logger",
+    ["-t", "TldrAgentAegis", `[🪳 TEMP AEGIS_INSTALL_VISIBILITY] ${fields}`],
+    { stdio: "ignore", timeout: 5_000 },
+  );
 }
 
 export async function installVerifiedLocalAegisPackage({
@@ -39,6 +69,7 @@ export async function installVerifiedLocalAegisPackage({
   verifyPackage = verifyPackageWithMacOS,
   installPackage = openInstallerAndWait,
   inspectInstallation = inspectInstalledAegis,
+  logInstallation = logInstallationVisibility,
 } = {}) {
   if (
     typeof packagePath !== "string" ||
@@ -66,17 +97,33 @@ export async function installVerifiedLocalAegisPackage({
       error,
     );
   }
+  let signals;
   try {
     requireGuiSession();
     await installPackage(packagePath, artifact);
-    if (!(await inspectInstallation({ artifact }))) {
-      throw new Error("Aegis installer closed without a healthy installation");
-    }
+    signals = installationSignals(await inspectInstallation({ artifact }));
   } catch (error) {
     throw lifecycleError(
       "STARPORT_INSTALLATION_INCOMPLETE",
       "tldr; installation did not complete.",
       error,
+    );
+  }
+  try {
+    logInstallation(signals);
+  } catch {
+    // Diagnostics must never alter the verified installation result.
+  }
+  if (!signals.app_visible && signals.receipt_present && signals.broker_ready) {
+    throw lifecycleError(
+      "STARPORT_INSTALLATION_INACCESSIBLE",
+      "tldr; secure setup is installed but unavailable.",
+    );
+  }
+  if (!Object.values(signals).every(Boolean)) {
+    throw lifecycleError(
+      "STARPORT_INSTALLATION_INCOMPLETE",
+      "tldr; installation did not complete.",
     );
   }
   return Object.freeze({

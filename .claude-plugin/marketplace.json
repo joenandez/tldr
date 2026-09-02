@@ -12,7 +12,7 @@
       "source": {
         "source": "npm",
         "package": "@joenandez/tldr",
-        "version": "1.0.0"
+        "version": "1.0.1"
       },
       "category": "productivity",
       "homepage": "https://github.com/joenandez/tldr#readme"
