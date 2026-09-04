@@ -120,6 +120,7 @@ const ERROR_CODES = new Set([
   "obligation_persist_failed",
   "owner_not_ready",
   "provider_send_failed",
+  "reply_parent_unauthorized",
   "sender_not_authorized",
   "stale_listener",
   "status_port_bind_failed",

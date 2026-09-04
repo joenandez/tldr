@@ -11,7 +11,12 @@ import {
 } from "./identity_state.mjs";
 import { resolveTldrAgentScope } from "./store.mjs";
 import { installVerifiedLocalAegisPackage } from "./starport_aegis_package.mjs";
-import { createStarportOnboarding } from "./starport_onboarding.mjs";
+import {
+  _internals as onboardingInternals,
+  createSessionWelcomeDispatcher,
+  createStarportOnboarding,
+  createWelcomeEvidenceStore,
+} from "./starport_onboarding.mjs";
 import { createStarportOrchestrator } from "./starport_orchestrator.mjs";
 import { createTightbeamChannel } from "./tightbeam_channel.mjs";
 
@@ -131,10 +136,16 @@ function resolveSetupSession(env = process.env) {
 function unavailableOnboarding() {
   return Object.freeze({
     async status() {
-      return Object.freeze({ status: "failed" });
+      return Object.freeze({
+        status: "failed",
+        remediation: onboardingInternals.SAFE_WELCOME_REMEDIATION,
+      });
     },
     async send() {
-      return Object.freeze({ status: "failed" });
+      return Object.freeze({
+        status: "failed",
+        remediation: onboardingInternals.SAFE_WELCOME_REMEDIATION,
+      });
     },
   });
 }
@@ -317,6 +328,17 @@ export async function createProductionStarportRuntime({
     tldrAgentHome: home,
   });
   const tightbeamService = tightbeam ?? createTightbeamChannel({ home });
+  const welcomeEvidence = createWelcomeEvidenceStore({
+    home,
+    findProviderAcceptanceByDelivery:
+      tightbeamService.findProviderAcceptanceByDelivery,
+  });
+  const dispatchWelcome = createSessionWelcomeDispatcher({
+    command: env.TIGHTBEAM_BIN,
+    stateRoot: env.TIGHTBEAM_STATE_ROOT,
+    session,
+    evidence: welcomeEvidence,
+  });
   const onboardingService =
     onboarding ??
     (session
@@ -324,8 +346,8 @@ export async function createProductionStarportRuntime({
           sessionId: session.sessionId,
           scope,
           home,
-          dispatchMessage: ({ body, idempotencyKey }) =>
-            tightbeamService.dispatchWelcome({ body, idempotencyKey }),
+          readEvidence: () => welcomeEvidence.read(),
+          dispatchMessage: dispatchWelcome,
         })
       : unavailableOnboarding());
   const inspector =
@@ -357,4 +379,5 @@ export const _internals = Object.freeze({
   normalizedArchitecture,
   resolveSetupSession,
   shouldInstallBundledAegis,
+  unavailableOnboarding,
 });

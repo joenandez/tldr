@@ -4,14 +4,14 @@
  * and the module namespace is on the repository's side of the rename, not the
  * owner's. Everything it renders says `tldr;`.
  *
- * There is no `heading` any more. The envelope flows the subject into the TLDR
- * block, so a heading would be the subject said twice. Callers may still pass
- * one; it is ignored.
+ * There is no `heading` configuration. Normal conversation starts with the
+ * agent's body; system messages derive their restrained heading from the
+ * subject. Callers may still pass the legacy field; it is ignored.
  */
 
 import { AGENTS, render } from "./render/email.mjs";
 
-const TEMPLATE_VERSION = "tldr-email-v3";
+const TEMPLATE_VERSION = "tldr-email-v4";
 
 const VALID_STATES = new Set([
   "conversation",
@@ -24,12 +24,11 @@ const VALID_STATES = new Set([
   "key_replaced",
 ]);
 
-/* The word in the system bar, per state.
+/* The small system identity label, per state.
  *
  * A system message is tldr; speaking as itself, and it must not be mistakable
- * for the agent: without the bar, "Can't resume: your reply arrived, the session
- * did not" reads like the agent writing about itself. A conversation is the
- * agent speaking and deliberately carries no bar.
+ * for the agent. The distinction is typographic rather than a branded banner.
+ * A conversation is the agent speaking and carries no system label.
  *
  * The vocabulary is four words wide on purpose. A fifth is a distinction the
  * owner has to learn. SECURITY is separate from ERROR because a message about
@@ -103,16 +102,16 @@ stopped.`,
    * substituted by the broker at send time. */
   verification_code: {
     action: "now",
-    subject: "Verify: your code is __TLDR_CODE__",
+    subject: "Verify your email address",
     code: "__TLDR_CODE__",
-    body: `It finishes connecting this address, and it is single-use and expires in
-10 minutes.
+    body: `This code finishes connecting your email address. It is single-use and
+expires in 10 minutes.
 
 > **CAUTION**: Enter it only in the setup app on your own Mac. An agent will
 > never ask you for it, and neither will anyone else.
 
 If you didn't ask for this code, you can ignore this email.`,
-    reply: "Enter the code in the setup app. Replying here does nothing.",
+    reply: "Replying here does nothing.",
     notice: "Sent because this address was entered during setup.",
   },
   owner_changed: {
@@ -148,6 +147,13 @@ function oneLine(value) {
   return cleanText(value).replace(/\s+/g, " ");
 }
 
+function debugSetupTemplateDrift(stage, data) {
+  if (process.env.TLDR_AGENT_DEBUG_TEMPLATE_DRIFT !== "1") return;
+  process.stderr.write(
+    `[🪳 TEMP SETUP_EMAIL_TEMPLATE_DRIFT] ${stage} ${JSON.stringify(data)}\n`,
+  );
+}
+
 /* The body is the one field that passes through untouched apart from line
  * endings. It is Markdown an agent wrote, and reflowing it is what destroys a
  * fenced block or a table. */
@@ -181,45 +187,50 @@ export function renderTldrAgentEmail(input = {}) {
     agent,
   });
 
+  debugSetupTemplateDrift("render", {
+    state,
+    template_version: TEMPLATE_VERSION,
+    system: SYSTEM_KIND[state] ?? null,
+  });
+
   return { ...rendered, template_version: TEMPLATE_VERSION };
 }
 
 const WELCOME_SCENARIOS = Object.freeze([
   "Email me a summary when you finish.",
-  "Send me the decision and anything still blocked.",
   "Email me if you need input before continuing.",
-  "Reply to this email with a follow-up for this Claude Code session.",
+  "Send me the decision and anything still blocked.",
 ]);
 
 export function renderTldrAgentWelcomeEmail({
   scenarios = WELCOME_SCENARIOS,
 } = {}) {
-  const body = `# tldr; is ready
+  const body = `tldr; is ready on this Mac.
 
-Claude Code can email you from this Mac. When you reply, tldr; returns your
-message to the Claude Code session that sent the email.
+This message came from the agent session that completed setup. Reply with anything—“hello” is enough—and the same session will answer to confirm that replies work.
 
-## A few things to try
+## Try tldr;
 
 ${scenarios.map((scenario) => `- “${oneLine(scenario)}”`).join("\n")}
 
-You can also ask Claude to “Check tldr;,” “Configure tldr;,” “Repair
-tldr;,” or “Uninstall tldr;.”`;
-  const subject = "Ready: tldr; is connected";
+You don’t need to reply; setup is complete.`;
+  const subject = "tldr; is ready — reply to test it";
   const rendered = renderTldrAgentEmail({
     state: "conversation",
     subject,
     body,
-    replyInstruction: "Reply to continue this Claude Code session.",
-    securityNotice: "tldr; sent this message only to its confirmed owner.",
-    statePanel: [["tldr;", "Ready"]],
-    agent: AGENTS.claude,
+    replyInstruction:
+      "Reply to continue the agent session that sent this email.",
+    securityNotice:
+      "Only replies from your verified address reach the session.",
   });
   return Object.freeze({
     subject,
     body,
-    replyInstruction: "Reply to continue this Claude Code session.",
-    securityNotice: "tldr; sent this message only to its confirmed owner.",
+    replyInstruction:
+      "Reply to continue the agent session that sent this email.",
+    securityNotice:
+      "Only replies from your verified address reach the session.",
     ...rendered,
   });
 }

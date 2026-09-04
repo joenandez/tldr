@@ -2,8 +2,8 @@
  *
  * The plain-text twin is an equal document, not a stripped fallback. It comes
  * off the same tree as the HTML, so the two cannot say different things, and it
- * keeps the structure the HTML carries: the TLDR block, banded boxes, ledger
- * tables, a numbered gutter.
+ * keeps the structure the HTML carries: headings, callouts, ledger tables and
+ * list gutters. Product metadata stays below a conventional signature divider.
  *
  * Fixed 72-column measure. Wider wraps badly in the clients that show plain text
  * at all, and narrower breaks the tables.

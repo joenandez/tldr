@@ -118,6 +118,18 @@ export function createStarportOrchestrator({
         "Check tldr;",
       );
     }
+    if (
+      welcome?.status === "failed" &&
+      typeof welcome.remediation === "string" &&
+      welcome.remediation.length > 0
+    ) {
+      return success(
+        "welcome-delivery-failed",
+        COMPONENTS,
+        "start-supported-session",
+        welcome.remediation,
+      );
+    }
     return success(
       "ready-unverified",
       COMPONENTS,
@@ -131,18 +143,9 @@ export function createStarportOrchestrator({
     if (preflightFailure) return preflightFailure;
     const before = await status();
     if (before.data.state === "onboarding-verified") {
-      const configured = await native.configure?.();
-      if (configured?.ok === false) return configured;
-      const after = await status();
-      const registrationFailure = await registerReadyEmailChannel(
-        after.data.state,
-      );
-      return registrationFailure ?? after;
+      return before;
     }
-    if (
-      before.data.state === "ready-unverified" ||
-      before.data.state === "onboarding-reconciling"
-    ) {
+    if (before.data.state === "ready-unverified") {
       const registrationFailure = await registerReadyEmailChannel(
         before.data.state,
       );
@@ -150,13 +153,13 @@ export function createStarportOrchestrator({
       await onboarding.send?.();
       return status();
     }
+    if (before.data.state === "onboarding-reconciling") return before;
+    if (before.data.state === "welcome-delivery-failed") return before;
+    const registrationFailure = await registerEmailChannel();
+    if (registrationFailure) return registrationFailure;
     await source?.install?.();
     await native.setup?.();
     const after = await status();
-    const registrationFailure = await registerReadyEmailChannel(
-      after.data.state,
-    );
-    if (registrationFailure) return registrationFailure;
     if (after.data.state === "ready-unverified") {
       await onboarding.send?.();
       return status();
@@ -179,13 +182,11 @@ export function createStarportOrchestrator({
     async repair() {
       const preflightFailure = await preflightTightbeam();
       if (preflightFailure) return preflightFailure;
+      const registrationFailure = await registerEmailChannel();
+      if (registrationFailure) return registrationFailure;
       await source?.install?.();
       await native.repair?.();
-      const after = await status();
-      const registrationFailure = await registerReadyEmailChannel(
-        after.data.state,
-      );
-      return registrationFailure ?? after;
+      return status();
     },
     async uninstall() {
       const result = await native.uninstall?.();

@@ -1,124 +1,15 @@
-import "./node_sqlite_warning.mjs";
-import { chmodSync, existsSync } from "node:fs";
-import { chmod, mkdir } from "node:fs/promises";
-import { join } from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { expectedPreflightArgs } from "./tightbeam_channel_runtime.mjs";
+import {
+  lookupProviderMap,
+  lookupProviderReplyBinding,
+  recordBoundProviderAcceptance,
+  recordInboundProviderAcceptance as persistInboundProviderAcceptance,
+  recordProviderMap,
+  recordProviderReplyBinding,
+} from "./tightbeam_email_provider_map.mjs";
 
-function providerMapPath(home) {
-  return join(home, "tightbeam-email-provider-map.sqlite");
-}
-
-function secureProviderMapFiles(path) {
-  for (const candidate of [path, `${path}-wal`, `${path}-shm`]) {
-    if (existsSync(candidate)) chmodSync(candidate, 0o600);
-  }
-}
-
-function openProviderMap(home, { readOnly = false } = {}) {
-  const path = providerMapPath(home);
-  if (readOnly && !existsSync(path)) return null;
-  const db = new DatabaseSync(path, readOnly ? { readOnly: true } : {});
-  try {
-    if (!readOnly) {
-      secureProviderMapFiles(path);
-      db.exec("PRAGMA journal_mode = WAL; PRAGMA busy_timeout = 5000;");
-      secureProviderMapFiles(path);
-      db.exec(`CREATE TABLE IF NOT EXISTS provider_acceptance (
-        delivery_id TEXT PRIMARY KEY,
-        message_id TEXT NOT NULL,
-        conversation_id TEXT NOT NULL,
-        route_id TEXT NOT NULL,
-        origin_endpoint_id TEXT,
-        origin_session_id TEXT,
-        external_id TEXT NOT NULL,
-        external_thread_id TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS provider_acceptance_conversation
-        ON provider_acceptance(conversation_id);
-      CREATE INDEX IF NOT EXISTS provider_acceptance_thread
-        ON provider_acceptance(external_thread_id);`);
-      const columns = new Set(
-        db
-          .prepare("PRAGMA table_info(provider_acceptance)")
-          .all()
-          .map(({ name }) => name),
-      );
-      if (!columns.has("origin_endpoint_id")) {
-        db.exec(
-          "ALTER TABLE provider_acceptance ADD COLUMN origin_endpoint_id TEXT",
-        );
-      }
-      if (!columns.has("origin_session_id")) {
-        db.exec(
-          "ALTER TABLE provider_acceptance ADD COLUMN origin_session_id TEXT",
-        );
-      }
-    }
-    return db;
-  } catch (error) {
-    db.close();
-    throw error;
-  }
-}
-
-async function recordProviderMap(home, record) {
-  await mkdir(home, { recursive: true, mode: 0o700 });
-  const db = openProviderMap(home);
-  try {
-    db.exec("BEGIN IMMEDIATE");
-    db.prepare(
-      `INSERT INTO provider_acceptance (
-      delivery_id, message_id, conversation_id, route_id, external_id, external_thread_id
-      , origin_endpoint_id, origin_session_id
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(delivery_id) DO UPDATE SET
-      message_id = excluded.message_id,
-      conversation_id = excluded.conversation_id,
-      route_id = excluded.route_id,
-      origin_endpoint_id = excluded.origin_endpoint_id,
-      origin_session_id = excluded.origin_session_id,
-      external_id = excluded.external_id,
-      external_thread_id = excluded.external_thread_id`,
-    ).run(
-      record.delivery_id,
-      record.message_id,
-      record.conversation_id,
-      record.route_id,
-      record.external_id,
-      record.external_thread_id,
-      record.origin_endpoint_id,
-      record.origin_session_id,
-    );
-    db.exec("COMMIT");
-  } catch (error) {
-    try {
-      db.exec("ROLLBACK");
-    } catch {}
-    throw error;
-  } finally {
-    db.close();
-  }
-  await chmod(providerMapPath(home), 0o600);
-  secureProviderMapFiles(providerMapPath(home));
-}
-
-function lookupProviderMap(home, column, value) {
-  const db = openProviderMap(home, { readOnly: true });
-  if (!db) return null;
-  try {
-    const latest =
-      column === "delivery_id" ? "" : " ORDER BY rowid DESC LIMIT 1";
-    return (
-      db
-        .prepare(
-          `SELECT delivery_id, message_id, conversation_id, route_id, origin_endpoint_id, origin_session_id, external_id, external_thread_id FROM provider_acceptance WHERE ${column} = ?${latest}`,
-        )
-        .get(value) || null
-    );
-  } finally {
-    db.close();
-  }
-}
+const REPLY_BINDING_CAPABILITY = "channels.reply-binding.v1";
+const LISTENER_CAPABILITY = "listener.v1";
 
 export function createTightbeamEmailDeliveryChannel({
   execute,
@@ -129,6 +20,25 @@ export function createTightbeamEmailDeliveryChannel({
   principalRef,
   endpointSession,
 } = {}) {
+  let capabilities;
+
+  async function deliveryCapabilities() {
+    if (capabilities) return capabilities;
+    const supported = async (capability) => {
+      const result = await execute({
+        admin: true,
+        credentials: null,
+        args: [...expectedPreflightArgs(), "--require-capability", capability],
+      });
+      return result?.ok === true && result.result?.compatible === true;
+    };
+    capabilities = Object.freeze({
+      replyBinding: await supported(REPLY_BINDING_CAPABILITY),
+      listener: await supported(LISTENER_CAPABILITY),
+    });
+    return capabilities;
+  }
+
   async function registeredEmailIdentity() {
     const identity = await readIdentity();
     if (!identity) return null;
@@ -192,6 +102,7 @@ export function createTightbeamEmailDeliveryChannel({
     if (commandFailure(routes) || !route) {
       return Object.freeze({ ok: false, code: "route_unavailable" });
     }
+    const capability = await deliveryCapabilities();
     const claimed = await execute({
       admin: false,
       credentials: emailIdentity.identity,
@@ -202,6 +113,7 @@ export function createTightbeamEmailDeliveryChannel({
         emailIdentity.endpoint.endpoint_id,
         "--channel-route",
         route.route_id,
+        ...(capability.replyBinding ? ["--accept-reply-binding"] : []),
       ],
     });
     return commandFailure(claimed)
@@ -235,6 +147,10 @@ export function createTightbeamEmailDeliveryChannel({
   }
 
   async function recordProviderAcceptance({ delivery, provider }) {
+    if (typeof delivery?.reply_binding === "string") {
+      await recordBoundProviderAcceptance(home, delivery, provider);
+      return;
+    }
     const identity = await readIdentity();
     if (!identity) throw new Error("Tightbeam email identity is unavailable");
     const routes = await execute({
@@ -265,26 +181,67 @@ export function createTightbeamEmailDeliveryChannel({
     });
   }
 
+  async function recordReplyBinding({ delivery }) {
+    if (
+      typeof delivery?.delivery_id !== "string" ||
+      typeof delivery.reply_binding !== "string" ||
+      delivery.reply_binding.length === 0
+    ) {
+      throw new TypeError(
+        "Tightbeam claimed delivery has no opaque reply binding",
+      );
+    }
+    await recordProviderReplyBinding(home, delivery);
+  }
+
+  async function recordInboundProviderAcceptance({
+    binding,
+    provider_message_id: providerMessageId,
+    provider_thread_id: providerThreadId,
+    tightbeam_message_id: tightbeamMessageId,
+    tightbeam_conversation_id: tightbeamConversationId,
+  }) {
+    if (
+      typeof binding?.reply_binding !== "string" ||
+      binding.reply_binding.length === 0 ||
+      typeof providerMessageId !== "string" ||
+      providerMessageId.length === 0 ||
+      (providerThreadId !== undefined &&
+        (typeof providerThreadId !== "string" ||
+          providerThreadId.length === 0)) ||
+      typeof tightbeamMessageId !== "string" ||
+      tightbeamMessageId.length === 0
+    ) {
+      throw new TypeError("Accepted inbound provider identity is incomplete");
+    }
+    await persistInboundProviderAcceptance(home, {
+      reply_binding: binding.reply_binding,
+      provider_message_id: providerMessageId,
+      provider_thread_id: providerThreadId,
+      tightbeam_message_id: tightbeamMessageId,
+      tightbeam_conversation_id: tightbeamConversationId,
+    });
+  }
+
   async function findThreadBinding(externalThreadId) {
-    const record = lookupProviderMap(
+    const bound = lookupProviderReplyBinding(
       home,
       "external_thread_id",
       externalThreadId,
     );
-    return record
-      ? {
-          conversation_id: record.conversation_id,
-          route_id: record.route_id,
-          ...(typeof record.origin_endpoint_id === "string"
-            ? { origin_endpoint_id: record.origin_endpoint_id }
-            : {}),
-          ...(typeof record.origin_session_id === "string"
-            ? { origin_session_id: record.origin_session_id }
-            : {}),
-        }
-      : null;
+    return bound ? { reply_binding: bound.reply_binding } : null;
   }
   async function findProviderAcceptanceByDelivery(deliveryId) {
+    const bound = lookupProviderReplyBinding(home, "delivery_id", deliveryId);
+    if (
+      typeof bound?.external_id === "string" &&
+      typeof bound.external_thread_id === "string"
+    ) {
+      return {
+        external_id: bound.external_id,
+        external_thread_id: bound.external_thread_id,
+      };
+    }
     const record = lookupProviderMap(home, "delivery_id", deliveryId);
     return record
       ? {
@@ -294,6 +251,21 @@ export function createTightbeamEmailDeliveryChannel({
       : null;
   }
   async function findProviderThreadByConversation(conversationId) {
+    const bound = lookupProviderReplyBinding(
+      home,
+      "conversation_id",
+      conversationId,
+    );
+    if (
+      typeof bound?.external_id === "string" &&
+      typeof bound.external_thread_id === "string"
+    ) {
+      return {
+        external_id:
+          bound.current_reply_parent_external_id || bound.external_id,
+        external_thread_id: bound.external_thread_id,
+      };
+    }
     const record = lookupProviderMap(home, "conversation_id", conversationId);
     return record
       ? {
@@ -305,7 +277,9 @@ export function createTightbeamEmailDeliveryChannel({
   return Object.freeze({
     claimEmailDelivery,
     completeEmailDelivery,
+    recordReplyBinding,
     recordProviderAcceptance,
+    recordInboundProviderAcceptance,
     findProviderAcceptanceByDelivery,
     findThreadBinding,
     findProviderThreadByConversation,

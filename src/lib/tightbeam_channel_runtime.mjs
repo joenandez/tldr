@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
+import { writeTextAtomic } from "./durable_file_io.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -13,8 +13,10 @@ export const TIGHTBEAM_COMPATIBILITY = Object.freeze({
 });
 export const AUTHORITY = "tldr-email";
 export const APPLICATION = "tldr-email";
+export const WELCOME_APPLICATION = "tldr-welcome";
 export const PRINCIPAL_REF = "verified-owner";
 export const ENDPOINT_SESSION = "tldr-email-owner";
+export const WELCOME_ENDPOINT_SESSION = "tldr-welcome-sender";
 
 export function unavailable(failedDimensions = []) {
   const dimensions = [
@@ -53,6 +55,32 @@ export function launcherUnavailable() {
   });
 }
 
+export function identityInvalid() {
+  return Object.freeze({
+    ok: false,
+    data: null,
+    error: Object.freeze({
+      code: "TLDR_EMAIL_IDENTITY_INVALID",
+      message: "tldr; cannot trust its local Tightbeam email identity.",
+      retryable: false,
+      remediation: "Repair tldr;",
+    }),
+  });
+}
+
+function invalidIdentityState() {
+  const error = new Error("TLDR Tightbeam email identity is invalid");
+  error.code = "TLDR_EMAIL_IDENTITY_INVALID";
+  return error;
+}
+
+export function debugIdentity(stage, data = {}) {
+  if (process.env.TLDR_AGENT_DEBUG_TIGHTBEAM_IDENTITY !== "1") return;
+  process.stderr.write(
+    `[🪳 TEMP tldr-enrollment-state-recovery] ${stage} ${JSON.stringify(data)}\n`,
+  );
+}
+
 export function commandFailure(result) {
   return result?.ok !== true || result?.result?.compatible === false;
 }
@@ -61,20 +89,41 @@ export function defaultIdentityStore(home) {
   const path = join(home, "tightbeam-email-identity.json");
   return Object.freeze({
     async load() {
+      let metadata;
       try {
-        const identity = JSON.parse(await readFile(path, "utf8"));
-        return typeof identity?.app_id === "string" &&
-          typeof identity?.app_secret === "string"
-          ? identity
-          : null;
-      } catch {
-        return null;
+        metadata = await lstat(path);
+      } catch (error) {
+        if (error?.code === "ENOENT") return null;
+        throw invalidIdentityState();
       }
+      if (!metadata.isFile()) throw invalidIdentityState();
+      let identity;
+      try {
+        identity = JSON.parse(await readFile(path, "utf8"));
+      } catch {
+        throw invalidIdentityState();
+      }
+      if (
+        typeof identity?.app_id !== "string" ||
+        identity.app_id.length === 0 ||
+        typeof identity?.app_secret !== "string" ||
+        identity.app_secret.length === 0 ||
+        (identity.welcome !== undefined &&
+          (typeof identity.welcome?.app_id !== "string" ||
+            identity.welcome.app_id.length === 0 ||
+            typeof identity.welcome?.app_secret !== "string" ||
+            identity.welcome.app_secret.length === 0))
+      ) {
+        throw invalidIdentityState();
+      }
+      return identity;
     },
     async save(identity) {
       await mkdir(home, { recursive: true, mode: 0o700 });
-      await writeFile(path, `${JSON.stringify(identity)}\n`, { mode: 0o600 });
-      await chmod(path, 0o600);
+      writeTextAtomic(path, `${JSON.stringify(identity)}\n`, {
+        durable: true,
+        mode: 0o600,
+      });
     },
   });
 }
@@ -97,6 +146,23 @@ export async function productionRun({ command, admin, credentials, args }) {
     return JSON.parse(stdout);
   } catch (error) {
     const output = `${error?.stderr ?? ""}\n${error?.stdout ?? ""}`;
+    const registeredApplication = args[2];
+    if (
+      admin &&
+      args[0] === "app" &&
+      args[1] === "register" &&
+      [APPLICATION, WELCOME_APPLICATION].includes(registeredApplication) &&
+      /identity_conflict/.test(output) &&
+      output.includes(
+        `application named "${registeredApplication}" is already registered`,
+      )
+    ) {
+      return {
+        ok: false,
+        data: null,
+        error: { code: "TIGHTBEAM_APPLICATION_IDENTITY_CONFLICT" },
+      };
+    }
     if (
       admin &&
       args[0] === "authority" &&
@@ -144,11 +210,4 @@ export function expectedPreflightArgs() {
       capability,
     ]),
   ];
-}
-
-export function inboundKey(providerMessageId) {
-  return `tldr-email-inbound-${createHash("sha256")
-    .update(providerMessageId)
-    .digest("hex")
-    .slice(0, 32)}`;
 }

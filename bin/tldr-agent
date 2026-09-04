@@ -30,8 +30,9 @@ case "$operation" in
       tldr_agent_home=${TLDR_AGENT_HOME:-${HOME}/.tldr-agent}
       runtime_node="${tldr_agent_home}/install/runtime/bin/node"
       if [ ! -x "${runtime_node}" ]; then
-        printf '%s\n' '{"ok":false,"data":null,"error":{"code":"LOCAL_SNAPSHOT_UNAVAILABLE","message":"tldr; local snapshot runtime is unavailable.","retryable":false,"remediation":"Run npm run local:update."}}'
-        exit 1
+        exec "${plugin_root}/install/tldr-agent-bootstrap.sh" \
+          --package-root "${plugin_root}" \
+          --operation "${operation}" "$@"
       fi
       exec "${runtime_node}" "${plugin_root}/src/lib/local_snapshot_front_door.mjs" \
         "${operation}" "$@"

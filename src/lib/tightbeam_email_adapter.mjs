@@ -44,6 +44,7 @@ export function createTightbeamEmailAdapter({ channel, send } = {}) {
   async function deliverOnce({
     sendContext = {},
     afterProviderAccepted,
+    afterReplyBindingRecorded,
     afterProviderRecorded,
   } = {}) {
     const claimed = await channel.claimEmailDelivery();
@@ -51,6 +52,15 @@ export function createTightbeamEmailAdapter({ channel, send } = {}) {
     const claim = claimed.claim;
     if (!validClaim(claim)) {
       throw new TypeError("Tightbeam returned an invalid claimed delivery");
+    }
+    if (typeof claim.reply_binding === "string") {
+      if (typeof channel.recordReplyBinding !== "function") {
+        throw new TypeError(
+          "Tightbeam email channel cannot persist reply bindings",
+        );
+      }
+      await channel.recordReplyBinding({ delivery: claim });
+      await afterReplyBindingRecorded?.({ claim });
     }
     const accepted = await channel.findProviderAcceptanceByDelivery?.(
       claim.delivery_id,

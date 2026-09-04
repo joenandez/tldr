@@ -3,7 +3,6 @@ export const PROTOCOL_VERSION = 2;
  * beside the 32 KiB text body, and JSON escaping expands the markup. Mirrors
  * native/aegis-core/src/protocol.rs. */
 export const MAX_FRAME_BYTES = 524_288;
-
 const TRUSTED_TRANSACTION = [
   ["authorization", "string", 4096, true],
   ["transaction_id", "string", 256, true],
@@ -89,6 +88,7 @@ const SAFE_ERRORS = new Map([
   ["INVALID_REQUEST", "The broker request is invalid."],
   ["UNKNOWN_OPERATION", "The broker operation is not available."],
   ["UNAUTHORIZED", "The broker operation is not authorized."],
+  ["REPLY_PARENT_UNAUTHORIZED", "The reply parent is not authorized."],
   ["BROKER_UNAVAILABLE", "The protected broker is unavailable."],
   ["INVALID_TRANSITION", "The broker state transition is invalid."],
   ["POLICY_CORRUPT", "Protected broker policy is unavailable."],

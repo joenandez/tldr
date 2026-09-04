@@ -1,6 +1,6 @@
 {
   "name": "@joenandez/tldr",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "os": [
     "darwin"
   ],
@@ -143,6 +143,8 @@
     "src/lib/tightbeam_channel_runtime.mjs",
     "src/lib/tightbeam_email_adapter.mjs",
     "src/lib/tightbeam_email_delivery_channel.mjs",
+    "src/lib/tightbeam_email_provider_map.mjs",
+    "src/lib/tightbeam_inbound_publish.mjs",
     "src/lib/tightbeam_welcome_dispatch.mjs",
     "src/lib/starport_native_lifecycle.mjs",
     "src/lib/store.mjs",
@@ -163,7 +165,6 @@
     "src/lib/transports/email/inbound_body.mjs",
     "src/lib/transports/email/inbound_dead_letter.mjs",
     "src/lib/transports/email/render/email.mjs",
-    "src/lib/transports/email/render/glyphs.mjs",
     "src/lib/transports/email/render/html.mjs",
     "src/lib/transports/email/render/markdown.mjs",
     "src/lib/transports/email/render/markdown_inline.mjs",
@@ -180,14 +181,14 @@
   "scripts": {
     "pretest": "NODE_OPTIONS=--conditions=tldr-agent-test node --test tests/test_provenance_manifest.mjs",
     "test": "npm run test:starport && npm run test:product",
-    "test:starport": "NODE_OPTIONS=--conditions=tldr-agent-test node --test tests/test_starport_plugin_contract.mjs tests/test_starport_activation.mjs tests/test_starport_native_lifecycle.mjs tests/test_starport_orchestrator.mjs tests/test_starport_onboarding.mjs tests/test_starport_front_door.mjs tests/test_starport_uninstall.mjs tests/test_starport_release_closure.mjs tests/test_tldr_tightbeam_packed_cross_product.mjs tests/test_tightbeam_channel_real_daemon.mjs tests/test_tightbeam_email_inbound_bridge.mjs tests/test_tightbeam_email_inbound_real_daemon.mjs tests/test_tightbeam_email_outbound_adapter.mjs tests/test_tightbeam_email_outbound_real_daemon.mjs",
+    "test:starport": "NODE_OPTIONS=--conditions=tldr-agent-test node --test tests/test_starport_plugin_contract.mjs tests/test_starport_activation.mjs tests/test_starport_native_lifecycle.mjs tests/test_starport_orchestrator.mjs tests/test_starport_daemon_activation_order.mjs tests/test_starport_onboarding.mjs tests/test_starport_front_door.mjs tests/test_starport_uninstall.mjs tests/test_starport_release_closure.mjs tests/test_tldr_tightbeam_packed_cross_product.mjs tests/test_tldr_tightbeam_packed_welcome.mjs tests/test_tightbeam_channel_real_daemon.mjs tests/test_tightbeam_identity_reregistration.mjs tests/test_tightbeam_email_inbound_bridge.mjs tests/test_tightbeam_email_inbound_real_daemon.mjs tests/test_tightbeam_email_outbound_adapter.mjs tests/test_tightbeam_email_outbound_real_daemon.mjs",
     "test:release": "node --test tests/test_public_release_export.mjs tests/test_release_skill.mjs",
-    "test:product": "NODE_OPTIONS=--conditions=tldr-agent-test node --test --test-concurrency=1 tests/test_tldr_agent_tightbeam_retirement.mjs tests/test_aegis_setup_registration_ux.mjs tests/test_aegis_protocol.mjs tests/test_tldr_agent_agentmail_transport.mjs tests/test_tldr_agent_daemon_polling.mjs tests/test_tightbeam_email_outbound_adapter.mjs tests/test_tldr_agent_attachment_behavior.mjs",
-    "test:tightbeam-cross-product": "TIGHTBEAM_CROSS_PRODUCT_REQUIRED=1 NODE_OPTIONS=--conditions=tldr-agent-test node --test tests/test_tldr_tightbeam_packed_cross_product.mjs",
+    "test:product": "NODE_OPTIONS=--conditions=tldr-agent-test node --test --test-concurrency=1 tests/test_tldr_agent_tightbeam_retirement.mjs tests/test_aegis_setup_registration_ux.mjs tests/test_aegis_protocol.mjs tests/test_tldr_agent_agentmail_transport.mjs tests/test_tldr_agent_daemon_polling.mjs tests/test_tightbeam_email_outbound_adapter.mjs tests/test_tldr_agent_attachment_behavior.mjs tests/test_aegis_setup_theme.mjs",
+    "test:tightbeam-cross-product": "TIGHTBEAM_CROSS_PRODUCT_REQUIRED=1 NODE_OPTIONS=--conditions=tldr-agent-test node --test tests/test_tldr_tightbeam_packed_cross_product.mjs tests/test_tldr_tightbeam_packed_welcome.mjs",
     "test:packed-acceptance": "node --test tests/test_tldr_agent_packed_acceptance.mjs",
     "test:tldr-agent-contracts": "NODE_OPTIONS=--conditions=tldr-agent-test node --test --test-reporter=tap tests/contracts/test_tldr_agent_exclusions.mjs",
     "test:aegis-outbound": "NODE_OPTIONS=--conditions=tldr-agent-test node --test tests/test_aegis_phase4_outbound.mjs tests/test_aegis_phase8_artifact_verifier.mjs tests/test_aegis_phase8_evidence.mjs",
-    "test:aegis-integration": "NODE_OPTIONS=--conditions=tldr-agent-test node --test tests/test_aegis_full_uninstall.mjs tests/test_aegis_package_daemon_activation.mjs tests/test_aegis_setup_registration_ux.mjs tests/test_aegis_three_inbox_live_harness.mjs",
+    "test:aegis-integration": "NODE_OPTIONS=--conditions=tldr-agent-test node --test tests/test_aegis_full_uninstall.mjs tests/test_aegis_package_daemon_activation.mjs tests/test_aegis_setup_registration_ux.mjs tests/test_aegis_three_inbox_live_harness.mjs tests/test_aegis_setup_theme.mjs",
     "test:tldr-agent-wave-contracts": "NODE_OPTIONS=--conditions=tldr-agent-test node --test --test-reporter=tap tests/contracts/test_tldr_agent_email_only_exclusions.mjs tests/contracts/test_tldr_agent_private_resume_prune.mjs tests/contracts/test_tldr_agent_minimum_runtime_closure.mjs",
     "test:tldr-agent-minimum-runtime": "NODE_OPTIONS=--conditions=tldr-agent-test node --test tests/contracts/test_tldr_agent_minimum_runtime_closure.mjs",
     "test:tldr-agent-contracts:red": "NODE_OPTIONS=--conditions=tldr-agent-test node scripts/verify-tldr-agent-contract-red.mjs",

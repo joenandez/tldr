@@ -1,91 +1,72 @@
-/* tldr; — email tokens.
+/* Email-specific reading tokens.
  *
- * Mirrors docs/brand/tokens.css. Duplicated here because an email cannot load a
- * stylesheet: every value has to be baked into a style attribute, so the
- * renderer needs the numbers in JavaScript. tokens.css stays the source of
- * truth; if a value changes there it changes here, and nowhere else.
- *
- * Tokens are named for the job rather than the colour. `solid` means "the
- * identity plane", and in night lighting that plane is not #0000EE — a renderer
- * that asked for "blue" would get the wrong answer in one of the two modes.
- *
- * Every pairing these produce is declared and measured in
- * docs/brand/check-contrast.mjs. Thirty pairings, thirty passing.
+ * The wider tldr; identity is deliberately not the visual world of an owner
+ * conversation. Email should feel like careful correspondence between a person
+ * and their agent. Brand colour is reserved for links and the final semicolon
+ * in the quiet footer signature.
  */
 
+/* Off-white rather than #FFFFFF: clients that auto-invert dark mode (classic
+ * Outlook, Windows Mail) override pure white/black but leave near values to the
+ * author, so the day document survives inversion heuristics intact. */
 export const DAY = Object.freeze({
   mode: "day",
-  stock: "#F8FAFC",
-  raised: "#FFFFFF",
-  ink: "#20242C",
-  muted: "#465365",
-  link: "#0000EE",
-  field: "#AFCFF5",
-  solid: "#0000EE",
-  onSolid: "#F8FAFC",
-  onSolidMuted: "#AFCFF5",
-  line: "#6A7DA5",
-  accent: "#D9FF00",
-  onAccent: "#20242C",
+  page: "#FDFDFD",
+  stock: "#FDFDFD",
+  raised: "#F4F5F7",
+  ink: "#24262B",
+  muted: "#626770",
+  link: "#315ECA",
+  line: "#DADDE2",
+  strongLine: "#C5C9D0",
 });
 
 export const NIGHT = Object.freeze({
   mode: "night",
-  stock: "#101520",
-  raised: "#19202E",
-  ink: "#E9EDF5",
-  muted: "#A6B3C9",
-  link: "#93AEFF",
-  field: "#1C2A45",
-  solid: "#2440E8",
-  onSolid: "#EAEFFF",
-  onSolidMuted: "#C8D4FB",
-  line: "#5A6880",
-  accent: "#D9FF00",
-  onAccent: "#20242C",
+  page: "#17181B",
+  stock: "#17181B",
+  raised: "#222429",
+  ink: "#ECEDEF",
+  muted: "#A8ACB4",
+  link: "#9AAFF0",
+  line: "#373A41",
+  strongLine: "#50545D",
 });
 
-/* No webfont will ever load in a mail client, so these are the faces actually
- * present on the machine. That is the design, not a concession.
- *
- * The condensed face is the brand's voice and it is doing real work here: a
- * subject line holds about three more words per line in Arial Narrow than in the
- * reading face at the same size, and subjects are the one string in this system
- * whose length nobody controls. */
-export const DISPLAY =
-  "'Arial Narrow','Aptos Narrow','Helvetica Neue Condensed',Arial,sans-serif";
-export const BODY = "Verdana,Geneva,Tahoma,sans-serif";
+/* Native UI faces make the email feel authored in the reader's environment,
+ * not typeset by a product. These are installed defaults, so nothing is fetched
+ * and every major client has a compatible fallback. */
+export const BODY =
+  "-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+export const DISPLAY = BODY;
 export const MONO =
-  "ui-monospace,SFMono-Regular,Menlo,Consolas,'Courier New',monospace";
+  "ui-monospace,SFMono-Regular,Menlo,Consolas,'Liberation Mono','Courier New',monospace";
 
-/* The condensed face carries short phrases and meaningful numerals only. It
- * never sets a paragraph — that is what the reading face is for, at a 16px floor
- * because the primary reading device is a phone held at arm's length at 3am. */
+/* 14px/1.5 body is the density of mail people actually write to each other —
+ * Outlook composes at ~14.7px, Gmail and Apple Mail read smaller. The 16–18px
+ * convention belongs to marketing mail read at a glance, not correspondence.
+ * Headings stay within ~1.3× body: a colleague bolds a line, they do not set
+ * display type. */
 export const TYPE = Object.freeze({
-  /* The TLDR result. The largest thing in the message, and the only display
-   * string long enough to wrap. */
-  result: `font-family:${DISPLAY};font-size:26px;line-height:1.12;font-weight:700;letter-spacing:-.02em;`,
-  tldrLabel: `font-family:${DISPLAY};font-size:12px;line-height:1.2;font-weight:700;letter-spacing:.14em;`,
-  chip: `font-family:${DISPLAY};font-size:11px;line-height:1.2;font-weight:700;letter-spacing:.1em;`,
-  body: `font-family:${BODY};font-size:16px;line-height:1.55;`,
-  small: `font-family:${BODY};font-size:13px;line-height:1.5;`,
-  label: `font-family:${BODY};font-size:12px;line-height:1.25;font-weight:700;letter-spacing:.02em;`,
-  context: `font-family:${MONO};font-size:12px;line-height:1.5;`,
-  section: `font-family:${DISPLAY};font-size:21px;line-height:1.15;font-weight:700;letter-spacing:-.01em;`,
-  sub: `font-family:${DISPLAY};font-size:16px;line-height:1.2;font-weight:700;letter-spacing:.02em;`,
-  /* The numeral device: oversized condensed figures indexing a real step. */
-  numeral: `font-family:${DISPLAY};font-size:20px;line-height:1;font-weight:700;`,
-  code: `font-family:${MONO};font-size:13px;line-height:1.5;`,
-  tag: `font-family:${MONO};font-size:11px;line-height:1.2;letter-spacing:.08em;`,
-  tableHead: `font-family:${DISPLAY};font-size:12px;line-height:1.2;font-weight:700;letter-spacing:.08em;`,
-  tableCell: `font-family:${BODY};font-size:14px;line-height:1.5;`,
-  /* The system bar. */
-  stamp: `font-family:${DISPLAY};font-size:12px;line-height:1.2;font-weight:700;letter-spacing:.1em;`,
+  body: `font-family:${BODY};font-size:14px;line-height:1.5;font-weight:400;`,
+  small: `font-family:${BODY};font-size:12.5px;line-height:1.5;font-weight:400;`,
+  label: `font-family:${BODY};font-size:12px;line-height:1.45;font-weight:600;`,
+  context: `font-family:${BODY};font-size:11.5px;line-height:1.5;font-weight:400;`,
+  section: `font-family:${BODY};font-size:17px;line-height:1.4;font-weight:600;letter-spacing:-.01em;`,
+  sub: `font-family:${BODY};font-size:15px;line-height:1.45;font-weight:600;`,
+  code: `font-family:${MONO};font-size:12.5px;line-height:1.55;font-weight:400;`,
+  tag: `font-family:${BODY};font-size:11px;line-height:1.4;font-weight:600;`,
+  tableHead: `font-family:${BODY};font-size:12.5px;line-height:1.45;font-weight:600;`,
+  tableCell: `font-family:${BODY};font-size:13.5px;line-height:1.5;font-weight:400;`,
+  systemLabel: `font-family:${BODY};font-size:11.5px;line-height:1.45;font-weight:500;`,
+  systemTitle: `font-family:${BODY};font-size:19px;line-height:1.35;font-weight:600;letter-spacing:-.01em;`,
+  codePlate: `font-family:${MONO};font-size:28px;line-height:1.3;font-weight:500;letter-spacing:.12em;`,
+  colophon: `font-family:${BODY};font-size:11px;line-height:1.45;font-weight:400;`,
 });
 
-/* One reading column. */
-export const CARD_WIDTH = 600;
-
-/* Radius is 0, 2 or 4. Four is the maximum in the system and the TLDR block is
- * where it is spent; code takes two; nothing is a rounded card. */
-export const RADIUS = Object.freeze({ sm: "2px", md: "4px" });
+/* 640 sits inside the ~650px ceiling Outlook and Yahoo render comfortably and,
+ * with 24px gutters, gives prose a 592px measure — the width of a note in a
+ * desktop reading pane rather than a mobile-first promotional column. */
+export const CARD_WIDTH = 640;
+export const GUTTER = 24;
+export const RADIUS = Object.freeze({ sm: "4px", md: "6px" });

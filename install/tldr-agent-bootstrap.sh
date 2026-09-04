@@ -41,6 +41,13 @@ installed_manifest="${install_root}/activation-manifest.json"
 run_installed() {
   PATH="${install_root}/runtime/bin:/usr/bin:/bin"
   export PATH TLDR_AGENT_HOME
+  if [ -f "${package_root}/LOCAL-SNAPSHOT-MANIFEST.json" ]; then
+    TLDR_AGENT_PLUGIN_ROOT=${package_root}
+    export TLDR_AGENT_PLUGIN_ROOT
+    exec "$runtime_node" \
+      "${package_root}/src/lib/local_snapshot_front_door.mjs" \
+      "$operation" "$@"
+  fi
   exec "$runtime_node" "$entrypoint" "$operation" "$@"
 }
 

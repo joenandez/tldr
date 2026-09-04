@@ -56,6 +56,8 @@ const HINT = Object.freeze({
     "Verify ~/.helm/email/config.json exists with api_key + inbox_id + inbox_email, then retry. Run `helm-tasks onboard --reconfigure agentmail` to (re)provision the credential.",
   transport_send_failed:
     "Inspect transport_state.error for the underlying AgentMail SDK exception and retry within --max-attempts.",
+  reply_parent_unauthorized:
+    "Reconcile the accepted owner reply before retrying this email response.",
 });
 const TRUSTED_OWNER_CONTEXT = Symbol("tldr-agent-verified-owner");
 const BROKER_AUTHORIZED_CONTEXT = Symbol("aegis-broker-authorized-owner");
@@ -782,7 +784,16 @@ export const emailTransport = {
       // Pre-shaped errors (transport_send_failed thrown above) propagate
       // unchanged so the caller sees the existing log + error envelope.
       if (err && err.code === "transport_send_failed" && err.hint) throw err;
-      const wrapped = emailNotSent();
+      const wrapped =
+        canonicalRow.kind === "reply" &&
+        err?.code === "REPLY_PARENT_UNAUTHORIZED"
+          ? makeError(
+              "reply_parent_unauthorized",
+              "Email reply parent is not authorized.",
+              HINT.reply_parent_unauthorized,
+              err,
+            )
+          : emailNotSent();
       if (err?.ambiguous === true) wrapped.ambiguous = true;
       logOutcome({
         canonicalRow,
@@ -977,6 +988,7 @@ export const emailTransport = {
       const published = await ctx.tightbeamInbound.publishInboundEmail({
         binding,
         provider_message_id: externalMessageId,
+        provider_thread_id: externalThreadId,
         body: text,
       });
       if (published?.ok !== true) {
@@ -2225,6 +2237,14 @@ export async function reconcileInboxThread({
         [TRUSTED_OWNER_CONTEXT]: verifiedOwnerEmail,
         ...(tightbeamInbound ? { tightbeamInbound } : {}),
       });
+      if (inboundResult?.recovery_required) {
+        errors.push({
+          stage: "inboundWebhook",
+          messageId: m.messageId,
+          error: inboundResult.reason || "thread_recovery_required",
+        });
+        continue;
+      }
       // GH#24 — an idempotent re-observation is not a fresh write.
       if (inboundResult?.canonicalRow && !inboundResult?.idempotent)
         written += 1;
