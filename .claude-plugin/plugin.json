@@ -2,8 +2,8 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "tldr",
   "displayName": "tldr;",
-  "version": "1.1.0",
-  "description": "Set up private owner email for Claude Code and continue the same session when the owner replies.",
+  "version": "0.1.0",
+  "description": "Set up the private owner-email bridge for Claude Code; Tightbeam owns session routing and continuation.",
   "author": {
     "name": "Codename, Inc."
   },
@@ -14,5 +14,6 @@
   "metadata": {
     "developmentBaseline": "2.1.226",
     "releaseContract": "release/starport-release.json"
-  }
+  },
+  "hooks": ["./.claude-plugin/hooks/hooks.json"]
 }

@@ -4,12 +4,38 @@ import {
   lookupProviderReplyBinding,
   recordBoundProviderAcceptance,
   recordInboundProviderAcceptance as persistInboundProviderAcceptance,
-  recordProviderMap,
   recordProviderReplyBinding,
 } from "./tightbeam_email_provider_map.mjs";
 
 const REPLY_BINDING_CAPABILITY = "channels.reply-binding.v1";
 const LISTENER_CAPABILITY = "listener.v1";
+const TIGHTBEAM_CODE = /^[a-z][a-z_]{0,63}$/u;
+
+// Item 49: an idle auto-select claim returns `claim_held` and takes no lease
+// (item 41), so only that refusal means the queue is empty. Any other
+// failure (permission_denied, a killed or crashed CLI, a missing launcher) is
+// a real claim failure the poll must report instead of reading as idle.
+export function claimFailure(claimed, latencyMs = null) {
+  const reported = claimed?.error?.tightbeam_code ?? claimed?.error?.code;
+  const tightbeamCode = TIGHTBEAM_CODE.test(reported ?? "") ? reported : null;
+  if (tightbeamCode === "claim_held")
+    return Object.freeze({ ok: false, code: "claim_unavailable" });
+  process.stderr.write(
+    `${JSON.stringify({
+      ts: new Date().toISOString(),
+      level: "warn",
+      event: "tightbeam_email_claim_failed",
+      params: { tightbeam_code: tightbeamCode },
+      status: "claim_failed",
+      latency_ms: latencyMs,
+    })}\n`,
+  );
+  return Object.freeze({
+    ok: false,
+    code: "claim_failed",
+    tightbeam_code: tightbeamCode,
+  });
+}
 
 export function createTightbeamEmailDeliveryChannel({
   execute,
@@ -19,11 +45,22 @@ export function createTightbeamEmailDeliveryChannel({
   authority,
   principalRef,
   endpointSession,
+  reportedCapabilities = () => null,
 } = {}) {
   let capabilities;
 
   async function deliveryCapabilities() {
     if (capabilities) return capabilities;
+    // A compatible base preflight already lists every daemon capability; a
+    // poll tick has a fixed budget, so reuse it instead of two more launches.
+    const reported = reportedCapabilities();
+    if (Array.isArray(reported)) {
+      capabilities = Object.freeze({
+        replyBinding: reported.includes(REPLY_BINDING_CAPABILITY),
+        listener: reported.includes(LISTENER_CAPABILITY),
+      });
+      return capabilities;
+    }
     const supported = async (capability) => {
       const result = await execute({
         admin: true,
@@ -88,6 +125,13 @@ export function createTightbeamEmailDeliveryChannel({
   }
 
   async function claimEmailDelivery() {
+    const capability = await deliveryCapabilities();
+    if (!capability.replyBinding || !capability.listener) {
+      return Object.freeze({
+        ok: false,
+        code: "delivery_capability_unavailable",
+      });
+    }
     const emailIdentity = await registeredEmailIdentity();
     if (!emailIdentity)
       return Object.freeze({ ok: false, code: "not_configured" });
@@ -102,7 +146,7 @@ export function createTightbeamEmailDeliveryChannel({
     if (commandFailure(routes) || !route) {
       return Object.freeze({ ok: false, code: "route_unavailable" });
     }
-    const capability = await deliveryCapabilities();
+    const startedAt = Date.now();
     const claimed = await execute({
       admin: false,
       credentials: emailIdentity.identity,
@@ -113,12 +157,12 @@ export function createTightbeamEmailDeliveryChannel({
         emailIdentity.endpoint.endpoint_id,
         "--channel-route",
         route.route_id,
-        ...(capability.replyBinding ? ["--accept-reply-binding"] : []),
+        "--accept-reply-binding",
       ],
     });
-    return commandFailure(claimed)
-      ? Object.freeze({ ok: false, code: "claim_unavailable" })
-      : Object.freeze({ ok: true, claim: claimed.result });
+    if (!commandFailure(claimed))
+      return Object.freeze({ ok: true, claim: claimed.result });
+    return claimFailure(claimed, Date.now() - startedAt);
   }
 
   async function completeEmailDelivery({
@@ -147,38 +191,15 @@ export function createTightbeamEmailDeliveryChannel({
   }
 
   async function recordProviderAcceptance({ delivery, provider }) {
-    if (typeof delivery?.reply_binding === "string") {
-      await recordBoundProviderAcceptance(home, delivery, provider);
-      return;
+    if (
+      typeof delivery?.reply_binding !== "string" ||
+      delivery.reply_binding.length === 0
+    ) {
+      throw new TypeError(
+        "Tightbeam claimed delivery has no opaque reply binding",
+      );
     }
-    const identity = await readIdentity();
-    if (!identity) throw new Error("Tightbeam email identity is unavailable");
-    const routes = await execute({
-      admin: false,
-      credentials: identity,
-      args: ["channel", "route", "list"],
-    });
-    const route = routes?.result?.routes?.find(
-      (candidate) => candidate?.selector === "email",
-    );
-    if (commandFailure(routes) || !route)
-      throw new Error("Tightbeam email route is unavailable");
-    await recordProviderMap(home, {
-      delivery_id: delivery.delivery_id,
-      message_id: delivery.message_id,
-      conversation_id: delivery.message.conversation_id,
-      route_id: route.route_id,
-      origin_endpoint_id:
-        typeof delivery.message?.sender_endpoint_id === "string"
-          ? delivery.message.sender_endpoint_id
-          : null,
-      origin_session_id:
-        typeof delivery.message?.sender_session_id === "string"
-          ? delivery.message.sender_session_id
-          : null,
-      external_id: provider.external_id,
-      external_thread_id: provider.external_thread_id,
-    });
+    await recordBoundProviderAcceptance(home, delivery, provider);
   }
 
   async function recordReplyBinding({ delivery }) {

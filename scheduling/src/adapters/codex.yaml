@@ -1,0 +1,19 @@
+name: codex
+version: 1
+
+command:
+  argv: [codex, exec, --json, "{{prompt}}"]
+  env: {}
+
+session_id:
+  capture:
+    strategy: stdout_parse
+    from: stdout
+    parse: jsonl
+    match: { type: thread.started }
+    path: $.thread_id
+
+resume:
+  command: "codex resume {{session_id}}"
+  cwd: "{{job.cwd}}"
+  caveats: ["cwd-scoped"]

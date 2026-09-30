@@ -1,0 +1,69 @@
+#!/bin/sh
+# Tightbeam PostToolUse hook. Ported from
+# helm/hooks/helm-inject-session-messages.sh (see the internal provenance record).
+#
+# The consumer half of the zero-IPC pair: PreToolUse stages drained
+# messages into a local file, and this hook injects them. When nothing is
+# staged — the common case — it costs a stat and returns, starting no Node
+# process and opening no socket. Even the non-empty case performs no IPC:
+# the rendering reads the staged file and nothing else.
+_TIGHTBEAM_MARKER=tightbeam-managed:runtime-hooks-v2
+
+payload_field() {
+  [ -x /usr/bin/plutil ] || return 0
+  printf '%s' "$1" | /usr/bin/plutil -extract "$2" raw -o - - 2>/dev/null || true
+}
+
+main() {
+  payload=""
+  if [ ! -t 0 ]; then
+    payload=$(/bin/cat 2>/dev/null || true)
+  fi
+
+  session_id=""
+  if [ -n "${payload}" ]; then
+    session_id=$(payload_field "${payload}" session_id)
+  fi
+  if [ -z "${session_id}" ]; then
+    session_id="${CLAUDE_SESSION_ID:-${CODEX_THREAD_ID:-${HELM_AGENT_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}}}"
+  fi
+  [ -n "${session_id}" ] || return 0
+  case "${session_id}" in
+    */*|*..*|.*|"") return 0 ;;
+  esac
+
+  # The default matches src/protocol/state_root_location.mjs (Phase E).
+  state_root="${TIGHTBEAM_STATE_ROOT:-${HOME}/.tldr-agents/tightbeam}"
+  dir="${state_root}/sessions/${session_id}"
+  pending="${dir}/pending-inject.jsonl"
+  action="${dir}/current-action-id"
+
+  action_id=""
+  if [ -n "${payload}" ]; then
+    action_id=$(payload_field "${payload}" tool_use_id)
+  fi
+  if [ -n "${action_id}" ] && [ -f "${action}" ] && [ "$(/bin/cat "${action}" 2>/dev/null || true)" = "${action_id}" ]; then
+    /bin/rm -f "${action}"
+  fi
+
+  [ -s "${pending}" ] || return 0
+
+  # The CLI is the package's own launcher. Every installed hook command
+  # names it, and the front door sets it before running this script; with
+  # none, there is nothing trusted to start, so the boundary is left alone.
+  [ -n "${HOME:-}" ] || return 0
+  cli="${TIGHTBEAM_CLI:-}"
+  [ -n "${cli}" ] && [ -x "${cli}" ] || return 0
+
+  if [ -n "${TIGHTBEAM_RUNTIME:-}" ]; then
+    printf '%s' "${payload}" | "${cli}" hook post-tool-use --runtime "${TIGHTBEAM_RUNTIME}" || true
+  else
+    printf '%s' "${payload}" | "${cli}" hook post-tool-use || true
+  fi
+  return 0
+}
+
+# A tool boundary never fails because of this hook. stdout is the runtime's
+# injection channel, so it is passed through untouched.
+main "$@" || true
+exit 0

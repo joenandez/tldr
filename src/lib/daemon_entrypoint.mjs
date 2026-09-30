@@ -1,7 +1,6 @@
 import { runTldrAgentDaemonLoop } from "./tldr_agent_daemon_loop.mjs";
 import { runTldrAgentDaemonHealthServer } from "./tldr_agent_daemon_health.mjs";
 import { fail, output } from "./json_io.mjs";
-import { isTldrAgentPollOnlyDaemon } from "./tldr_agent_daemon_mode.mjs";
 
 const PRODUCTION_STATUS_PORT = 45173;
 
@@ -17,11 +16,10 @@ function withScope(scope, data = {}) {
 }
 
 async function assertDaemonStartAllowed() {
-  const { assertDesiredStateAllowsStart, assertHelmHomeSafe } = await import(
-    "./runtime_store.mjs"
-  );
-  const desiredState = assertDesiredStateAllowsStart({ initialize: false });
-  const helmHomeSafety = assertHelmHomeSafe();
+  const { assertLifecycleDesiredStateAllowsStart, assertLifecycleHomeSafe } =
+    await import("./tldr_agent_lifecycle_store.mjs");
+  const desiredState = assertLifecycleDesiredStateAllowsStart();
+  const helmHomeSafety = assertLifecycleHomeSafe();
   return { desiredState, helmHomeSafety };
 }
 
@@ -145,5 +143,3 @@ export async function runDaemonCommand({
   }
   return results;
 }
-
-export const _internals = { isTldrAgentPollOnlyDaemon };

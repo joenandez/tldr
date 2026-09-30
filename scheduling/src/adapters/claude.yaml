@@ -1,0 +1,15 @@
+name: claude
+version: 1
+
+command:
+  argv: [claude, -p, --verbose, --output-format, stream-json, --session-id, "{{session_id}}", "{{prompt}}"]
+  env:
+    CLAUDE_NONINTERACTIVE: "1"
+
+session_id:
+  mintable: true
+
+resume:
+  command: "claude -r {{session_id}}"
+  cwd: "{{job.cwd}}"
+  caveats: []

@@ -1,8 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { DatabaseSync } from "node:sqlite";
-import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import {
+  lifecycleStoreIsHealthy,
+  readLifecycleStoreSchemaVersion,
+} from "./tldr_agent_lifecycle_store.mjs";
 
 const PACKAGE_ROOT = resolve(
   dirname(fileURLToPath(import.meta.url)),
@@ -97,41 +101,9 @@ export function tldrAgentSourceIdentity() {
 }
 
 export function readTldrAgentRuntimeSchemaVersion(home) {
-  const path = join(home, "runtime.sqlite");
-  if (!existsSync(path)) return null;
-  let db = null;
-  try {
-    db = new DatabaseSync(path, { readOnly: true });
-    const runtimeSchema = db
-      .prepare(
-        `SELECT 1 FROM sqlite_schema
-         WHERE type = 'table' AND name = 'runtime_schema'`,
-      )
-      .get();
-    return runtimeSchema
-      ? Number(
-          db.prepare("SELECT version FROM runtime_schema WHERE id = 1").get()
-            ?.version,
-        )
-      : Number(db.prepare("PRAGMA user_version").get().user_version);
-  } catch {
-    return null;
-  } finally {
-    db?.close?.();
-  }
+  return readLifecycleStoreSchemaVersion({ home });
 }
 
 export function runtimeStoreIsHealthy(home) {
-  const path = join(home, "runtime.sqlite");
-  if (!existsSync(path)) return false;
-  let db = null;
-  try {
-    db = new DatabaseSync(path, { readOnly: true });
-    const result = Object.values(db.prepare("PRAGMA quick_check").get())[0];
-    return result === "ok";
-  } catch {
-    return false;
-  } finally {
-    db?.close?.();
-  }
+  return lifecycleStoreIsHealthy({ home });
 }

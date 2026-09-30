@@ -12,6 +12,13 @@ import {
 } from "./aegis_protocol.mjs";
 
 const DEFAULT_SOCKET = "/var/run/ai.codename.aegis.broker.sock";
+// A reply can validate its parent and then send through the provider. Each
+// provider operation has a ten-second deadline inside Aegis.
+const DEFAULT_OUTBOUND_TIMEOUT_MS = 25_000;
+// Inbox reads (list, message, thread) spawn the native bridge, which launches
+// the Aegis app and waits up to 4.5 s on the broker (item 14). The client
+// waits 5 s by default and never longer.
+export const AEGIS_INBOUND_TIMEOUT_MS = 5_000;
 const ALLOWED_OPTIONS = new Set([
   "socketPath",
   "operation",
@@ -49,7 +56,7 @@ export function requestAegisOutbound(options) {
     idempotencyKey,
     threadId,
     parentMessageId,
-    timeoutMs = 2_000,
+    timeoutMs = DEFAULT_OUTBOUND_TIMEOUT_MS,
   } = options;
   const payload = { body, idempotency_key: idempotencyKey };
   if (html) payload.html = html;
@@ -74,6 +81,7 @@ export function requestAegisOutbound(options) {
     requestId,
     frame,
     expectedKind: "delivery",
+    outbound: true,
     project: (result) => ({
       messageId: result.message_id,
       threadId: result.thread_id,
@@ -139,7 +147,7 @@ export function requestAegisInbound(options) {
     limit,
     messageId,
     threadId,
-    timeoutMs = 2_000,
+    timeoutMs = AEGIS_INBOUND_TIMEOUT_MS,
   } = options;
   let payload;
   if (operation === "poll_bound_inbox") {
@@ -181,6 +189,21 @@ export function projectAegisInboundResult(result) {
   };
 }
 
+// Every inbound bridge failure used to reject with the same code, so a poll
+// could not tell our timer from a bridge exit or a broker refusal (item 41).
+// `error.bridge` keeps which path failed, as bounded non-secret fields only.
+function bridgeFailure(error, startedAt, cause, extra = {}) {
+  const exitCode = Number.isInteger(extra.exitCode) ? extra.exitCode : null;
+  error.bridge = {
+    cause,
+    elapsed_ms: Math.max(0, Date.now() - startedAt),
+    exit_code: exitCode !== null && exitCode >= 0 ? exitCode : null,
+    signal: typeof extra.signal === "string" ? extra.signal : null,
+    broker_code: typeof extra.brokerCode === "string" ? extra.brokerCode : null,
+  };
+  return error;
+}
+
 function nativeBridgeExchange({
   operation,
   payload,
@@ -189,6 +212,7 @@ function nativeBridgeExchange({
   project,
 }) {
   return new Promise((resolve, reject) => {
+    const startedAt = Date.now();
     const child = spawnAegisInboundBridge();
     const chunks = [];
     let received = 0;
@@ -200,44 +224,81 @@ function nativeBridgeExchange({
       child.kill("SIGKILL");
       callback(value);
     };
+    const fail = (code, cause, extra) =>
+      finish(
+        reject,
+        bridgeFailure(protocolError(code), startedAt, cause, extra),
+      );
     const timer = setTimeout(
-      () => finish(reject, protocolError("BROKER_UNAVAILABLE")),
-      Math.max(1, Math.min(5_000, Number(timeoutMs) || 2_000)),
+      () => fail("BROKER_UNAVAILABLE", "bridge_timeout"),
+      Math.max(
+        1,
+        Math.min(
+          AEGIS_INBOUND_TIMEOUT_MS,
+          Number(timeoutMs) || AEGIS_INBOUND_TIMEOUT_MS,
+        ),
+      ),
     );
     child.stdout.on("data", (chunk) => {
       received += chunk.length;
       if (received > MAX_FRAME_BYTES) {
-        finish(reject, protocolError("REQUEST_TOO_LARGE"));
+        fail("REQUEST_TOO_LARGE", "bridge_output_too_large");
         return;
       }
       chunks.push(chunk);
     });
     child.once("error", () =>
-      finish(reject, protocolError("BROKER_UNAVAILABLE")),
+      fail("BROKER_UNAVAILABLE", "bridge_spawn_failed"),
     );
-    child.once("close", (code) => {
+    child.once("close", (code, signal) => {
       if (settled) return;
       if (code !== 0) {
-        finish(reject, protocolError("BROKER_UNAVAILABLE"));
+        // The native bridge exits 2 on any socket failure, including its own
+        // receive timeout; `elapsed_ms` is what tells those apart.
+        fail(
+          "BROKER_UNAVAILABLE",
+          signal ? "bridge_signaled" : "bridge_exit_nonzero",
+          { exitCode: code, signal },
+        );
         return;
       }
+      let decoded;
       try {
         const body = Buffer.concat(chunks);
         const header = Buffer.alloc(4);
         header.writeUInt32BE(body.length);
-        const decoded = decodeFrame(Buffer.concat([header, body]));
-        const response = decoded.value;
-        if (
-          decoded.type !== "response" ||
-          response.requestId !== requestId ||
-          !response.ok ||
-          response.result.kind !== "inbound_batch"
-        ) {
-          throw protocolError(response.error?.code ?? "INVALID_REQUEST");
-        }
+        decoded = decodeFrame(Buffer.concat([header, body]));
+      } catch (error) {
+        finish(
+          reject,
+          bridgeFailure(error, startedAt, "bridge_response_invalid"),
+        );
+        return;
+      }
+      const response = decoded.value;
+      if (decoded.type !== "response" || response.requestId !== requestId) {
+        fail(
+          response?.error?.code ?? "INVALID_REQUEST",
+          "bridge_response_invalid",
+        );
+        return;
+      }
+      if (!response.ok) {
+        const brokerCode = response.error?.code ?? "INVALID_REQUEST";
+        fail(brokerCode, "broker_error", { brokerCode });
+        return;
+      }
+      if (response.result.kind !== "inbound_batch") {
+        fail("INVALID_REQUEST", "bridge_response_invalid");
+        return;
+      }
+      try {
         finish(resolve, project(response.result));
       } catch (error) {
-        finish(reject, error);
+        finish(
+          reject,
+          bridgeFailure(error, startedAt, "bridge_response_invalid"),
+        );
       }
     });
     child.stdin.end(
@@ -253,6 +314,7 @@ function exchange({
   frame,
   expectedKind,
   project,
+  outbound = false,
 }) {
   return new Promise((resolve, reject) => {
     const socket = connectSocket(socketPath);
@@ -260,6 +322,11 @@ function exchange({
     let received = 0;
     let expected = null;
     let settled = false;
+    let requestSubmitted = false;
+    const uncertain = (error) => {
+      if (outbound && requestSubmitted) error.ambiguous = true;
+      return error;
+    };
     const finish = (callback, value) => {
       if (settled) return;
       settled = true;
@@ -267,11 +334,14 @@ function exchange({
       callback(value);
     };
     socket.setTimeout(timeoutMs);
-    socket.once("connect", () => socket.end(frame));
+    socket.once("connect", () => {
+      requestSubmitted = true;
+      socket.end(frame);
+    });
     socket.on("data", (chunk) => {
       received += chunk.length;
       if (received > MAX_FRAME_BYTES + 4) {
-        finish(reject, protocolError("REQUEST_TOO_LARGE"));
+        finish(reject, uncertain(protocolError("REQUEST_TOO_LARGE")));
         return;
       }
       chunks.push(chunk);
@@ -284,29 +354,36 @@ function exchange({
         try {
           decoded = decodeFrame(buffer);
         } catch (error) {
-          finish(reject, error);
+          finish(reject, uncertain(error));
           return;
         }
         const response = decoded.value;
         if (decoded.type !== "response" || response.requestId !== requestId) {
-          finish(reject, protocolError("INVALID_REQUEST"));
+          finish(reject, uncertain(protocolError("INVALID_REQUEST")));
         } else if (!response.ok) {
-          finish(reject, protocolError(response.error.code));
+          const error = protocolError(response.error.code);
+          if (
+            outbound &&
+            ["BROKER_UNAVAILABLE", "PROVIDER_UNAVAILABLE"].includes(error.code)
+          ) {
+            error.ambiguous = true;
+          }
+          finish(reject, error);
         } else if (response.result.kind !== expectedKind) {
-          finish(reject, protocolError("INVALID_REQUEST"));
+          finish(reject, uncertain(protocolError("INVALID_REQUEST")));
         } else {
           finish(resolve, project(response.result));
         }
       }
     });
     socket.once("timeout", () =>
-      finish(reject, protocolError("BROKER_UNAVAILABLE")),
+      finish(reject, uncertain(protocolError("BROKER_UNAVAILABLE"))),
     );
     socket.once("error", () =>
-      finish(reject, protocolError("BROKER_UNAVAILABLE")),
+      finish(reject, uncertain(protocolError("BROKER_UNAVAILABLE"))),
     );
     socket.once("end", () => {
-      if (!settled) finish(reject, protocolError("INVALID_FRAME"));
+      if (!settled) finish(reject, uncertain(protocolError("INVALID_FRAME")));
     });
   });
 }

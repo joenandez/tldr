@@ -14,8 +14,9 @@ import {
   writeSync,
   writeFileSync,
 } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+
+import { assertStateRootCreatable, helmHome } from "./store.mjs";
 import {
   TLDR_AGENT_DIAGNOSTIC_SCHEMA_VERSION,
   projectTldrAgentDiagnostic,
@@ -31,7 +32,17 @@ const ACTIVE_FILE = "diagnostics.jsonl";
 const REPORT_ID = /^diag_[a-z0-9_-]+$/;
 
 function defaultHome() {
-  return process.env.TLDR_AGENT_HOME || join(homedir(), ".tldr-agent");
+  return helmHome();
+}
+
+// Diagnostics are best-effort: while the agent root waits on the state root
+// migration they record nothing rather than create a fresh root.
+function assertDiagnosticsHomeCreatable(home) {
+  assertStateRootCreatable({
+    component: "agent",
+    root: home,
+    operation: "diagnostics",
+  });
 }
 
 export function tldrAgentDiagnosticsRoot(home = defaultHome()) {
@@ -130,6 +141,7 @@ export function maintainTldrAgentDiagnostics({
   reserveBytes = 0,
 } = {}) {
   try {
+    assertDiagnosticsHomeCreatable(home);
     mkdirSync(tldrAgentDiagnosticsRoot(home), { recursive: true, mode: 0o700 });
     const expired_deleted = removeExpired(home, now, retentionDays);
     const capped = enforceTotalCap(home, totalMaxBytes, reserveBytes);
@@ -164,6 +176,7 @@ export function appendTldrAgentDiagnostic(
       return { recorded: false };
     }
     const root = tldrAgentDiagnosticsRoot(home);
+    assertDiagnosticsHomeCreatable(home);
     mkdirSync(root, { recursive: true, mode: 0o700 });
     const path = activePath(home);
     if (existsSync(path)) {
@@ -273,6 +286,7 @@ export function createTldrAgentDiagnosticReport({ home = defaultHome() } = {}) {
       created_at: createdAt.toISOString(),
       events: inspectTldrAgentLogs({ home, limit: 200 }).events,
     };
+    assertDiagnosticsHomeCreatable(home);
     mkdirSync(reportsRoot(home), { recursive: true, mode: 0o700 });
     const serialized = `${JSON.stringify(report)}\n`;
     const temporary = join(

@@ -1,0 +1,197 @@
+#!/bin/sh
+# Tightbeam PreToolUse hook. Ported from
+# helm/hooks/helm-prefetch-session-inbox.sh:24-45 (see the internal provenance record).
+#
+# This is shell, not `tightbeam hook pre-tool-use`, for one reason: it runs
+# at EVERY tool boundary. The common case — a session with no waiting
+# message — must cost a stat and nothing else. No Node process starts, no
+# socket is opened, and no daemon is contacted unless the daemon itself
+# has recorded a delivery for this session by refreshing the watermark
+# file. Replacing this with a round trip would put IPC on the agent's
+# critical path for every tool call, where Helm pays none.
+#
+# The watermark is a hint, not state: durable delivery rows in the daemon
+# stay authoritative, so losing this file loses nothing but a wake-up.
+_TIGHTBEAM_MARKER=tightbeam-managed:runtime-hooks-v2
+# The unified package's front door runs Tightbeam as
+# `tldr-agents messaging <args>`, and its hints name that form (item 40).
+_TIGHTBEAM_FRONT_DOOR=tldr-agents
+_NEWLINE='
+'
+
+payload_field() {
+  [ -x /usr/bin/plutil ] || return 0
+  printf '%s' "$1" | /usr/bin/plutil -extract "$2" raw -o - - 2>/dev/null || true
+}
+
+# The physical directory of $1, or nothing. A subshell, so it runs only on
+# the remediation path below, never on the zero-IPC fast path.
+physical_dir() {
+  (cd -P -- "$1" 2>/dev/null && pwd -P)
+}
+
+# True when $1 is the absolute path of the front door in the same package
+# as the CLI this hook runs. The front door sets TIGHTBEAM_CLI to
+# <package root>/libexec/tightbeam, whose front door is <package root>/bin/;
+# a package from before the launchers moved (or a test binding) keeps its
+# CLI beside the front door. Hook recipes print exactly that path, and the
+# skills resolve the same file, so no other binary of the same name, and no
+# variable or relative path, is admitted.
+is_own_front_door() {
+  [ -n "${TIGHTBEAM_CLI:-}" ] || return 1
+  case "$1" in /*) ;; *) return 1 ;; esac
+  [ "${1##*/}" = "${_TIGHTBEAM_FRONT_DOOR}" ] || return 1
+  [ -f "$1" ] && [ -x "$1" ] || return 1
+  own_dir=${TIGHTBEAM_CLI%/*}
+  case "${own_dir}" in
+    */libexec) own_bin=$(physical_dir "${own_dir%/libexec}/bin") ;;
+    *) own_bin=$(physical_dir "${own_dir}") ;;
+  esac
+  candidate_bin=$(physical_dir "${1%/*}")
+  [ -n "${own_bin}" ] && [ "${own_bin}" = "${candidate_bin}" ]
+}
+
+# The hard ACK gate permits remediation, not arbitrary shell work that
+# happens to mention a Tightbeam word. Parse only the structured Bash
+# command field, reject shell syntax before word splitting, then accept the
+# small supported CLI grammar with no wrappers or trailing arguments. The
+# grammar is the same after `tightbeam`, after the unified front door's
+# `tldr-agents messaging`, or after this plugin's own front door path. The
+# one quoted form admitted is a final `--body "<text>"` whose text contains
+# no double quote, `$`, backtick, backslash, or newline, so the shell
+# expands nothing in it.
+safe_ack_remediation() {
+  tool_name=$(payload_field "${payload}" tool_name)
+  command=$(payload_field "${payload}" tool_input.command)
+  [ "${tool_name}" = "Bash" ] || return 1
+  [ -n "${command}" ] || return 1
+  case "${command}" in
+    *' --body "'*'"')
+      quoted_body=${command#*' --body "'}
+      quoted_body=${quoted_body%'"'}
+      case "${quoted_body}" in
+        ""|*[\"\$\`\\]*|*"${_NEWLINE}"*) return 1 ;;
+      esac
+      command="${command%%' --body "'*} --body quoted-body"
+      ;;
+  esac
+  case "${command}" in *[\;\|\&\<\>\`\\\'\"\$\(\)]*|*"${_NEWLINE}"*) return 1 ;; esac
+  set -f
+  set -- ${command}
+  set +f
+  if [ "$#" -ge 2 ] && [ "$2" = messaging ] &&
+    { [ "$1" = "${_TIGHTBEAM_FRONT_DOOR}" ] || is_own_front_door "$1"; }; then
+    shift 2
+    set -- tightbeam "$@"
+  fi
+  case "$1:$2:$3:$#" in
+    tightbeam:agent:inbox:3) return 0 ;;
+    tightbeam:agent:inbox:4) [ "$4" = "--unread" ] && return 0 ;;
+    tightbeam:agent:ack:7) [ "$4" = "--work" ] && [ -n "$5" ] && [ "$6" = "--body" ] && [ -n "$7" ] && return 0 ;;
+    tightbeam:read:*:5) [ -n "$3" ] && [ "$4" = "--principal" ] && [ -n "$5" ] && return 0 ;;
+    tightbeam:recovery:retry:13|tightbeam:recovery:switch:13)
+      [ "$4" = "--root" ] && [ -n "$5" ] && [ "$6" = "--generation" ] && [ -n "$7" ] && [ "$8" = "--target-endpoint" ] && [ -n "$9" ] && [ "${10}" = "--target-process-generation" ] && [ -n "${11}" ] && [ "${12}" = "--key" ] && [ -n "${13}" ] && return 0 ;;
+  esac
+  return 1
+}
+
+main() {
+  payload=""
+  if [ ! -t 0 ]; then
+    payload=$(/bin/cat 2>/dev/null || true)
+  fi
+
+  session_id=""
+  if [ -n "${payload}" ]; then
+    session_id=$(payload_field "${payload}" session_id)
+  fi
+  if [ -z "${session_id}" ]; then
+    session_id="${CLAUDE_SESSION_ID:-${CODEX_THREAD_ID:-${HELM_AGENT_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}}}"
+  fi
+  [ -n "${session_id}" ] || return 0
+  # Never build a path out of a session id that could leave the sessions
+  # directory; the CLI enforces the same rule (src/protocol/session_paths.mjs).
+  case "${session_id}" in
+    */*|*..*|.*|"") return 0 ;;
+  esac
+
+  # The default matches src/protocol/state_root_location.mjs (Phase E).
+  state_root="${TIGHTBEAM_STATE_ROOT:-${HOME}/.tldr-agents/tightbeam}"
+  dir="${state_root}/sessions/${session_id}"
+  watermark="${dir}/inbox.watermark"
+  seen="${dir}/inbox.seen"
+  ack_hint="${dir}/ack.deadline.json"
+  action="${dir}/current-action-id"
+
+  action_id=""
+  if [ -n "${payload}" ]; then
+    action_id=$(payload_field "${payload}" tool_use_id)
+  fi
+  if [ -n "${action_id}" ] && [ -d "${dir}" ]; then
+    (umask 077; printf '%s\n' "${action_id}" > "${action}.$$") && /bin/mv -f "${action}.$$" "${action}" || /bin/rm -f "${action}.$$"
+  fi
+
+  # The CLI is the package's own launcher. Every installed hook command
+  # names it, and the front door sets it before running this script; with
+  # none, there is nothing trusted to start, so the boundary is left alone.
+  [ -n "${HOME:-}" ] || return 0
+  cli="${TIGHTBEAM_CLI:-}"
+  [ -n "${cli}" ] && [ -x "${cli}" ] || return 0
+
+  # A tool boundary must not fail because the drain failed, so the CLI's
+  # exit status is swallowed here. What makes that safe is the CLI's
+  # ordering, not this line: a message is staged on disk BEFORE it is
+  # marked read, and the seen marker only advances after a clean drain.
+  # A swallowed failure therefore leaves the delivery unread and the next
+  # tool boundary retries it. It is still reported, because a failure that
+  # repeats every boundary should be visible to whoever reads stderr.
+  if [ -n "${TIGHTBEAM_RUNTIME:-}" ]; then
+    drain() { printf '%s' "${payload}" | "${cli}" hook pre-tool-use --runtime "${TIGHTBEAM_RUNTIME}"; }
+  else
+    drain() { printf '%s' "${payload}" | "${cli}" hook pre-tool-use; }
+  fi
+
+  # A canonical-derived local hint keeps the 120-second ACK deadline
+  # reachable after the inbox watermark has been seen. It is absent for
+  # ordinary agent correspondence, so the no-message/no-deadline path
+  # below remains one stat and no process or daemon contact.
+  if [ -s "${ack_hint}" ]; then
+    if ! drain >/dev/null; then
+      printf 'tightbeam: PreToolUse ACK reconciliation failed; retry an acknowledgement or inbox read\n' >&2
+      safe_ack_remediation && return 0
+      subject=$(payload_field "$(/bin/cat "${ack_hint}" 2>/dev/null || true)" subject)
+      [ -n "${subject}" ] || subject="this thread"
+      printf 'Acknowledgement required now on “%s”. Send it before continuing.\n' "${subject}" >&2
+      return 2
+    fi
+    # The provider-accepted ACK or terminal transition is canonical; its
+    # next boundary removes the local hint before this shell decides a
+    # deadline. A remaining hint is still an open, unacknowledged user root.
+    [ -s "${ack_hint}" ] || return 0
+    due_ms=$(payload_field "$(/bin/cat "${ack_hint}" 2>/dev/null || true)" due_at_epoch_ms)
+    now_ms=$(( $(/bin/date +%s) * 1000 ))
+    case "${due_ms}" in *[!0-9]*|"") due_ms=0 ;; esac
+    if [ "${due_ms}" -gt 0 ] && [ "${now_ms}" -ge "${due_ms}" ]; then
+      safe_ack_remediation && return 0
+      subject=$(payload_field "$(/bin/cat "${ack_hint}" 2>/dev/null || true)" subject)
+      [ -n "${subject}" ] || subject="this thread"
+      printf 'Acknowledgement required now on “%s”. Send it before continuing.\n' "${subject}" >&2
+      return 2
+    fi
+  fi
+
+  # The whole zero-IPC path: no watermark means the daemon has never
+  # written a delivery for this session, and an unchanged one means
+  # nothing new since the last drain.
+  [ -s "${watermark}" ] || return 0
+  /usr/bin/cmp -s "${watermark}" "${seen}" && return 0
+  if ! drain; then
+    printf 'tightbeam: PreToolUse drain failed; the message stays unread and the next tool boundary retries\n' >&2
+  fi
+  return 0
+}
+
+# Drain errors still never fail a tool boundary. A deadline refusal is the
+# deliberate exception: exit 2 is the runtime's block contract.
+main "$@"
+exit $?

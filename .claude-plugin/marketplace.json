@@ -8,11 +8,11 @@
   "plugins": [
     {
       "name": "tldr",
-      "description": "Private owner email and exact-session reply continuity for Claude Code.",
+      "description": "Private owner-email bridge for Claude Code, with Tightbeam-owned session routing and continuation.",
       "source": {
         "source": "npm",
         "package": "@joenandez/tldr",
-        "version": "1.1.0"
+        "version": "0.1.0"
       },
       "category": "productivity",
       "homepage": "https://github.com/joenandez/tldr#readme"

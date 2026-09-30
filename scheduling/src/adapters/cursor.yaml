@@ -1,0 +1,18 @@
+name: cursor
+version: 1
+
+command:
+  argv: [agent, --prompt, "{{prompt}}"]
+  env: {}
+
+session_id:
+  capture:
+    strategy: sidecar_diff
+    snapshot:
+      argv: [agent, ls, --json]
+      id_path: $[*].id
+
+resume:
+  command: "agent --resume={{session_id}}"
+  cwd: "{{job.cwd}}"
+  caveats: ["beta; binary is 'agent'"]

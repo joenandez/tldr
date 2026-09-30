@@ -1,4 +1,6 @@
-export const DEFAULT_TLDR_AGENT_PHASE_TIMEOUT_MS = 5000;
+// The bridge may validate a reply parent and send through Aegis before it
+// polls inbound mail. Its child must outlive the bounded outbound exchange.
+export const DEFAULT_TLDR_AGENT_PHASE_TIMEOUT_MS = 35_000;
 export const DEFAULT_TLDR_AGENT_CHILD_GRACE_MS = 5000;
 // Tightbeam owns reply obligations and dispatch. The tldr; daemon retains only
 // the provider-to-channel bridge poll.

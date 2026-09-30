@@ -1,15 +1,16 @@
-/* Markdown tree to quiet, client-safe email HTML.
+/* Markdown tree to the semantic markup of a letter.
  *
- * Every block becomes a row in one outer table and carries its whole style in a
- * style attribute, because a client that strips <style> must still get the
- * document right. Classes are emitted alongside, and only ever used by the
- * night-lighting media query.
+ * Every block is the element it actually is — <p>, <h2>, <ul>, <pre>,
+ * <blockquote>, <table>, <hr> — with its whole treatment in a style attribute,
+ * because no mail client is guaranteed to keep a stylesheet. There are no
+ * classes, no presentation tables and no fills: a colleague's client does not
+ * emit them, and the moment we do the message stops reading as a message.
  *
- * The body should read like well-formatted correspondence: one native reading
- * face, restrained neutral structure, and blue reserved for actual links.
+ * The agent body is untrusted. `esc` is the boundary, and an image is described
+ * rather than fetched.
  */
 
-import { BODY, MONO, RADIUS, TYPE } from "./tokens.mjs";
+import { HAIRLINE, HEAD_RULE, MONO, MUTED, RULE, SIZE } from "./tokens.mjs";
 import { parseInline } from "./markdown.mjs";
 
 export function esc(value) {
@@ -21,186 +22,122 @@ export function esc(value) {
     .replace(/'/g, "&#39;");
 }
 
-const table = (inner, style = "") =>
-  `<table role="presentation" cellpadding="0" cellspacing="0" border="0" width="100%" style="border-collapse:collapse;${style}">${inner}</table>`;
+const PARAGRAPH = 'style="margin:0 0 15px"';
+const CODE_FACE = `font-family:${MONO};font-size:${SIZE.code}`;
 
 /* --------------------------------------------------------------- inlines */
 
-export function inlineHtml(nodes, t) {
-  return nodes
-    .map((node) => {
-      switch (node.type) {
-        case "text":
-          return esc(node.value);
-        case "break":
-          return "<br>";
-        case "softbreak":
-          return " ";
-        case "code":
-          return (
-            `<code class="tl-code" style="font-family:${MONO};font-size:.95em;` +
-            `background:${t.raised};color:${t.ink};border-radius:${RADIUS.sm};` +
-            `padding:1px 4px;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;">${esc(node.value)}</code>`
-          );
-        case "strong":
-          return `<strong style="font-weight:700;">${inlineHtml(node.children, t)}</strong>`;
-        case "em":
-          return `<em style="font-style:italic;">${inlineHtml(node.children, t)}</em>`;
-        case "strike":
-          return `<span class="tl-muted" style="text-decoration:line-through;color:${t.muted};">${inlineHtml(node.children, t)}</span>`;
-        case "link":
-          return (
-            `<a class="tl-link" href="${esc(node.href)}" style="color:${t.link};` +
-            `text-decoration:underline;overflow-wrap:anywhere;word-break:break-word;">${inlineHtml(node.children, t)}</a>`
-          );
-        case "image":
-          return imagePlaceholder(node, t);
-        default:
-          return "";
-      }
-    })
-    .join("");
+export function inlineHtml(nodes) {
+  return nodes.map(inlineNode).join("");
 }
 
-const inlineText = (source, t) => inlineHtml(parseInline(source), t);
-
-/* Mail clients block remote images and no information may live only in one, so
- * an image is drawn, not loaded. The alt text is the content. */
-function imagePlaceholder(node, t) {
-  const label = node.alt?.trim() || "Image";
-  const href = node.href
-    ? `<div style="${TYPE.tag}color:${t.muted};padding-top:6px;word-break:break-all;" class="tl-muted">` +
-      `<a class="tl-muted" href="${esc(node.href)}" style="color:${t.muted};text-decoration:underline;">${esc(node.href)}</a></div>`
-    : "";
-  return (
-    `<div class="tl-raised" style="border:1px solid ${t.line};border-radius:${RADIUS.sm};background:${t.raised};padding:12px 14px;">` +
-    `<div class="tl-muted" style="${TYPE.tag}color:${t.muted};text-transform:uppercase;padding-bottom:6px;">Image — not loaded</div>` +
-    `<div class="tl-ink" style="${TYPE.small}color:${t.ink};">${esc(label)}</div>${href}</div>`
-  );
-}
-
-/* ---------------------------------------------------------------- blocks */
-
-const GAP = {
-  paragraph: 14,
-  heading: 28,
-  subheading: 22,
-  list: 14,
-  code: 20,
-  table: 20,
-  quote: 20,
-  rule: 20,
-  image: 20,
-};
-
-export function blocksHtml(nodes, t, { first = true } = {}) {
-  let afterHeading = false;
-  let isFirst = first;
-
-  const rows = nodes.map((node) => {
-    const gap = isFirst ? 0 : afterHeading ? 8 : GAP[gapKey(node)];
-    isFirst = false;
-    afterHeading = node.type === "heading";
-    return `<tr><td style="padding:${gap}px 0 0 0;">${blockHtml(node, t)}</td></tr>`;
-  });
-
-  return table(rows.join(""));
-}
-
-function gapKey(node) {
-  if (node.type === "heading")
-    return node.level <= 2 ? "heading" : "subheading";
-  return GAP[node.type] ? node.type : "paragraph";
-}
-
-function blockHtml(node, t) {
+function inlineNode(node) {
   switch (node.type) {
-    case "paragraph": {
-      const only = onlyImage(node);
-      if (only) return imagePlaceholder(only, t);
-      return `<div class="tl-ink" style="${TYPE.body}color:${t.ink};">${inlineText(node.text, t)}</div>`;
-    }
-
-    case "heading":
-      return headingHtml(node, t);
-
-    case "rule":
-      /* A 1px rule across the measure. The hairline is a div inside the cell —
-       * a cell with a background grows to the row's height and prints as a bar. */
-      return table(
-        `<tr><td style="padding:0;">` +
-          `<div class="tl-hair" style="height:1px;background:${t.line};font-size:0;line-height:1px;">&nbsp;</div></td></tr>`,
-      );
-
+    case "text":
+      return esc(node.value);
+    case "break":
+      return "<br>";
+    case "softbreak":
+      return " ";
     case "code":
-      return codeHtml(node, t);
-
-    case "quote":
-      return quoteHtml(node, t);
-
-    case "list":
-      return listHtml(node, t);
-
-    case "table":
-      return tableHtml(node, t);
-
+      return `<code style="${CODE_FACE}">${esc(node.value)}</code>`;
+    case "strong":
+      /* <strong>/<em> rather than <b>/<i>: the plain-text twin turns the same
+       * node into caps, so the emphasis is meaning, not weight. <b> is reserved
+       * for the two places the letter uses weight as a mark — a callout label
+       * and an added diff line. */
+      return `<strong>${inlineHtml(node.children)}</strong>`;
+    case "em":
+      return `<em>${inlineHtml(node.children)}</em>`;
+    case "strike":
+      return `<s>${inlineHtml(node.children)}</s>`;
+    case "link":
+      /* No colour: the client's own link colour is the one the reader already
+       * knows means "link" in their inbox. */
+      return `<a href="${esc(node.href)}">${inlineHtml(node.children)}</a>`;
+    case "image":
+      return imagePlaceholder(node);
     default:
       return "";
   }
 }
 
-function onlyImage(node) {
-  const parsed = parseInline(node.text);
-  const meaningful = parsed.filter(
-    (n) => !(n.type === "text" && !n.value.trim()),
-  );
-  return meaningful.length === 1 && meaningful[0].type === "image"
-    ? meaningful[0]
-    : null;
-}
+const inlineOf = (source) => inlineHtml(parseInline(source));
 
-function headingHtml(node, t) {
-  const text = inlineText(node.text, t);
-  if (node.level <= 2) {
-    return `<div class="tl-ink" style="${TYPE.section}color:${t.ink};">${text}</div>`;
-  }
-  return `<div class="tl-ink" style="${TYPE.sub}color:${t.ink};">${text}</div>`;
-}
-
-/* Fenced code with an info string takes a muted label above the field. It is how
- * you know at a glance whether you are looking at a shell, a diff or a config. */
-function codeHtml(node, t) {
-  const lang = node.lang ? node.lang : "";
-  const label = lang
-    ? `<tr><td class="tl-muted" style="${TYPE.tag}color:${t.muted};padding:0 0 6px 0;">${esc(lang)}</td></tr>`
+/* Mail clients block remote images and no information may live only in one, so
+ * an image is named, not loaded. The alt text is the content and the URL is
+ * offered as a link the reader chooses to follow. */
+function imagePlaceholder(node) {
+  const label = node.alt?.trim() || "Image";
+  const href = node.href
+    ? ` <a href="${esc(node.href)}">${esc(node.href)}</a>`
     : "";
+  return `<span style="color:${MUTED}">[Image: ${esc(label)}]</span>${href}`;
+}
 
+/* ---------------------------------------------------------------- blocks */
+
+export function blocksHtml(nodes) {
+  return nodes.map(blockHtml).join("");
+}
+
+function blockHtml(node) {
+  switch (node.type) {
+    case "paragraph":
+      return `<p ${PARAGRAPH}>${inlineOf(node.text)}</p>`;
+    case "heading":
+      return headingHtml(node);
+    case "rule":
+      return `<hr style="border:0;border-top:1px solid ${HAIRLINE};margin:20px 0">`;
+    case "code":
+      return codeHtml(node);
+    case "quote":
+      return quoteHtml(node);
+    case "list":
+      return listHtml(node);
+    case "table":
+      return tableHtml(node);
+    default:
+      return "";
+  }
+}
+
+function headingHtml(node) {
+  const text = inlineOf(node.text);
+  if (node.level <= 2) {
+    return `<h2 style="font-size:${SIZE.heading};line-height:1.35;font-weight:bold;margin:26px 0 8px">${text}</h2>`;
+  }
+  return `<h3 style="font-size:${SIZE.subheading};line-height:1.4;font-weight:bold;margin:20px 0 6px">${text}</h3>`;
+}
+
+/* A fence is a <pre>: the element already means "these line breaks are the
+ * content". A left rule marks it without a fill, so an inverting client has
+ * nothing to repaint. */
+function codeHtml(node) {
   const body =
     node.lang.toLowerCase() === "diff"
-      ? node.lines.map((line) => diffLine(line, t)).join("<br>")
-      : node.lines.map((line) => esc(line) || "&nbsp;").join("<br>");
+      ? node.lines.map(diffLine).join("\n")
+      : node.lines.map((line) => esc(line) || " ").join("\n");
 
-  return table(
-    label +
-      `<tr><td class="tl-raised" style="border:1px solid ${t.line};border-radius:${RADIUS.sm};background:${t.raised};` +
-      `padding:12px 14px;${TYPE.code}color:${t.ink};white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-all;">${body}</td></tr>`,
+  return (
+    `<pre style="${CODE_FACE};line-height:1.5;border-left:1px solid ${RULE};` +
+    `padding:2px 0 2px 12px;margin:0 0 15px;white-space:pre-wrap;` +
+    `overflow-wrap:anywhere">${body}</pre>`
   );
 }
 
-function diffLine(line, t) {
-  const safe = esc(line) || "&nbsp;";
-  if (line.startsWith("@@")) {
-    return `<span class="tl-muted" style="color:${t.muted};letter-spacing:.04em;">${safe}</span>`;
-  }
-  if (line.startsWith("+")) {
-    return `<span class="tl-ink" style="color:${t.ink};font-weight:600;">${safe}</span>`;
-  }
-  return `<span class="tl-muted" style="color:${t.muted};">${safe}</span>`;
+/* Weight, not colour, carries the addition: it is the one thing that reads the
+ * same in a client that has decided to recolour the block. */
+function diffLine(line) {
+  const safe = esc(line) || " ";
+  return line.startsWith("+")
+    ? `<b>${safe}</b>`
+    : `<span style="color:${MUTED}">${safe}</span>`;
 }
 
-/* A quote whose first line is a bold CAUTION / NOTE / ABORT becomes a banded
- * box — the Markdown an agent can reach for to raise the register. Everything
- * else stays an ordinary quote. */
+/* A quote whose first line is a bold CAUTION / NOTE / ABORT is the Markdown an
+ * agent reaches for to raise the register. It becomes a bold label sentence in
+ * the flow rather than a box — a person writes "CAUTION." and keeps going. */
 const BANDS = new Set(["CAUTION", "NOTE", "ABORT"]);
 
 export function bandOf(node) {
@@ -218,87 +155,88 @@ export function bandOf(node) {
   };
 }
 
-function quoteHtml(node, t) {
+function quoteHtml(node) {
   const band = bandOf(node);
-  if (band) return bandHtml(band.label, blocksHtml(band.children, t), t);
-  return table(
-    `<tr><td width="1" class="tl-hair" style="background:${t.line};width:1px;font-size:0;line-height:1px;">&nbsp;</td>` +
-      `<td class="tl-muted" style="padding:0 0 0 14px;color:${t.muted};">${quoteInner(node.children, t)}</td></tr>`,
+  if (band) return bandHtml(band.label, band.children);
+  return (
+    `<blockquote style="margin:0 0 15px;padding:0 0 0 14px;` +
+    `border-left:1px solid ${RULE};color:${MUTED}">${blocksHtml(node.children)}</blockquote>`
   );
 }
 
-function quoteInner(children, t) {
-  return blocksHtml(
-    children.map((child) =>
-      child.type === "paragraph" ? { ...child, quoted: true } : child,
-    ),
-    { ...t, ink: t.muted },
-  );
+/* The label always closes its own <p> — a block from the rest of the callout
+ * is never interpolated inside it. Only a leading paragraph joins the label
+ * sentence; anything after that (a second paragraph, a list, a fence) renders
+ * as its own sibling block following the label paragraph. */
+export function bandHtml(label, children) {
+  const [first, ...rest] = children;
+  const sentence = first?.type === "paragraph" ? inlineOf(first.text) : "";
+  const tailNodes = first?.type === "paragraph" ? rest : children;
+  const head = sentence
+    ? `<p ${PARAGRAPH}><b>${esc(label)}.</b> ${sentence}</p>`
+    : `<p ${PARAGRAPH}><b>${esc(label)}.</b></p>`;
+  return head + blocksHtml(tailNodes);
 }
 
-export function bandHtml(label, innerHtml, t) {
-  return table(
-    `<tr><td class="tl-raised" style="border:1px solid ${t.strongLine};border-radius:${RADIUS.sm};` +
-      `background:${t.raised};padding:12px 14px;">` +
-      `<div class="tl-ink" style="${TYPE.label}color:${t.ink};padding:0 0 8px 0;">${esc(label)}</div>` +
-      `${innerHtml}</td></tr>`,
-  );
+function listHtml(node) {
+  const tag = node.ordered ? "ol" : "ul";
+  const start =
+    node.ordered && node.start !== 1 ? ` start="${node.start}"` : "";
+  const items = node.items.map(listItemHtml).join("");
+  return `<${tag} style="margin:0 0 15px;padding-left:24px"${start}>${items}</${tag}>`;
 }
 
-function listHtml(node, t) {
-  const rows = node.items.map((item, index) => {
-    const marker =
-      item.checked === null
-        ? node.ordered
-          ? `<span class="tl-muted" style="font-family:${BODY};font-size:13px;line-height:1.4;color:${t.muted};">${node.start + index}.</span>`
-          : `<span class="tl-muted" style="font-family:${BODY};font-size:13.5px;line-height:1;color:${t.muted};">&bull;</span>`
-        : checkbox(item.checked, t);
-
-    const gutter = node.ordered ? 24 : 18;
-    const pad = node.loose ? 5 : 3;
-    const top = item.checked === null ? pad + (node.ordered ? 2 : 4) : pad + 4;
-    return (
-      `<tr><td width="${gutter}" align="${node.ordered ? "right" : "left"}" valign="top" ` +
-      `style="padding:${top}px 10px ${pad}px 0;line-height:1;">${marker}</td>` +
-      `<td valign="top" style="padding:${pad}px 0;">${blocksHtml(item.children, t)}</td></tr>`
-    );
-  });
-  return table(rows.join(""));
+/* A task item pulls its own glyph back into the gutter the bullet vacated, so
+ * ☑ and ☐ line up with the plain items above and below them. */
+function listItemHtml(item) {
+  const inner = itemInner(item.children);
+  if (item.checked === null || item.checked === undefined) {
+    return `<li style="margin:0 0 4px">${inner}</li>`;
+  }
+  const glyph = item.checked ? "☑" : "☐";
+  return `<li style="margin:0 0 4px;list-style:none;margin-left:-22px">${glyph}&nbsp; ${inner}</li>`;
 }
 
-function checkbox(checked, t) {
-  const box = `display:inline-block;width:13px;height:13px;line-height:13px;text-align:center;border-radius:${RADIUS.sm};`;
-  return checked
-    ? `<span class="tl-check-on" style="${box}background:${t.ink};color:${t.stock};font-family:${BODY};font-size:10px;font-weight:600;">&#10003;</span>`
-    : `<span class="tl-check-off" style="${box}border:1px solid ${t.strongLine};">&nbsp;</span>`;
+/* An item's own prose is not a paragraph block — <p> inside <li> opens a gap
+ * the writer did not put there. Anything else (a nested list, a fence) is the
+ * block it is. */
+function itemInner(children) {
+  return children
+    .map((child) =>
+      child.type === "paragraph" ? inlineOf(child.text) : blockHtml(child),
+    )
+    .join("");
 }
 
-function tableHtml(node, t) {
-  const last = node.headers.length - 1;
+function tableHtml(node) {
   const head = node.headers
     .map(
       (cell, i) =>
-        `<td align="${node.align[i]}" class="tl-ink" style="${TYPE.tableHead}color:${t.ink};` +
-        `padding:0 ${i === last ? 0 : 12}px 7px 0;` +
-        `border-bottom:1px solid ${t.strongLine};vertical-align:bottom;">${inlineText(cell, t)}</td>`,
+        `<th style="text-align:${node.align[i]};font-weight:bold;padding:6px 18px 6px 0;` +
+        `border-bottom:1px solid ${HEAD_RULE};font-size:${SIZE.table};vertical-align:bottom">` +
+        `${inlineOf(cell)}</th>`,
     )
     .join("");
 
   const body = node.rows
     .map(
       (row) =>
-        `<tr>${row
-          .map(
-            (cell, i) =>
-              `<td align="${node.align[i]}" class="tl-ink tl-ruled" style="${TYPE.tableCell}color:${t.ink};` +
-              `padding:8px ${i === last ? 0 : 12}px 8px 0;border-bottom:1px solid ${t.line};vertical-align:top;">` +
-              `${inlineText(cell, t)}</td>`,
-          )
-          .join("")}</tr>`,
+        `<tr>${row.map((cell, i) => cellHtml(cell, i, node)).join("")}</tr>`,
     )
     .join("");
 
-  return table(`<tr>${head}</tr>${body}`);
+  return (
+    `<table style="border-collapse:collapse;margin:0 0 18px;` +
+    `font-variant-numeric:lining-nums tabular-nums"><tr>${head}</tr>${body}</table>`
+  );
 }
 
-export { table as presentationTable, imagePlaceholder, BODY, MONO };
+function cellHtml(cell, index, node) {
+  return (
+    `<td style="text-align:${node.align[index]};padding:6px 18px 6px 0;` +
+    `border-bottom:1px solid ${HAIRLINE};font-size:${SIZE.table};vertical-align:top;` +
+    `font-variant-numeric:lining-nums tabular-nums">${inlineOf(cell)}</td>`
+  );
+}
+
+export { imagePlaceholder, MONO };

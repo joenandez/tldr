@@ -1,0 +1,433 @@
+#!/bin/sh
+# The tldr; front door: `tldr-agents <area> <verb> [args...]`.
+#
+# Each area runs one existing component CLI over the process boundary, with
+# the arguments, stdin, stdout, and exit status passed through unchanged:
+#
+#   tldr-agents setup|status|configure|repair|uninstall|version -> tldr-agent <same>
+#   tldr-agents messaging <args...>   -> tightbeam <args...>
+#   tldr-agents tasks <args...>       -> helm-tasks <args...>
+#   tldr-agents assignments <args...> -> helm-assignments <args...>
+#
+# The component launchers live in <package root>/libexec, not bin/: Claude
+# Code adds each enabled plugin's bin/ to its Bash PATH, so bin/ holds only
+# this front door and every surface exposes one command (W6 lane L).
+#
+# The command is `tldr-agents`, not `tldr`, because the tldr-pages CLI
+# installs `tldr` (Joe, 2026-09-28). FRONT_DOOR below is the only place this
+# script spells its own name.
+#
+# The plugin's hooks.json runs `tldr-agents messaging hook <event>` for every session
+# event. Those calls skip the registry lookups below: session-start,
+# user-prompt-submit, and stop run `tightbeam hook <event>`, and pre-tool-use
+# and post-tool-use run Tightbeam's shell gates in messaging/hooks, which start
+# no Node process unless a delivery is waiting (TIGHTBEAM_CLI names the
+# Tightbeam launcher they call then; it defaults to this package's own,
+# libexec/tightbeam).
+#
+# Help is answered here from the registry at the end of this file, so it
+# never needs the runtime payload and never runs a component command by
+# accident. A verb whose component already has reliable per-verb help is
+# marked `component`, and only its help request is forwarded, as `--help`.
+# Anything that is not a help-only request passes to the component, including
+# verbs this registry does not list.
+set -eu
+
+FRONT_DOOR=tldr-agents
+
+shim=$0
+if [ -L "$shim" ]; then
+  link_target=$(/usr/bin/readlink "$shim")
+  case "$link_target" in
+    /*) shim=$link_target ;;
+    *) shim=$(/usr/bin/dirname -- "$shim")/$link_target ;;
+  esac
+fi
+# No dirname process: the plugin hooks run this on every tool call.
+case "$shim" in
+  */*) bin_dir=${shim%/*} ;;
+  *) bin_dir=. ;;
+esac
+case "$bin_dir" in
+  */bin) libexec_dir=${bin_dir%/bin}/libexec ;;
+  *) libexec_dir=${bin_dir}/../libexec ;;
+esac
+
+usage_error() {
+  printf '%s: %s\n' "$FRONT_DOOR" "$1" >&2
+  exit 64
+}
+
+# Record types, tab-separated:
+#   area  <area> <component> <help-json: component|registry> <summary>
+#   verb  <area> <verb words> <help: component|registry> <summary>
+#   usage <area> <verb words> <usage after "tldr-agents <area>">
+# Area `lifecycle` is invoked without an area word: `tldr-agents setup`.
+registry() {
+  /bin/cat <<'REGISTRY'
+area	lifecycle	tldr-agent	registry	Set up, check, configure, repair, or remove tldr; (the setup skill).
+verb	lifecycle	setup	registry	Install tldr; and continue onboarding.
+usage	lifecycle	setup	setup [--json] [--force-downgrade]
+verb	lifecycle	status	registry	Check installation and messaging readiness.
+usage	lifecycle	status	status [--json]
+verb	lifecycle	configure	registry	Open the installed app to change owner or replace the API key.
+usage	lifecycle	configure	configure [--json]
+verb	lifecycle	repair	registry	Repair the installation and messaging setup.
+usage	lifecycle	repair	repair [--json] [--force-downgrade]
+verb	lifecycle	uninstall	registry	Open the app for uninstall confirmation.
+usage	lifecycle	uninstall	uninstall [--json]
+verb	lifecycle	version	registry	Print the active public or local development version.
+usage	lifecycle	version	version [--json]
+area	messaging	tightbeam	registry	Messages between agent sessions and with the user (Tightbeam; the messaging skill).
+verb	messaging	agent send	component	Send a message when no response or action is expected.
+usage	messaging	agent send	agent send --to agent:<ref> --subject <text> --reason <text> (--body <text> | --body-file <path>) [--no-reply]
+usage	messaging	agent send	agent send --to user --subject <text> --reason <text> (--body <text> | --body-file <path>) [--channel <selector>|all] [--no-reply]
+verb	messaging	agent request	component	Open tracked work with another agent or yourself.
+usage	messaging	agent request	agent request --to self|agent:<ref> --subject <text> --reason <text> (--body <text> | --body-file <path>) --completion-mode <message_committed|delivery_confirmed> [--notify user] [--channel <selector>]
+verb	messaging	agent reply	component	Reply to a received message, including a user message.
+usage	messaging	agent reply	agent reply --message <message_id> (--body <text> | --body-file <path>) [--channel <selector>] [--no-reply] [--wait-delivery <duration>]
+verb	messaging	agent receive	component	Receive the exact body of one notified message.
+usage	messaging	agent receive	agent receive --message <message_id>
+verb	messaging	agent ack	component	Acknowledge work that continues.
+usage	messaging	agent ack	agent ack --work <work_id> (--body <text> | --body-file <path>)
+verb	messaging	agent update	component	Report progress on tracked work.
+usage	messaging	agent update	agent update --work <work_id> (--body <text> | --body-file <path>)
+verb	messaging	agent delegate	component	Offer tracked work to another agent.
+usage	messaging	agent delegate	agent delegate --work <work_id> --to agent:<ref> (--body <text> | --body-file <path>)
+verb	messaging	agent accept	component	Accept delegated work.
+usage	messaging	agent accept	agent accept --work <delegation_id> (--body <text> | --body-file <path>)
+verb	messaging	agent decline	component	Decline delegated work.
+usage	messaging	agent decline	agent decline --work <delegation_id> (--body <text> | --body-file <path>)
+verb	messaging	agent complete	component	Finish tracked work with its result.
+usage	messaging	agent complete	agent complete --work <work_id> (--body <text> | --body-file <path>) [--notify user] [--wait-delivery <duration>]
+verb	messaging	agent cancel	component	Cancel tracked work.
+usage	messaging	agent cancel	agent cancel --work <work_id> --reason <text>
+verb	messaging	agent inbox	component	List received messages.
+usage	messaging	agent inbox	agent inbox [--unread]
+verb	messaging	agent status	component	Show tracked work or outbound delivery status.
+usage	messaging	agent status	agent status (--work <work_id>|--message <message_id>) [--wait-delivery <duration>]
+verb	messaging	doctor	registry	Check setup and connection; every failure names its own fix.
+usage	messaging	doctor	doctor
+verb	messaging	logs	registry	Print the end of the Tightbeam daemon log.
+usage	messaging	logs	logs [--lines <n>]
+verb	messaging	bootstrap	registry	Set up or restart Tightbeam; safe to re-run.
+usage	messaging	bootstrap	bootstrap [--app-name <name>] [--authority <name>] [--force]
+verb	messaging	hook	registry	Run one session hook with its payload on stdin; the plugin's hooks call this.
+usage	messaging	hook	hook session-start|user-prompt-submit|stop [--runtime <id>]
+usage	messaging	hook	hook pre-tool-use|post-tool-use
+area	tasks	helm-tasks	component	Scheduled jobs, the scheduler daemon, history, and logs (Helm; the tasks skill).
+verb	tasks	schedule	component	Create runnable scheduled work and activate the workspace runtime.
+verb	tasks	create	component	Create a stored job and register its scope into the dispatch rotation.
+verb	tasks	update	component	Apply a partial patch to an existing job.
+verb	tasks	validate	component	Validate a job from flags, --stdin, or --job-file without writing it.
+verb	tasks	status	component	Show workspace scheduler status; use --deep for runtime health.
+verb	tasks	up	component	Register the workspace and ensure the supervised service is running.
+verb	tasks	list	component	List jobs in the current workspace.
+verb	tasks	get	component	Show one job by id.
+verb	tasks	history	component	Show previous run events for one job.
+verb	tasks	logs	component	Read stdout or stderr logs for the latest or selected run.
+verb	tasks	job-status	component	Show live process state for a job.
+verb	tasks	run	component	Run a job now.
+verb	tasks	run-now	component	Run a job now.
+verb	tasks	report	component	Report the outcome of the current managed agent run.
+verb	tasks	cancel	component	Cancel a scheduled job before it runs.
+verb	tasks	delete	component	Permanently delete a job and any pending runs.
+verb	tasks	pause	component	Pause a job, or all jobs with a tag.
+verb	tasks	resume	component	Resume a paused job, or all jobs with a tag.
+verb	tasks	service status	component	Show global service state; use --deep for workspace runtime health.
+verb	tasks	service update	component	Refresh scheduler and sentinel definitions and restart them.
+verb	tasks	desired-state	component	Inspect or set the durable scheduler desired state.
+verb	tasks	migrate	component	Run runtime store schema migrations.
+verb	tasks	skills refresh	component	Refresh installed Helm agent skills.
+verb	tasks	doctor	registry	Check the workspace, runtime, and installed skills.
+usage	tasks	doctor	doctor --cwd <path> [--pretty]
+area	assignments	helm-assignments	registry	Skill-backed recurring agent work (Helm; the tasks skill).
+verb	assignments	create	registry	Register a new skill-backed assignment.
+usage	assignments	create	create --name <name> [--description <text>] (--in <dur>|--at <iso>|--cron <expr>|--every <dur>) --provider <provider> --permission-mode <mode> --completion-delivery <activity|notify|conversation> [--skill <path>] [--model <model>] [--reasoning-effort <effort>] [--cwd <path>] [--activate] [--pretty]
+verb	assignments	list	registry	List assignments.
+usage	assignments	list	list [--status active|disabled|archived|all] [--all-scopes [--with-terminal-runs]] [--cwd <path>] [--pretty]
+verb	assignments	show	registry	Show full detail for one assignment.
+usage	assignments	show	show <id-or-name> [--cwd <path>] [--pretty]
+verb	assignments	path	registry	Print the backing-skill path.
+usage	assignments	path	path <id-or-name> [--cwd <path>] [--pretty]
+verb	assignments	skill	registry	Read the backing-skill UTF-8 content as JSON.
+usage	assignments	skill	skill <id-or-name> [--cwd <path>] [--pretty]
+verb	assignments	update	registry	Change schedule, metadata, or runtime options.
+usage	assignments	update	update <id-or-name> [--in <dur>|--at <iso>|--cron <expr>|--every <dur>] [--name <name>] [--description <text>] [--completion-delivery <mode>] [--enable|--disable] [--provider <provider>] [--skill <path>] [--model <model>] [--reasoning-effort <effort>] [--permission-mode <mode>] [--pretty]
+verb	assignments	retarget	registry	Move an assignment to another working directory, keeping its id and history.
+usage	assignments	retarget	retarget <id-or-name> --to-cwd <path> [--pretty]
+verb	assignments	archive	registry	Stop scheduling; keep the backing skill and history.
+usage	assignments	archive	archive <id-or-name> [--pretty]
+verb	assignments	unarchive	registry	Re-arm a previously archived assignment.
+usage	assignments	unarchive	unarchive <id-or-name> [--pretty]
+verb	assignments	run	registry	Trigger an immediate direct run.
+usage	assignments	run	run <id-or-name> [--pretty]
+verb	assignments	runs	registry	List run history for an assignment.
+usage	assignments	runs	runs <id-or-name> [--pretty]
+verb	assignments	completion	registry	Show the completion record for one run.
+usage	assignments	completion	completion <run-id> [--pretty]
+verb	assignments	runtime-options	registry	List accepted runtime options per provider.
+usage	assignments	runtime-options	runtime-options [--pretty]
+verb	assignments	logs	registry	Print the logs of one run.
+usage	assignments	logs	logs <run-id>
+REGISTRY
+}
+
+# Shared awk helpers: JSON string escaping and the "tldr-agents <area>" prefix.
+awk_lib='
+function esc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); gsub(/\t/, "\\t", s); return s }
+function prefix(a) { return a == "lifecycle" ? ENVIRON["FRONT_DOOR"] : ENVIRON["FRONT_DOOR"] " " a }
+function pad(s, w) { while (length(s) < w) s = s " "; return s }
+'
+
+area_field() { # <area> <field number: 3 component, 4 help-json, 5 summary>
+  registry | AREA=$1 FIELD=$2 /usr/bin/awk -F '\t' \
+    '$1 == "area" && $2 == ENVIRON["AREA"] { print $(ENVIRON["FIELD"]); exit }'
+}
+
+# Prints "<word count>|<help source>|<verb>" for the longest registered verb
+# that the leading arguments spell, or nothing. Verbs are at most three words.
+match_verb() { # <area> [args...]
+  registry | AREA=$1 W1=${2-} W2=${3-} W3=${4-} /usr/bin/awk -F '\t' '
+    $1 == "verb" && $2 == ENVIRON["AREA"] {
+      n = split($3, words, " ")
+      if (n > 3) next
+      ok = 1
+      for (i = 1; i <= n; i++) if (words[i] != ENVIRON["W" i]) ok = 0
+      if (ok && n > best) { best = n; verb = $3; source = $4 }
+    }
+    END { if (best) printf "%d|%s|%s\n", best, source, verb }'
+}
+
+# True when a verb group such as "agent" or "service" prefixes a verb.
+is_group() { # <area> <word>
+  registry | AREA=$1 WORD=$2 /usr/bin/awk -F '\t' '
+    $1 == "verb" && $2 == ENVIRON["AREA"] && index($3, ENVIRON["WORD"] " ") == 1 { found = 1 }
+    END { exit found ? 0 : 1 }'
+}
+
+top_help() { # [text|json]
+  registry | FRONT_DOOR=$FRONT_DOOR MODE=${1-text} /usr/bin/awk -F '\t' "$awk_lib"'
+    $1 == "area" && $2 != "lifecycle" { areas[++na] = $2; asum[$2] = $5; acomp[$2] = $3 }
+    $1 == "verb" && $2 == "lifecycle" { verbs[++nv] = $3; vsum[$3] = $5 }
+    END {
+      if (ENVIRON["MODE"] == "json") {
+        fd = esc(ENVIRON["FRONT_DOOR"])
+        printf "{\"ok\":true,\"command\":\"help\",\"data\":{\"command\":\"%s\",\"usage\":[\"%s <command> [--json]\",\"%s <area> <verb> [args...]\"],\"commands\":[", fd, fd, fd
+        for (i = 1; i <= nv; i++) printf "%s{\"verb\":\"%s\",\"summary\":\"%s\",\"component\":\"tldr-agent\"}", (i > 1 ? "," : ""), esc(verbs[i]), esc(vsum[verbs[i]])
+        printf "],\"areas\":["
+        for (i = 1; i <= na; i++) printf "%s{\"area\":\"%s\",\"summary\":\"%s\",\"component\":\"%s\"}", (i > 1 ? "," : ""), esc(areas[i]), esc(asum[areas[i]]), esc(acomp[areas[i]])
+        print "]},\"errors\":[]}"
+        exit
+      }
+      print "tldr; - one command for setup, messaging, tasks, and assignments."
+      print ""
+      fd = ENVIRON["FRONT_DOOR"]
+      print "Usage:"
+      print "  " fd " <command> [--json]"
+      print "  " fd " <area> <verb> [args...]"
+      print "  " fd " help [<area> [<verb>]]"
+      print ""
+      print "Commands (the setup skill):"
+      for (i = 1; i <= nv; i++) print "  " pad(verbs[i], 12) " " vsum[verbs[i]]
+      print ""
+      print "Areas:"
+      for (i = 1; i <= na; i++) print "  " pad(areas[i], 12) " " asum[areas[i]]
+      print ""
+      print "Run " fd " <area> --help for its verbs and " fd " <area> <verb> --help for one verb."
+      print fd " --version prints the version."
+    }'
+}
+
+area_help() { # <area> [text|json] [group]
+  registry | FRONT_DOOR=$FRONT_DOOR AREA=$1 MODE=${2-text} GROUP=${3-} /usr/bin/awk -F '\t' "$awk_lib"'
+    $1 == "area" && $2 == ENVIRON["AREA"] { comp = $3; summary = $5 }
+    $1 == "verb" && $2 == ENVIRON["AREA"] {
+      if (ENVIRON["GROUP"] != "" && index($3, ENVIRON["GROUP"] " ") != 1) next
+      verbs[++n] = $3; vsum[$3] = $5
+      if (length($3) > width) width = length($3)
+    }
+    END {
+      a = ENVIRON["AREA"]; g = ENVIRON["GROUP"]
+      name = prefix(a) (g == "" ? "" : " " g)
+      if (ENVIRON["MODE"] == "json") {
+        printf "{\"ok\":true,\"command\":\"help\",\"data\":{\"command\":\"%s\",\"area\":\"%s\",\"component\":\"%s\",\"summary\":\"%s\",\"usage\":\"%s <verb> [args...]\",\"verbs\":[", esc(name), esc(a), esc(comp), esc(summary), esc(name)
+        for (i = 1; i <= n; i++) printf "%s{\"verb\":\"%s\",\"summary\":\"%s\"}", (i > 1 ? "," : ""), esc(verbs[i]), esc(vsum[verbs[i]])
+        print "]},\"errors\":[]}"
+        exit
+      }
+      printf "%s - %s\n\nUsage: %s <verb> [args...]\n\nVerbs:\n", name, summary, prefix(a)
+      for (i = 1; i <= n; i++) print "  " pad(verbs[i], width) "  " vsum[verbs[i]]
+      printf "\nArguments pass unchanged to %s, so its other commands also work\nthrough %s <command>. Run %s <verb> --help for one verb.\n", comp, prefix(a), prefix(a)
+    }'
+}
+
+verb_help() { # <area> <verb> [text|json]
+  registry | FRONT_DOOR=$FRONT_DOOR AREA=$1 VERB=$2 MODE=${3-text} /usr/bin/awk -F '\t' "$awk_lib"'
+    $1 == "area" && $2 == ENVIRON["AREA"] { comp = $3 }
+    $1 == "verb" && $2 == ENVIRON["AREA"] && $3 == ENVIRON["VERB"] { summary = $5 }
+    $1 == "usage" && $2 == ENVIRON["AREA"] && $3 == ENVIRON["VERB"] { usage[++n] = prefix($2) " " $4 }
+    END {
+      a = ENVIRON["AREA"]; v = ENVIRON["VERB"]
+      if (ENVIRON["MODE"] == "json") {
+        printf "{\"ok\":true,\"command\":\"help\",\"data\":{\"command\":\"%s %s\",\"area\":\"%s\",\"verb\":\"%s\",\"component\":\"%s\",\"summary\":\"%s\",\"usage\":[", esc(prefix(a)), esc(v), esc(a), esc(v), esc(comp), esc(summary)
+        for (i = 1; i <= n; i++) printf "%s\"%s\"", (i > 1 ? "," : ""), esc(usage[i])
+        printf "],\"runs\":\"%s %s\"},\"errors\":[]}\n", esc(comp), esc(v)
+        exit
+      }
+      printf "%s %s - %s\n\nUsage:\n", prefix(a), v, summary
+      if (n == 0) printf "  %s %s [args...]\n", prefix(a), v
+      for (i = 1; i <= n; i++) printf "  %s\n", usage[i]
+      printf "\nRuns: %s %s\n", comp, v
+    }'
+}
+
+# Prints "text" or "json" when every argument is a help flag or an output
+# format flag and at least one is a help flag; fails otherwise.
+help_mode() { # [args...]
+  mode=""
+  [ "$#" -gt 0 ] || return 1
+  for argument in "$@"; do
+    case "$argument" in
+      --help|-h) [ -n "$mode" ] || mode=text ;;
+      --help-json) mode=json ;;
+      --json|--pretty) ;;
+      *) return 1 ;;
+    esac
+  done
+  [ -n "$mode" ] || return 1
+  printf '%s\n' "$mode"
+}
+
+# The help mode of the arguments after the first <count> words, if help-only.
+help_after() { # <count> [args...]
+  count=$1
+  shift
+  [ "$#" -gt "$count" ] || return 1
+  shift "$count"
+  help_mode "$@"
+}
+
+run_component() { # <component> [args...]
+  component=$1
+  shift
+  exec /bin/sh "${libexec_dir}/${component}" "$@"
+}
+
+# `tldr-agents help <area> <verb...>`, `tldr-agents <area> help <verb...>`,
+# and `tldr-agents <area> <verb...> --help` all end here, in text or json mode.
+dispatch_help() { # <mode> <area> [words...]
+  mode=$1
+  area=$2
+  shift 2
+  if [ "$#" -eq 0 ]; then
+    if [ "$area" = lifecycle ]; then top_help "$mode"; else area_help "$area" "$mode"; fi
+    exit 0
+  fi
+  found=$(match_verb "$area" "$@")
+  if [ -n "$found" ] && [ "$#" -eq "${found%%|*}" ]; then
+    rest=${found#*|}
+    source=${rest%%|*}
+    verb=${rest#*|}
+    component=$(area_field "$area" 3)
+    if [ "$source" = component ]; then
+      # Verb words come from the registry, so splitting them is safe.
+      # shellcheck disable=SC2086
+      [ "$mode" = json ] || run_component "$component" $verb --help
+      # shellcheck disable=SC2086
+      [ "$(area_field "$area" 4)" != component ] ||
+        run_component "$component" $verb --help-json
+    fi
+    verb_help "$area" "$verb" "$mode"
+    exit 0
+  fi
+  if [ "$#" -eq 1 ] && [ "$area" != lifecycle ] && is_group "$area" "$1"; then
+    area_help "$area" "$mode" "$1"
+    exit 0
+  fi
+  [ "$area" != lifecycle ] || usage_error "unknown command '$*'. Run $FRONT_DOOR --help."
+  usage_error "$area has no verb '$*'. Run $FRONT_DOOR $area --help."
+}
+
+area_for() { # <word>; prints the area an invocation word selects
+  case "$1" in
+    setup|status|configure|repair|uninstall|version) printf 'lifecycle\n' ;;
+    messaging|tasks|assignments) printf '%s\n' "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+# Session hooks come first: pre-tool-use and post-tool-use fire on every tool
+# call, so they run without the registry lookups below.
+if [ "$#" -ge 3 ] && [ "$1" = messaging ] && [ "$2" = hook ]; then
+  event=$3
+  case "$event" in
+    session-start|user-prompt-submit|stop|pre-tool-use|post-tool-use)
+      if mode=$(help_after 3 "$@"); then dispatch_help "$mode" messaging hook; fi
+      shift 3
+      case "$event" in
+        pre-tool-use|post-tool-use)
+          [ "$#" -eq 0 ] ||
+            usage_error "messaging hook $event takes no arguments; set TIGHTBEAM_RUNTIME to bind a runtime."
+          # The gates call this package's own Tightbeam launcher,
+          # libexec/tightbeam, unless TIGHTBEAM_CLI binds another. No log:
+          # this runs on every tool call.
+          TIGHTBEAM_CLI=${TIGHTBEAM_CLI:-${libexec_dir}/tightbeam}
+          export TIGHTBEAM_CLI
+          exec /bin/sh "${bin_dir}/../messaging/hooks/${event}"
+          ;;
+      esac
+      run_component tightbeam hook "$event" "$@"
+      ;;
+  esac
+fi
+
+[ "$#" -gt 0 ] || { top_help; exit 0; }
+case "$1" in
+  --help|-h) top_help; exit 0 ;;
+  --help-json) top_help json; exit 0 ;;
+  --version|-v)
+    shift
+    run_component tldr-agent --version "$@"
+    ;;
+  help)
+    shift
+    [ "$#" -gt 0 ] || { top_help; exit 0; }
+    area=$(area_for "$1") || usage_error "unknown command '$1'. Run $FRONT_DOOR --help."
+    [ "$area" = lifecycle ] || shift
+    dispatch_help text "$area" "$@"
+    ;;
+esac
+
+area=$(area_for "$1") || usage_error "unknown command '$1'. Run $FRONT_DOOR --help."
+component=$(area_field "$area" 3)
+
+if [ "$area" = lifecycle ]; then
+  if mode=$(help_after 1 "$@"); then dispatch_help "$mode" lifecycle "$1"; fi
+  run_component "$component" "$@"
+fi
+
+shift
+[ "$#" -gt 0 ] || { area_help "$area"; exit 0; }
+case "$1" in
+  --help|-h) area_help "$area"; exit 0 ;;
+  --help-json) area_help "$area" json; exit 0 ;;
+  help)
+    shift
+    dispatch_help text "$area" "$@"
+    ;;
+esac
+
+# A help-only request after a registered verb or verb group is answered here;
+# the same after an unregistered verb is a usage error instead of a component
+# run. Every other invocation runs the component with its arguments unchanged.
+found=$(match_verb "$area" "$@")
+if [ -n "$found" ]; then
+  verb=${found#*|}
+  verb=${verb#*|}
+  # shellcheck disable=SC2086
+  if mode=$(help_after "${found%%|*}" "$@"); then dispatch_help "$mode" "$area" $verb; fi
+elif mode=$(help_after 1 "$@"); then
+  dispatch_help "$mode" "$area" "$1"
+fi
+run_component "$component" "$@"

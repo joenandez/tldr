@@ -1,0 +1,7 @@
+{
+  "name": "tldr",
+  "displayName": "tldr;",
+  "version": "0.1.0",
+  "description": "Private owner email continuity for local AI agent sessions.",
+  "hooks": "./.codex-plugin/hooks/hooks.json"
+}

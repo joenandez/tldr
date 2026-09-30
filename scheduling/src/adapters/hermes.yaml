@@ -1,0 +1,18 @@
+name: hermes
+version: 1
+
+command:
+  argv: [hermes, --prompt, "{{prompt}}"]
+  env: {}
+
+session_id:
+  capture:
+    strategy: sidecar_diff
+    snapshot:
+      argv: [hermes, sessions, list, --json]
+      id_path: $[*].id
+
+resume:
+  command: "hermes --resume {{session_id}}"
+  cwd: "{{job.cwd}}"
+  caveats: ["same-machine"]

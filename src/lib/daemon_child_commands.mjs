@@ -149,6 +149,7 @@ export function runHelmTasksJsonChild({
           parsed?.errors?.[0]?.message ||
           parsed?.errors?.[0]?.code ||
           (code === 0 ? null : `child exited ${code ?? closeSignal}`),
+        error_code: parsed?.errors?.[0]?.code || null,
         data: parsed?.data || null,
         payload: parsed,
         stdout,

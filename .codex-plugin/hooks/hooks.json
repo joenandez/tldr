@@ -1,0 +1,60 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/bin/tldr-agents\" messaging hook session-start",
+            "_tightbeam": "tightbeam-managed:runtime-hooks-v2"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/bin/tldr-agents\" messaging hook user-prompt-submit",
+            "_tightbeam": "tightbeam-managed:runtime-hooks-v2"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/bin/tldr-agents\" messaging hook stop",
+            "timeout": 14460,
+            "_tightbeam": "tightbeam-managed:runtime-hooks-v2"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/bin/tldr-agents\" messaging hook pre-tool-use",
+            "_tightbeam": "tightbeam-managed:runtime-hooks-v2"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/bin/tldr-agents\" messaging hook post-tool-use",
+            "_tightbeam": "tightbeam-managed:runtime-hooks-v2"
+          }
+        ]
+      }
+    ]
+  }
+}

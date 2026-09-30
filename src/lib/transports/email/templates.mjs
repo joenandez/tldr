@@ -9,9 +9,12 @@
  * subject. Callers may still pass the legacy field; it is ignored.
  */
 
+import { FRONT_DOOR_COMMAND } from "../../front_door_command.mjs";
 import { AGENTS, render } from "./render/email.mjs";
+import { parseInline, parseMarkdown } from "./render/markdown.mjs";
+import { inlineText } from "./render/text.mjs";
 
-const TEMPLATE_VERSION = "tldr-email-v4";
+const TEMPLATE_VERSION = "tldr-email-v5";
 
 const VALID_STATES = new Set([
   "conversation",
@@ -55,9 +58,11 @@ const SYSTEM_KIND = Object.freeze({
  * The derivation exists for agent messages, which nobody configures; a shipping
  * system state should never be one regex away from telling an owner that
  * something needs them when it does not. */
+const DEFAULT_CONVERSATION_SUBJECT = "Update: From your agent";
+const DERIVED_SUBJECT_CLAUSE_CAP = 60;
+
 const DEFAULTS = Object.freeze({
   conversation: {
-    subject: "Update from your agent",
     body: "",
   },
   acknowledgement: {
@@ -74,9 +79,9 @@ started in its place — a new session would not have your context.
 On the machine running the agent:
 
 \`\`\`bash
-tldr status
+${FRONT_DOOR_COMMAND} status
 \`\`\``,
-    reply: "Run `tldr status` for the next repair step.",
+    reply: `Run \`${FRONT_DOOR_COMMAND} status\` for the next repair step.`,
   },
   attachment_ignored: {
     action: "none",
@@ -147,6 +152,82 @@ function oneLine(value) {
   return cleanText(value).replace(/\s+/g, " ");
 }
 
+const SENTENCE_END = /[.!?](?:\s|$)/g;
+
+/* A bounded, explicit list of abbreviations whose period is not a sentence
+ * boundary. General dotted initialisms ("J.", "U.S.", "U.S.A.") are matched
+ * structurally by DOTTED_INITIALS instead of enumerated here. */
+const ABBREVIATIONS = new Set([
+  "e.g.",
+  "i.e.",
+  "etc.",
+  "vs.",
+  "cf.",
+  "mr.",
+  "mrs.",
+  "ms.",
+  "dr.",
+  "prof.",
+  "sr.",
+  "jr.",
+  "st.",
+  "no.",
+  "approx.",
+]);
+
+const DOTTED_INITIALS = /^(?:[a-z]\.){1,}$/i;
+
+/* True when the text ending at `end` (a candidate sentence boundary,
+ * inclusive of the terminating punctuation) actually closes on an
+ * abbreviation rather than a sentence. Deliberate choice: an abbreviation in
+ * the explicit set or a dotted initialism is never a boundary, even when the
+ * next word is capitalized and reads like a new sentence — a capitalization
+ * heuristic gets titles and names wrong more often than the explicit list
+ * does. */
+function endsOnAbbreviation(text, end) {
+  const match = /(\S+)$/.exec(text.slice(0, end));
+  if (!match) return false;
+  const token = match[1].toLowerCase();
+  return ABBREVIATIONS.has(token) || DOTTED_INITIALS.test(token);
+}
+
+function firstSentence(plainText) {
+  const collapsed = plainText.replace(/\s+/g, " ").trim();
+  if (!collapsed) return "";
+  SENTENCE_END.lastIndex = 0;
+  let match;
+  while ((match = SENTENCE_END.exec(collapsed))) {
+    const end = match.index + 1;
+    if (!endsOnAbbreviation(collapsed, end)) {
+      return collapsed.slice(0, end).trim();
+    }
+  }
+  return collapsed;
+}
+
+/* Code-point aware: an agent's first sentence may contain characters outside
+ * the UTF-16 BMP, and slicing by index would split a surrogate pair. */
+function capClause(clause, limit) {
+  const codePoints = Array.from(clause);
+  if (codePoints.length <= limit) return clause;
+  return `${codePoints.slice(0, limit - 1).join("")}…`;
+}
+
+/* The conversation state has no configured subject: it is the agent's own
+ * words, so a caller who omits one still gets the `State: clause` grammar
+ * every other state carries. The clause is the first sentence of the first
+ * paragraph, not the whole body — a subject line is a label, not a summary. */
+function deriveConversationSubject(body) {
+  const paragraph = parseMarkdown(body).find(
+    (node) => node.type === "paragraph" && node.text.trim(),
+  );
+  if (!paragraph) return DEFAULT_CONVERSATION_SUBJECT;
+  const plainText = inlineText(parseInline(paragraph.text));
+  const clause = firstSentence(plainText);
+  if (!clause) return DEFAULT_CONVERSATION_SUBJECT;
+  return `Update: ${capClause(clause, DERIVED_SUBJECT_CLAUSE_CAP)}`;
+}
+
 function debugSetupTemplateDrift(stage, data) {
   if (process.env.TLDR_AGENT_DEBUG_TEMPLATE_DRIFT !== "1") return;
   process.stderr.write(
@@ -174,10 +255,15 @@ export function renderTldrAgentEmail(input = {}) {
     throw new TypeError(`unknown tldr; email state: ${state}`);
   }
   const defaults = DEFAULTS[state];
+  const resolvedBody = cleanText(body) || defaults.body;
+  const fallbackSubject =
+    state === "conversation"
+      ? deriveConversationSubject(resolvedBody)
+      : defaults.subject;
 
   const rendered = render({
-    subject: oneLine(subject || defaults.subject),
-    body: cleanText(body) || defaults.body,
+    subject: oneLine(subject || fallbackSubject),
+    body: resolvedBody,
     system: SYSTEM_KIND[state] ?? null,
     reply: cleanText(replyInstruction) || defaults.reply,
     notice: cleanText(securityNotice) || defaults.notice,

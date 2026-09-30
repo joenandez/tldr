@@ -2,158 +2,116 @@
   "schema_version": 1,
   "package": {
     "name": "@joenandez/tldr",
-    "version": "1.1.0"
+    "version": "0.1.0"
   },
   "source": {
     "repository": "tldr-internal",
-    "commit": "de7ad8d0852e9b47e9d9b853898f4c42597a17f0"
+    "commit": "94fe6e4e6e70b8e54b541a4afdd52c47cbd327ce"
   },
   "files": [
     {
+      "path": ".agents/plugins/marketplace.json",
+      "source": ".agents/plugins/marketplace.json",
+      "sha256": "e8fa31abceb7e1279ddce8f8eac7ebece00b00df4126a938e35a1689dd30d1b9",
+      "bytes": 265,
+      "mode": "644"
+    },
+    {
+      "path": ".claude-plugin/hooks/hooks.json",
+      "source": ".claude-plugin/hooks/hooks.json",
+      "sha256": "3da8ed3edfce3986e84b179b161cb9b98830af670dccc64a5def6e753f4c05a2",
+      "bytes": 1483,
+      "mode": "644"
+    },
+    {
       "path": ".claude-plugin/marketplace.json",
       "source": ".claude-plugin/marketplace.json",
-      "sha256": "802c898ca49302b658e68a189b377b9127f6e8072ed99073d3f6e84af21038a9",
-      "bytes": 563,
+      "sha256": "b7c832792c6ff6e7ab7a1555d209c6b95eb49f94b80b24557c9644ac46771183",
+      "bytes": 590,
       "mode": "644"
     },
     {
       "path": ".claude-plugin/plugin.json",
       "source": ".claude-plugin/plugin.json",
-      "sha256": "e139bb495f723af5ce5f5ea19afa0c3d40b7dd4ccc59ce68c7e6f1134b5a1544",
-      "bytes": 618,
+      "sha256": "c18e73b6b410bdb36de96d14f35ef871eaf25253daa446cd47275f252529a94a",
+      "bytes": 675,
       "mode": "644"
     },
     {
-      "path": "bin/tldr-agent",
-      "source": "bin/tldr-agent",
-      "sha256": "9c760e60ca3799d20cfd2540c65d3cadd6388e85f307bd56406731170b5123f7",
-      "bytes": 1787,
+      "path": ".codex-plugin/hooks/hooks.json",
+      "source": ".codex-plugin/hooks/hooks.json",
+      "sha256": "71185ce0b48f54deecf018f458fb208b91d4a0f85713b1bbf3b938ac3157cf6d",
+      "bytes": 1448,
+      "mode": "644"
+    },
+    {
+      "path": ".codex-plugin/plugin.json",
+      "source": ".codex-plugin/plugin.json",
+      "sha256": "888b14d522818f987ed611e4a5ede27524ae5adc40d7cc8934fd64b96186aa69",
+      "bytes": 196,
+      "mode": "644"
+    },
+    {
+      "path": "bin/tldr-agents",
+      "source": "bin/tldr-agents",
+      "sha256": "68aebcf7368bd66e79f5a0dd5b5a3b661e5092942618343eeb1fc888db1f27f5",
+      "bytes": 21921,
       "mode": "755"
     },
     {
       "path": "CONTRIBUTING.md",
       "source": "CONTRIBUTING.md",
-      "sha256": "9f3f1ccc9c8bc696c33ed6f5a79da478c048cf91be1841ba43e99ee4c0c3cac9",
-      "bytes": 7360,
+      "sha256": "69dd2a5bc4785ba0255718140af76ea5c898e5e953c70489f7f387d6aa05aa5b",
+      "bytes": 2468,
       "mode": "644"
-    },
-    {
-      "path": "hooks/hooks.json",
-      "source": "hooks/hooks.json",
-      "sha256": "2b8f019681a3647881bd6bff45930803dcaddf6b0ea9e86b70c397ef0757dffd",
-      "bytes": 1238,
-      "mode": "644"
-    },
-    {
-      "path": "hooks/lib/ariadne-post-tool-use.mjs",
-      "source": "hooks/lib/ariadne-post-tool-use.mjs",
-      "sha256": "d593972f36dbb19baf25805435c9fa9d36b3dd60aa21786eea7e4d71199a75bc",
-      "bytes": 443,
-      "mode": "644"
-    },
-    {
-      "path": "hooks/lib/beacon-stop-preflight.mjs",
-      "source": "hooks/lib/beacon-stop-preflight.mjs",
-      "sha256": "c8e20daf6db51b51a6f65c6848e3f92c897f388a41fa59fbda253e5877f97a58",
-      "bytes": 2555,
-      "mode": "644"
-    },
-    {
-      "path": "hooks/lib/mark-reply-presented.mjs",
-      "source": "hooks/lib/mark-reply-presented.mjs",
-      "sha256": "1cd6dc040d182d5d9c42c15197d7a592b9fa19cd8c957b93b348109938e9964e",
-      "bytes": 1634,
-      "mode": "644"
-    },
-    {
-      "path": "hooks/lib/prefetch-session-inbox-slow.sh",
-      "source": "hooks/lib/prefetch-session-inbox-slow.sh",
-      "sha256": "0a2bd16c1e981c66ab1cf56cd4a6d9a5651bfcb2655c309b69a07f3dcfdf9390",
-      "bytes": 3497,
-      "mode": "644"
-    },
-    {
-      "path": "hooks/lib/resolve_session_id.sh",
-      "source": "hooks/lib/resolve_session_id.sh",
-      "sha256": "0dd2a09dcdfe523d511e05776effd1501b88e10c8c240e8328228b38b9c81bdf",
-      "bytes": 2177,
-      "mode": "755"
-    },
-    {
-      "path": "hooks/lib/resolve-tldr-agent-node.sh",
-      "source": "hooks/lib/resolve-tldr-agent-node.sh",
-      "sha256": "0ca22ea18d23bac79d52b04af6723d6d64f58dd61ba8052867785dc2c0bf6ba5",
-      "bytes": 961,
-      "mode": "755"
-    },
-    {
-      "path": "hooks/lib/tachyon-stop.mjs",
-      "source": "hooks/lib/tachyon-stop.mjs",
-      "sha256": "bbf4d6762aba7a3985f6c579d0e90bb8c27f4087ee49a46a54c2328945f5096e",
-      "bytes": 14528,
-      "mode": "644"
-    },
-    {
-      "path": "hooks/lib/user-prompt-submit.mjs",
-      "source": "hooks/lib/user-prompt-submit.mjs",
-      "sha256": "7d308b2f8754104e29a1994c38574414466e3b8b125b34bed440c61736a086d4",
-      "bytes": 216,
-      "mode": "644"
-    },
-    {
-      "path": "hooks/templates/mid_session_inject.mjs",
-      "source": "hooks/templates/mid_session_inject.mjs",
-      "sha256": "77c0ef7ed223570b2efcdd42312ab05feaa06379a0c89fdcc6ca76b6246e21a4",
-      "bytes": 1004,
-      "mode": "644"
-    },
-    {
-      "path": "hooks/templates/mid_session_inject.tmpl",
-      "source": "hooks/templates/mid_session_inject.tmpl",
-      "sha256": "1bf65691e73ed0fe2ebfc2ca8ac6f779978c9437075d883d7993dadd63dee9dd",
-      "bytes": 404,
-      "mode": "644"
-    },
-    {
-      "path": "hooks/tldr-agent-capture-session-identity.sh",
-      "source": "hooks/tldr-agent-capture-session-identity.sh",
-      "sha256": "7bb5dbaaf763d78d0621aafd5edb0ad95152f2226406ac77b1118a5247bb54e4",
-      "bytes": 6373,
-      "mode": "755"
-    },
-    {
-      "path": "hooks/tldr-agent-hold-stop-for-unread.sh",
-      "source": "hooks/tldr-agent-hold-stop-for-unread.sh",
-      "sha256": "e4404191c400d078f0ddc2584a7e2a6d7fd58aa5d1b381aeb6c53c56f4d5a74d",
-      "bytes": 4822,
-      "mode": "755"
-    },
-    {
-      "path": "hooks/tldr-agent-inject-session-messages.sh",
-      "source": "hooks/tldr-agent-inject-session-messages.sh",
-      "sha256": "23cdde9bdd97c472e2312b459c9258c38ba5446eec06417e3993ef914603015a",
-      "bytes": 2902,
-      "mode": "755"
-    },
-    {
-      "path": "hooks/tldr-agent-mark-session-busy.sh",
-      "source": "hooks/tldr-agent-mark-session-busy.sh",
-      "sha256": "6317d184531b186850f109cb0fe6c6af680ec0e70f63e531d06d6dbf316af6c3",
-      "bytes": 1146,
-      "mode": "755"
-    },
-    {
-      "path": "hooks/tldr-agent-prefetch-session-inbox.sh",
-      "source": "hooks/tldr-agent-prefetch-session-inbox.sh",
-      "sha256": "1a22bc38009337c2caaa55d17bb53c2067e6d3e35b452f8a642e2b86c9c05e55",
-      "bytes": 818,
-      "mode": "755"
     },
     {
       "path": "install/tldr-agent-bootstrap.sh",
       "source": "install/tldr-agent-bootstrap.sh",
-      "sha256": "713803a08c0beb5f4da7de268706408e4129d4683dbe31c23e2311c028a4ec9d",
-      "bytes": 5205,
+      "sha256": "507f169ed1482548eaffd6ef5a6af068cacd725939d1989f799e66abad534328",
+      "bytes": 24849,
+      "mode": "755"
+    },
+    {
+      "path": "libexec/component-dispatch",
+      "source": "libexec/component-dispatch",
+      "sha256": "32a23cc027e45a1e3d8697b2b3b27a5a0453dcf62daeb69b5716f97d7b7c06b6",
+      "bytes": 8592,
+      "mode": "755"
+    },
+    {
+      "path": "libexec/helm-assignments",
+      "source": "libexec/helm-assignments",
+      "sha256": "d05e785ddce1f878eb9efa9aa1df325da01a0daf18ee74481fce38a184baed8c",
+      "bytes": 402,
+      "mode": "755"
+    },
+    {
+      "path": "libexec/helm-tasks",
+      "source": "libexec/helm-tasks",
+      "sha256": "dca0c394449a1d20423baff9f5714d3ca0bf2be28817593de09d259741e0f56a",
+      "bytes": 390,
+      "mode": "755"
+    },
+    {
+      "path": "libexec/tightbeam",
+      "source": "libexec/tightbeam",
+      "sha256": "8cca952ffe900241c4c40c0ee6f7b032ef14ee7161991666e8e202847e5f833a",
+      "bytes": 388,
+      "mode": "755"
+    },
+    {
+      "path": "libexec/tightbeam-daemon",
+      "source": "libexec/tightbeam-daemon",
+      "sha256": "b176ba0a52285f3913721768c7c7afa198bb9fbf027acb6fdef506c0697a323c",
+      "bytes": 398,
+      "mode": "755"
+    },
+    {
+      "path": "libexec/tldr-agent",
+      "source": "libexec/tldr-agent",
+      "sha256": "8b3a0b23d8b7e5b4f1a22df783550233e6e83431c2beecea659855fdf312f637",
+      "bytes": 3009,
       "mode": "755"
     },
     {
@@ -164,73 +122,1830 @@
       "mode": "644"
     },
     {
+      "path": "messaging/bin/tightbeam",
+      "source": "messaging/bin/tightbeam",
+      "sha256": "dfa2bb2aa15a4dbc18a8f26922b538b28ed6c6b651870079b4bc0319b41ab672",
+      "bytes": 68812,
+      "mode": "755"
+    },
+    {
+      "path": "messaging/bin/tightbeam-daemon",
+      "source": "messaging/bin/tightbeam-daemon",
+      "sha256": "6069e5b2b3be5b45d5b6d29be22c290ae44ec587a561ea8138c6a1c99b51d3c0",
+      "bytes": 2423,
+      "mode": "755"
+    },
+    {
+      "path": "messaging/hooks/post-tool-use",
+      "source": "messaging/hooks/post-tool-use",
+      "sha256": "4118ed30bfadffeefda18ea95c3015513e453c3f54d28e454205cc631aebafe9",
+      "bytes": 2429,
+      "mode": "755"
+    },
+    {
+      "path": "messaging/hooks/pre-tool-use",
+      "source": "messaging/hooks/pre-tool-use",
+      "sha256": "7f88f9899130f5ae8b953b5b401a4e62f291da8103d0ca4cfa34da805b857ab7",
+      "bytes": 8859,
+      "mode": "755"
+    },
+    {
+      "path": "messaging/src/cli/agent_commands.mjs",
+      "source": "messaging/src/cli/agent_commands.mjs",
+      "sha256": "0400c27404dcd50e9f17181b72d0ec4432373a58d98b8e590f047a89437ff987",
+      "bytes": 44629,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/bootstrap.mjs",
+      "source": "messaging/src/cli/bootstrap.mjs",
+      "sha256": "91973d1951ef14651eb3914e7cba73a2532fbaf43dabf96268eb3e9c5540054c",
+      "bytes": 23410,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/doctor_checks.mjs",
+      "source": "messaging/src/cli/doctor_checks.mjs",
+      "sha256": "01a223d866104856344d2b517719419e258a832e37fb91ee8ef71fbd43eeb287",
+      "bytes": 28981,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/hook_commands.mjs",
+      "source": "messaging/src/cli/hook_commands.mjs",
+      "sha256": "a203ea332dd70691944019cd22cd974721f43082bfce4197df1b414372b0b5ba",
+      "bytes": 42631,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/hook_credentials.mjs",
+      "source": "messaging/src/cli/hook_credentials.mjs",
+      "sha256": "f774290461f7e42112e5a5706bd63794f99d18b988f162824fb4316cfc335428",
+      "bytes": 2470,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/hook_identity.mjs",
+      "source": "messaging/src/cli/hook_identity.mjs",
+      "sha256": "74ad346d90b38023bb5f64b6a0eea3316f82b31aeea357e72b8fb4af6244b4f2",
+      "bytes": 28528,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/hooks_install.mjs",
+      "source": "messaging/src/cli/hooks_install.mjs",
+      "sha256": "46d8a60bd3adb31ef3018a02b9e6ea2bf53f1ae2db797d13fb779b4025819eea",
+      "bytes": 21961,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/package_context.mjs",
+      "source": "messaging/src/cli/package_context.mjs",
+      "sha256": "3e17912d4a9244551b72d8d90e42a3aabb52a982596ebdb72f760c2ba7d72a77",
+      "bytes": 3816,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/client/client.mjs",
+      "source": "messaging/src/client/client.mjs",
+      "sha256": "7480c1544d8ffa9e6d30ff7caf46d4f892761fe85cd5ec800f3d59dada351dcc",
+      "bytes": 12714,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/auth.mjs",
+      "source": "messaging/src/daemon/auth.mjs",
+      "sha256": "dac33ef2a7548ae1be15673eb181fb12af6ba09776d57e1fe0784525fd6432d1",
+      "bytes": 3102,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/channel_route_contract.mjs",
+      "source": "messaging/src/daemon/channel_route_contract.mjs",
+      "sha256": "6403dd4bb486ed64565f5a663e43a9daf8c821eae50bad351286eaa2b6772c59",
+      "bytes": 2657,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/custody_reconciler.mjs",
+      "source": "messaging/src/daemon/custody_reconciler.mjs",
+      "sha256": "f56c70c34f098a21a23b3bb396c47a81a8d84031e34f9bb136f061794f4e4bdb",
+      "bytes": 19189,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/daemon.mjs",
+      "source": "messaging/src/daemon/daemon.mjs",
+      "sha256": "af100e493555d552742350400abae92f3a7d0e2e75ab2c5e67f25cb1cc873f50",
+      "bytes": 7971,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/db.mjs",
+      "source": "messaging/src/daemon/db.mjs",
+      "sha256": "481569102be3429145a43a8259f0f3f3a68532e9087aad4135129775b13d4714",
+      "bytes": 762,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/endpoint_retirement.mjs",
+      "source": "messaging/src/daemon/endpoint_retirement.mjs",
+      "sha256": "8d12d6bef1b4f358cc30a0dba25cba149bc6611160053ddc54cbc0b33772d8fa",
+      "bytes": 11210,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/event_bus.mjs",
+      "source": "messaging/src/daemon/event_bus.mjs",
+      "sha256": "0987b0104e5df4d9c4525c7e378c24510cb7385a0b534e6b24baf91b77e91195",
+      "bytes": 3919,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/lifecycle_transition.mjs",
+      "source": "messaging/src/daemon/lifecycle_transition.mjs",
+      "sha256": "18c434c8a37a8038410a7aed5e9abc8e4684cedb697c46010a79222080342b13",
+      "bytes": 122028,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/listener_reconciler.mjs",
+      "source": "messaging/src/daemon/listener_reconciler.mjs",
+      "sha256": "398508bad92fe410a12c404149801b2214969662c2ff1f1da9bc9af2943347bb",
+      "bytes": 18966,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/migration_records.mjs",
+      "source": "messaging/src/daemon/migration_records.mjs",
+      "sha256": "4fecacc2d86a666760c612bfaf5de4e1fb23db35c1bbba87980aea1273350ef6",
+      "bytes": 64672,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/migrations.mjs",
+      "source": "messaging/src/daemon/migrations.mjs",
+      "sha256": "54f91ab80e244863a286e088c72e0128714618dea142e5feda292e3934362790",
+      "bytes": 3916,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/application_permissions_set.mjs",
+      "source": "messaging/src/daemon/ops/application_permissions_set.mjs",
+      "sha256": "febb37b047494178509659a9024482175acbcea69d4323689a81145f4b5692d3",
+      "bytes": 4107,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/application_register.mjs",
+      "source": "messaging/src/daemon/ops/application_register.mjs",
+      "sha256": "671bcd3f6fe8f8894497f086e022130c56b63ecf16b9a477973956fb054b5ef2",
+      "bytes": 1728,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/application_reregister.mjs",
+      "source": "messaging/src/daemon/ops/application_reregister.mjs",
+      "sha256": "fe8b7d02350c75eb231671731f487b91e9ef878cf9f49a04f8a4d5f0af3b9657",
+      "bytes": 1340,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/authority_register.mjs",
+      "source": "messaging/src/daemon/ops/authority_register.mjs",
+      "sha256": "a2ad0aa07082c8da8f489df96aa651512a651cf398010d186659b234322567ce",
+      "bytes": 1893,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/authority_scope.mjs",
+      "source": "messaging/src/daemon/ops/authority_scope.mjs",
+      "sha256": "2ed0df18ce5ce74a46164d46bf79033e8e3bd4bdd49d44704f490f91e04d81b2",
+      "bytes": 915,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/capabilities_list.mjs",
+      "source": "messaging/src/daemon/ops/capabilities_list.mjs",
+      "sha256": "4a0d7cfde7a28f208e16d9a0613b94be38bf29463a9264fbfd6c478e7075dd1c",
+      "bytes": 358,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/channel_reply_publish.mjs",
+      "source": "messaging/src/daemon/ops/channel_reply_publish.mjs",
+      "sha256": "e3348833dfdd064fa30a221ecd911346dd7ceadda7c4c173c2248b3ce4f46ad7",
+      "bytes": 13072,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/channel_route.mjs",
+      "source": "messaging/src/daemon/ops/channel_route.mjs",
+      "sha256": "b999562c43063366adc927caefc34c2e300ce4b53d451e9dd3694c8e7fa8019e",
+      "bytes": 8369,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/claims_shared.mjs",
+      "source": "messaging/src/daemon/ops/claims_shared.mjs",
+      "sha256": "cb4332a4cd4f647a67dd3c15186aed74a62da3b14b21001fa17a482d96f699d5",
+      "bytes": 9853,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/conversation_close.mjs",
+      "source": "messaging/src/daemon/ops/conversation_close.mjs",
+      "sha256": "21919dfa453c0913c310ce61e09c40313b2d77423eb61b28a0b00b8cbab10c44",
+      "bytes": 5884,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/conversation_create.mjs",
+      "source": "messaging/src/daemon/ops/conversation_create.mjs",
+      "sha256": "fd27ddeb1d5c678458ca5a49759f165a22a9b717b40efa446f7d5cf8c8e4da49",
+      "bytes": 3949,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/daemon_status.mjs",
+      "source": "messaging/src/daemon/ops/daemon_status.mjs",
+      "sha256": "67fcd87261758253444df9c6e21ecc1af12f96a8faa282650279071159c231fd",
+      "bytes": 569,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/delivery_admission.mjs",
+      "source": "messaging/src/daemon/ops/delivery_admission.mjs",
+      "sha256": "390577677985ac8988a97dd2a4a143417899f8904a1bad2fa4fa8c3cf1b29914",
+      "bytes": 2996,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/delivery_claim.mjs",
+      "source": "messaging/src/daemon/ops/delivery_claim.mjs",
+      "sha256": "b7e57fd3b8ffe2f52208b5f587d697f918296ada17f9fb8b35ab935d7b78e9b8",
+      "bytes": 12462,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/delivery_complete.mjs",
+      "source": "messaging/src/daemon/ops/delivery_complete.mjs",
+      "sha256": "f44da65d6dbfec0589de167a75e2caf43a7f833dd4fdcf03a640bc4a1a082ca2",
+      "bytes": 5294,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/delivery_release.mjs",
+      "source": "messaging/src/daemon/ops/delivery_release.mjs",
+      "sha256": "667a53886e16aff4b1d73cf46482a06b74c9775721c7a37709d2065031071fe4",
+      "bytes": 1983,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/endpoint_close.mjs",
+      "source": "messaging/src/daemon/ops/endpoint_close.mjs",
+      "sha256": "aa27697cd5ce0b756ef040a87dc2e00fde03ee5e53d0250226994def5fb770cf",
+      "bytes": 4613,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/endpoint_list.mjs",
+      "source": "messaging/src/daemon/ops/endpoint_list.mjs",
+      "sha256": "8903bac5c4de8959ff2a5b8acc9dfab0255b7f1289acca1a9119ce2b655de3f3",
+      "bytes": 5869,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/endpoint_register.mjs",
+      "source": "messaging/src/daemon/ops/endpoint_register.mjs",
+      "sha256": "f467243918c5b728689220b17f911a12be1ac57e02964d0d3043e4f76a6a72da",
+      "bytes": 40916,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/endpoint_retirement_get.mjs",
+      "source": "messaging/src/daemon/ops/endpoint_retirement_get.mjs",
+      "sha256": "f42b5ba740253f4a3030a8f771985fd8e8910039af5a0155da0bd80dc8dd8110",
+      "bytes": 1494,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/endpoint_state_set.mjs",
+      "source": "messaging/src/daemon/ops/endpoint_state_set.mjs",
+      "sha256": "409b94b21517dc3ed38fea0ef1892523cbb1a39ad0efbf0e3765ae9c0ab32d68",
+      "bytes": 8831,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/handshake.mjs",
+      "source": "messaging/src/daemon/ops/handshake.mjs",
+      "sha256": "26f9c9c62b9a0eabb14ecd03b0ec16825856ce9f7db847a60ffbb504be014492",
+      "bytes": 4845,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/inbox_list.mjs",
+      "source": "messaging/src/daemon/ops/inbox_list.mjs",
+      "sha256": "cc770e68ec5ebf3c442644d53b8f5a6dbff7a2fc2ef8fb5cf9edd5ec044c6e6f",
+      "bytes": 9763,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/inbox_subscribe.mjs",
+      "source": "messaging/src/daemon/ops/inbox_subscribe.mjs",
+      "sha256": "d2db4c37985fad8793e4a51acd86baa426b341241ee6b4b1f549fea0a985a61d",
+      "bytes": 1346,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/index.mjs",
+      "source": "messaging/src/daemon/ops/index.mjs",
+      "sha256": "58c631ac89fb02cb08ee47fab8f68e24c9866e66ef59c031b321d7b54d78085c",
+      "bytes": 9051,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/lifecycle_view.mjs",
+      "source": "messaging/src/daemon/ops/lifecycle_view.mjs",
+      "sha256": "438177ced2686206b7bf517af7f9f167fcb1aa141168000496ac7027366c0e58",
+      "bytes": 12228,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/listener_operations.mjs",
+      "source": "messaging/src/daemon/ops/listener_operations.mjs",
+      "sha256": "1b0b37fe95993c1a3a37e1073194418c43f0e76591f758c04eabd130a4e93326",
+      "bytes": 18274,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/message_acknowledge.mjs",
+      "source": "messaging/src/daemon/ops/message_acknowledge.mjs",
+      "sha256": "7d144a5c3c6b0d5df0247b094c6b4579b0e3a6daed7d1b79415cf72b48174681",
+      "bytes": 3824,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/message_commit.mjs",
+      "source": "messaging/src/daemon/ops/message_commit.mjs",
+      "sha256": "70c1ff14ae46e9807552369e3d348825b87497252d61623ef9bea1ff924c7858",
+      "bytes": 1175,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/message_delivery_list.mjs",
+      "source": "messaging/src/daemon/ops/message_delivery_list.mjs",
+      "sha256": "de348c947f4703ebcc0ec6887f6bf2726407fb335779324d7e782f041264250c",
+      "bytes": 1469,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/message_notification_next.mjs",
+      "source": "messaging/src/daemon/ops/message_notification_next.mjs",
+      "sha256": "ce5eb8ae792b95147e53742009745dc074fbc5bd94998a5e8ddffeba3d126197",
+      "bytes": 2541,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/message_read.mjs",
+      "source": "messaging/src/daemon/ops/message_read.mjs",
+      "sha256": "86b42c5c09af324aafe2ba88a2431777186c0da2e5991b46af0f255bd160ae12",
+      "bytes": 11182,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/message_receive.mjs",
+      "source": "messaging/src/daemon/ops/message_receive.mjs",
+      "sha256": "78feb3dbb244338d8bd33d7b60bd3bfaa6d45cd731cfe3594a69364d6f353516",
+      "bytes": 26796,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/message_shared.mjs",
+      "source": "messaging/src/daemon/ops/message_shared.mjs",
+      "sha256": "b9cfb63ef28a7d320f36edfc6ed96d04d6583579ebe9d0f367c6b7eb374ded6e",
+      "bytes": 41605,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/migration_status.mjs",
+      "source": "messaging/src/daemon/ops/migration_status.mjs",
+      "sha256": "1786c39ce18c5dd42075635740024817e4479b894d43f746bf07976b44f60f77",
+      "bytes": 2219,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/principal_register.mjs",
+      "source": "messaging/src/daemon/ops/principal_register.mjs",
+      "sha256": "612c3f957fed2d8697084185c40188c3bec02a3348e43875f74fa64774223e4c",
+      "bytes": 4870,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/principal_resolve.mjs",
+      "source": "messaging/src/daemon/ops/principal_resolve.mjs",
+      "sha256": "69047f4bf406066e304b926535a232ed30ad10eddd7f9eb28326b29cdc75ee77",
+      "bytes": 2974,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/recovery_context.mjs",
+      "source": "messaging/src/daemon/ops/recovery_context.mjs",
+      "sha256": "fbb945f8664615e4984815fa92b0f4d4328f5405be120fbfab61ea0fe24c2827",
+      "bytes": 9282,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/recovery_retry.mjs",
+      "source": "messaging/src/daemon/ops/recovery_retry.mjs",
+      "sha256": "39eea518cb12c3280c3c4481fa77f18a64b2e5af3268617174d622b7c1b4e297",
+      "bytes": 1060,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/recovery_switch.mjs",
+      "source": "messaging/src/daemon/ops/recovery_switch.mjs",
+      "sha256": "afd95d580af903bf75ed2d5b72b7546ab52c8dcb225d3ed5d52386aa69e9cdce",
+      "bytes": 742,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/registry.mjs",
+      "source": "messaging/src/daemon/ops/registry.mjs",
+      "sha256": "289ebd8ac65290c95354b845acb989a7d94f1e1b673ef84c794cf10299849407",
+      "bytes": 3929,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/reply_listener_contract.mjs",
+      "source": "messaging/src/daemon/ops/reply_listener_contract.mjs",
+      "sha256": "04ebddd0f18e198f1a9de82771317093d68e2f2a00ce90850edfc317f7fd5bdf",
+      "bytes": 502,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/resume_claim.mjs",
+      "source": "messaging/src/daemon/ops/resume_claim.mjs",
+      "sha256": "bbffaa3b24308f8bb3140b938a163fa54917993c0df7268e7336de17513e2e63",
+      "bytes": 6624,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/resume_complete.mjs",
+      "source": "messaging/src/daemon/ops/resume_complete.mjs",
+      "sha256": "282e11e5f571cab5ab0c0f4a63d63a4281cb1ad5884feec86bfe319a7d824f7a",
+      "bytes": 1995,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/resume_fail.mjs",
+      "source": "messaging/src/daemon/ops/resume_fail.mjs",
+      "sha256": "6c522f85fda8dc9798630654b8f63ba29131ef8eb35639d98909cd8e5e4003b7",
+      "bytes": 3069,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/resume_list.mjs",
+      "source": "messaging/src/daemon/ops/resume_list.mjs",
+      "sha256": "4dcf92a0e597d54aa5f004a21d339a5320b2ce0cf429070c6a3a51fc6d6e6412",
+      "bytes": 4216,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/resume_shared.mjs",
+      "source": "messaging/src/daemon/ops/resume_shared.mjs",
+      "sha256": "64e277e93d117367e6e015fb95f0d996ab474dbfd051d3a3f53ab5ffac06f6c2",
+      "bytes": 9189,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/runtime_register.mjs",
+      "source": "messaging/src/daemon/ops/runtime_register.mjs",
+      "sha256": "5f8b2fc7303dbb2a17956377a15ef6db6524fc1c2f21df77d66fa86514502eaf",
+      "bytes": 1181,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/session_stop.mjs",
+      "source": "messaging/src/daemon/ops/session_stop.mjs",
+      "sha256": "209c5f96c3aae531db681e7adb9483ccacad4d6325f2efecfe005ea9044bff68",
+      "bytes": 1234,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/state_export.mjs",
+      "source": "messaging/src/daemon/ops/state_export.mjs",
+      "sha256": "c5699610f168de4db8f88818cfa7e6aac94a2ef41942cb5dc1c8ab5873cab109",
+      "bytes": 3153,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/state_import.mjs",
+      "source": "messaging/src/daemon/ops/state_import.mjs",
+      "sha256": "1aaf24cdded756564446af7180b06a622bc8e9f213d01e84f06a15e1fc6e990d",
+      "bytes": 14276,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/owner_process_contract.mjs",
+      "source": "messaging/src/daemon/owner_process_contract.mjs",
+      "sha256": "dc226ab66bc874206a458a05b87494f7d28a0a327a0e18854eecc2bcdc0af857",
+      "bytes": 4461,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/reply_continuity_diagnostics.mjs",
+      "source": "messaging/src/daemon/reply_continuity_diagnostics.mjs",
+      "sha256": "78b96669906bbf573da3c3d47532619670749146c07f802309241d66b702e0c7",
+      "bytes": 1142,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/reply_listener_policy.mjs",
+      "source": "messaging/src/daemon/reply_listener_policy.mjs",
+      "sha256": "04459642c2d8392debfe3aa009c3c1e611e098e5e4df6092a228d17dc9f431b6",
+      "bytes": 234,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/resumer.mjs",
+      "source": "messaging/src/daemon/resumer.mjs",
+      "sha256": "bd37049e6ca867a7be1b83510021950263ddd44cb7dcf049ab52b339bdc4c7a9",
+      "bytes": 91391,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/retirement_executor.mjs",
+      "source": "messaging/src/daemon/retirement_executor.mjs",
+      "sha256": "e62986b9be150f1a337264bd52497518fb78b6a412dcede16405cea6a863ad98",
+      "bytes": 18310,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/runtime_store.mjs",
+      "source": "messaging/src/daemon/runtime_store.mjs",
+      "sha256": "263dc24a4cf4a8be6943d8d1ded29510e93885e24201784458624810476449c4",
+      "bytes": 16973,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/schema.mjs",
+      "source": "messaging/src/daemon/schema.mjs",
+      "sha256": "ad273c3fcc622c038b3b3905843a1d2836b5768db943aecdaae8bb85051a930f",
+      "bytes": 71784,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/server.mjs",
+      "source": "messaging/src/daemon/server.mjs",
+      "sha256": "1e798a986f22819321c7b2786a40312019df78a763db666f3fc97d164b1017ab",
+      "bytes": 8896,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/state_root.mjs",
+      "source": "messaging/src/daemon/state_root.mjs",
+      "sha256": "9c7b61d4b7d378fc283baa862293febf16c5abadc0bbccb2361a8dd42f373328",
+      "bytes": 4567,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/tachyon_arming.mjs",
+      "source": "messaging/src/daemon/tachyon_arming.mjs",
+      "sha256": "1e6157d943b933ce9d5f054f03267c7d96c5762b236a30b5435e8dd25ff8a740",
+      "bytes": 4491,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/watch_reconciler.mjs",
+      "source": "messaging/src/daemon/watch_reconciler.mjs",
+      "sha256": "bcdd094ea939d56528ac09f2b899917f35fbb0dbb334943d08d2ca95ce3da5d5",
+      "bytes": 10399,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/protocol/envelope.mjs",
+      "source": "messaging/src/protocol/envelope.mjs",
+      "sha256": "b0978c3387be198304aa8281730b3a96eef70c83f9a7b8aff995e816e3f11fb4",
+      "bytes": 9290,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/protocol/ids.mjs",
+      "source": "messaging/src/protocol/ids.mjs",
+      "sha256": "664051f43b5cf71ae0d1df3b55ccb660424be2133556df87c7bbc457d342b786",
+      "bytes": 1696,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/protocol/reply_listener_policy.mjs",
+      "source": "messaging/src/protocol/reply_listener_policy.mjs",
+      "sha256": "acf6d69df7606a4dcc58d527211f40ff5eb98fbf6eebf5135b426f2dfa15a2a4",
+      "bytes": 488,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/protocol/session_paths.mjs",
+      "source": "messaging/src/protocol/session_paths.mjs",
+      "sha256": "078514e82332b0b466685ecd4171114c9b122cba959330c912b036c761cf5b1a",
+      "bytes": 2428,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/protocol/state_root_location.mjs",
+      "source": "messaging/src/protocol/state_root_location.mjs",
+      "sha256": "851d1ee3832b41a3f2b2cf024f49ce3af1a9bcf8968999f02d037d43ef545cde",
+      "bytes": 5270,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/runtimes/builtins.mjs",
+      "source": "messaging/src/runtimes/builtins.mjs",
+      "sha256": "e4e9a64c585a0f7f09bce62fac7a1d0cbe2526f13456553f665cdd6d4753b7cf",
+      "bytes": 4204,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/runtimes/registry.mjs",
+      "source": "messaging/src/runtimes/registry.mjs",
+      "sha256": "dd30797ac6ded358bdefcb85545fbe8102fb76843a1378ea85b50e532c13c853",
+      "bytes": 23817,
+      "mode": "644"
+    },
+    {
       "path": "package-lock.json",
       "source": "package-lock.json",
-      "sha256": "e602d82db6a4e4498fff1b573270ce96b03b52d8010c6bc6c0b005866a25d2b1",
-      "bytes": 40388,
+      "sha256": "43efd70731c86ca9c3c31be4f835b53f806f43862a18a1f7067fe8e2dd952e52",
+      "bytes": 63330,
       "mode": "644"
     },
     {
       "path": "package.json",
       "source": "package.json",
-      "sha256": "a80f385060ddb10740805e98eff1acebe491a87b547d615fa96da112e28a3c7e",
-      "bytes": 10804,
+      "sha256": "908828c6a56c26d99b8d655cee8a6a952e87dfe5abc436d235e21d3bccdc3602",
+      "bytes": 23354,
       "mode": "644"
     },
     {
       "path": "README.md",
       "source": "README.md",
-      "sha256": "33ef9d9d0344337ea014702cecbdbd4b2aca2a6924e8bbe14764d9ff8dc5339c",
-      "bytes": 2612,
+      "sha256": "203c15b40466c2562d045023998b204bd8e712a0fba6deea5e0bf4e7d6c0bf0d",
+      "bytes": 2730,
       "mode": "644"
     },
     {
       "path": "release/activation-manifest.json",
       "source": "release/activation-manifest.json",
-      "sha256": "9067905f3516935e51fd9927f73df53482e92307e055c89d06abd632e5ee4101",
-      "bytes": 1185,
+      "sha256": "0028a9d3868d92f5832dedf44fc058108ca6c3b123c8315ee780b04304d7625e",
+      "bytes": 1056,
       "mode": "644"
     },
     {
       "path": "release/licenses/node-LICENSE",
       "source": "release/licenses/node-LICENSE",
-      "sha256": "c738ae413cf561f174e34f6961f8ca458aae2369a73640dda6234c629b98bcc4",
-      "bytes": 145485,
+      "sha256": "5888dbb9a1d2b18f2c3e6c5f6af1b39de658372b402a0577b002777f14c62ace",
+      "bytes": 157609,
       "mode": "644"
     },
     {
       "path": "release/payloads/arm64/node.tar.gz",
       "source": "release/payloads/arm64/node.tar.gz",
-      "sha256": "61130f394c1630d211dd50aecc4353d379480f36d3ac913cd85dbba1aed585c6",
-      "bytes": 50068815,
+      "sha256": "40e5607e5ecb3db9192723776da2d75d966260fc74a7a9e731c1bd67dda96bc8",
+      "bytes": 52813331,
       "mode": "644"
     },
     {
       "path": "release/payloads/arm64/tldr-agent.tar.gz",
       "source": "release/payloads/arm64/tldr-agent.tar.gz",
-      "sha256": "3f5505944fcea137e520d446a3a76e9cf06e7f9badffff8def716c16be9d8f45",
-      "bytes": 371077,
+      "sha256": "6b9ecd36980cfda0e82db2c6333326e3918681908b74e98ab755847af97ece65",
+      "bytes": 1275412,
       "mode": "644"
     },
     {
       "path": "release/payloads/arm64/TldrAgentAegis.pkg",
       "source": "release/payloads/arm64/TldrAgentAegis.pkg",
-      "sha256": "7aba314597caa3636f03cb6aee4a7626e93b88119e8628b56273c983f736c51b",
-      "bytes": 307609,
+      "sha256": "972fbb75c1f5a2a109ff4a9e3885fc8a9bfde3f491f820c324b2107bbdb9d8a8",
+      "bytes": 305947,
       "mode": "644"
     },
     {
       "path": "release/starport-release.json",
       "source": "release/starport-release.json",
-      "sha256": "f63c5c175b98d39efd4b91bf267c94a5c591a64564220d4d72b6f998a14ced6f",
-      "bytes": 1817,
+      "sha256": "fc28640b97a4e2c85d6ae654db855e310b786f5ddba851241f1a473406c0a04e",
+      "bytes": 1565,
       "mode": "644"
+    },
+    {
+      "path": "scheduling/src/adapters/academy.yaml",
+      "source": "scheduling/src/adapters/academy.yaml",
+      "sha256": "dfc65e3be0fd7806cd3eeaeaceb1594ff7ae8104913515685ce4d300dac74d38",
+      "bytes": 1288,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/adapters/claude.yaml",
+      "source": "scheduling/src/adapters/claude.yaml",
+      "sha256": "81769cf4b30d144ab946a290972ae9b2ab86e99f3f410105406ea8ff6692131a",
+      "bytes": 292,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/adapters/codex.yaml",
+      "source": "scheduling/src/adapters/codex.yaml",
+      "sha256": "6305719cd9cf41ce0d3432e0cdb55c33cec71f466d77d39f457d982ef5e4e3b4",
+      "bytes": 327,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/adapters/cursor.yaml",
+      "source": "scheduling/src/adapters/cursor.yaml",
+      "sha256": "9bcb366564e777902fd03c2202a080364d93b437d5532944629f8a25478bc342",
+      "bytes": 316,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/adapters/droid.yaml",
+      "source": "scheduling/src/adapters/droid.yaml",
+      "sha256": "508430e543d7e8971883a90821e94520d76adbba7b2068fb8f8ff601154be7e5",
+      "bytes": 351,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/adapters/gemini.yaml",
+      "source": "scheduling/src/adapters/gemini.yaml",
+      "sha256": "e69540358ea7ead94bf531984d715600797eaa06f8a8530adbb35ccd3f153e3b",
+      "bytes": 331,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/adapters/hermes.yaml",
+      "source": "scheduling/src/adapters/hermes.yaml",
+      "sha256": "39c92b764e18f1466a69aa47c1510a7a2371d74a440437588d913aa130a10349",
+      "bytes": 320,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/cli/onboard.mjs",
+      "source": "scheduling/src/cli/onboard.mjs",
+      "sha256": "94989e712ce78ddc74cb15796f7b647e3b516a4e7ecdb46a9dfbdac2ceac5a8e",
+      "bytes": 11335,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/helm-assignments.mjs",
+      "source": "scheduling/src/helm-assignments.mjs",
+      "sha256": "6d4767d2fa33aad02d15afb5ca72380f4b43b4306e37ece487acf062e6067991",
+      "bytes": 51946,
+      "mode": "755"
+    },
+    {
+      "path": "scheduling/src/helm-daemon.mjs",
+      "source": "scheduling/src/helm-daemon.mjs",
+      "sha256": "6eaaebeeaffcf1b6be11257299d75522b43d61a8eea745e293fd185677c4c917",
+      "bytes": 1404,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/helm-tasks.mjs",
+      "source": "scheduling/src/helm-tasks.mjs",
+      "sha256": "56097f1144a04d449bcdcc4e07371e7b0879656a1b1cdfd8da976c8e2bdcca34",
+      "bytes": 112845,
+      "mode": "755"
+    },
+    {
+      "path": "scheduling/src/lib/activation_service.mjs",
+      "source": "scheduling/src/lib/activation_service.mjs",
+      "sha256": "b297f549efa2a2061149b3b8bf73bf85dcf5a5111d5951d4ea9f9ce629a82031",
+      "bytes": 1339,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/activity_messages.mjs",
+      "source": "scheduling/src/lib/activity_messages.mjs",
+      "sha256": "902ec9584bb2f119db603415f2868e54cf6dab92f4eac0b857989e5a5f534f84",
+      "bytes": 7259,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/activity_stream.mjs",
+      "source": "scheduling/src/lib/activity_stream.mjs",
+      "sha256": "a85c087a839ffe71dd815ba3c0533a0e94f9db118cd1fe044a7a22bbf552cfb2",
+      "bytes": 11497,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/adapter_session_identity.mjs",
+      "source": "scheduling/src/lib/adapter_session_identity.mjs",
+      "sha256": "004dc1d5581216da4dd219a7842d5e6367bd4d2f6d7519a36deaedddd1784c5f",
+      "bytes": 3263,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/adapters/capture.mjs",
+      "source": "scheduling/src/lib/adapters/capture.mjs",
+      "sha256": "5e3c79c889d864a1767c4ea24afd50a9ecb54c8660ad70fea983c303116fdf31",
+      "bytes": 2236,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/adapters/manifest_loader.mjs",
+      "source": "scheduling/src/lib/adapters/manifest_loader.mjs",
+      "sha256": "74e753ff3861d027fd419906aa6f871b0c88fb99ce38733b744a74bad23db654",
+      "bytes": 11346,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/adapters/registry.mjs",
+      "source": "scheduling/src/lib/adapters/registry.mjs",
+      "sha256": "6dba2b21686824d19fbcf171bd704f80058b7a673c71c3f2f9ce776792378e35",
+      "bytes": 1007,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/adapters/template.mjs",
+      "source": "scheduling/src/lib/adapters/template.mjs",
+      "sha256": "f44a92d5d0cfa4f33ab03ff39c382f365e6b187f88339337a29911d2f570ea7e",
+      "bytes": 895,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/agent_fallback.mjs",
+      "source": "scheduling/src/lib/agent_fallback.mjs",
+      "sha256": "30ef26170b81ccad2e8cb6d7c09c098c8c87f4d9c46e9082334ff7aa5e56ca10",
+      "bytes": 10520,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/agent_process_descriptor.mjs",
+      "source": "scheduling/src/lib/agent_process_descriptor.mjs",
+      "sha256": "2b2ac5b29cc0587078209cb2cc64423c765e612cbc65adde7532e57d80669c60",
+      "bytes": 4609,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/agent_run_session.mjs",
+      "source": "scheduling/src/lib/agent_run_session.mjs",
+      "sha256": "3d927430d920e0b8697b7b076d2febe66db2a13aaa57ca953e857513b6c91772",
+      "bytes": 6114,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/agent_skills.mjs",
+      "source": "scheduling/src/lib/agent_skills.mjs",
+      "sha256": "40c4e349f2d3b2b9094b1d98c806917689350f824162c80c6419e8607036746d",
+      "bytes": 2945,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/assignment_artifacts.mjs",
+      "source": "scheduling/src/lib/assignment_artifacts.mjs",
+      "sha256": "f2055463d8872b6b274983b7b445028639c725bd3cbd2b25571774a97ebc67e3",
+      "bytes": 8579,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/assignment_completion_delivery.mjs",
+      "source": "scheduling/src/lib/assignment_completion_delivery.mjs",
+      "sha256": "96018499e89ebb65272c50afa32977d03d63fb5004c8272b8a09c7bdf8dede59",
+      "bytes": 2893,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/assignment_list.mjs",
+      "source": "scheduling/src/lib/assignment_list.mjs",
+      "sha256": "178be067fa511930fcdffbffaead1088bf8068fa825c3d45b04e05376ac270e2",
+      "bytes": 14878,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/assignment_retarget_failure.mjs",
+      "source": "scheduling/src/lib/assignment_retarget_failure.mjs",
+      "sha256": "b5159ca36d9b740ab1085aa3da74b0cc48a1fb6fc9a9c8278c309fd7bba5686d",
+      "bytes": 3966,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/assignment_retarget.mjs",
+      "source": "scheduling/src/lib/assignment_retarget.mjs",
+      "sha256": "e72044a92b2b1c6e8a8e4346a8c384a668de42a0992160eddb8abdb933387fd6",
+      "bytes": 12168,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/assignment_runs.mjs",
+      "source": "scheduling/src/lib/assignment_runs.mjs",
+      "sha256": "50af29704b4af38a7b036027d127a5c5f6fa49293839be730f924ccf2286050d",
+      "bytes": 1748,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/assignment_update_input.mjs",
+      "source": "scheduling/src/lib/assignment_update_input.mjs",
+      "sha256": "854649034aa4227fe3a8452c071be13c289d940faca2c3d7c885288b85757d8d",
+      "bytes": 1894,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/bootstrap_hooks.mjs",
+      "source": "scheduling/src/lib/bootstrap_hooks.mjs",
+      "sha256": "92097efb9ecb282fcc07b1f07feb5492985de7b18aebb2b50032ba96d261b14b",
+      "bytes": 7982,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon_child_commands.mjs",
+      "source": "scheduling/src/lib/daemon_child_commands.mjs",
+      "sha256": "157845c691d6cef5b332ba20b2c71345e54dfa5c0d272bffd404a326983e0889",
+      "bytes": 5446,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon_dispatch_airlock.mjs",
+      "source": "scheduling/src/lib/daemon_dispatch_airlock.mjs",
+      "sha256": "c0c46627cc8b89d46652062d39d8b0a9e935850298912e03834d8ac1571a7140",
+      "bytes": 21142,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon_dispatch_executor.mjs",
+      "source": "scheduling/src/lib/daemon_dispatch_executor.mjs",
+      "sha256": "66194849ae4e1cd86ede7a3c086be85b4c6f6ef0a108633a15a7e3ff6aef333e",
+      "bytes": 8061,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon_dispatch_fanout.mjs",
+      "source": "scheduling/src/lib/daemon_dispatch_fanout.mjs",
+      "sha256": "1af1c6a215412c45707d2e5e19330f875c302ef97c52c4e2636c44c28dda5595",
+      "bytes": 5031,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon_dispatch_once.mjs",
+      "source": "scheduling/src/lib/daemon_dispatch_once.mjs",
+      "sha256": "949c4091d2dffdafb3e0f06c94b41079d6bc3d20fb6f1a673fb2262b11542e65",
+      "bytes": 2810,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon_entrypoint.mjs",
+      "source": "scheduling/src/lib/daemon_entrypoint.mjs",
+      "sha256": "ea371cda11a7aa8f51baaacc823f51fbf18298b1766efb45ad4602ffddaa15b1",
+      "bytes": 8139,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon_freshness.mjs",
+      "source": "scheduling/src/lib/daemon_freshness.mjs",
+      "sha256": "51b00834a7bb0a9170533c25471da405a4d73b73c566429ed90b000010035b44",
+      "bytes": 3972,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon_inproc_dispatch.mjs",
+      "source": "scheduling/src/lib/daemon_inproc_dispatch.mjs",
+      "sha256": "1afc83cee095366f253c8302bc9e974c616a9a8b8bb7bc24f31b983fabe1cd20",
+      "bytes": 11276,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon_lazy_deps.mjs",
+      "source": "scheduling/src/lib/daemon_lazy_deps.mjs",
+      "sha256": "386c5d49de008684ed6744f56392bea0ae7335e24b57061ec8a854bc9041d7dc",
+      "bytes": 1215,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon_live_attribution.mjs",
+      "source": "scheduling/src/lib/daemon_live_attribution.mjs",
+      "sha256": "6b258adc3ee5888c3b5538836e8ecb1598e1b62320b608c28fb7ef25c2922bff",
+      "bytes": 3656,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon_maintenance_child.mjs",
+      "source": "scheduling/src/lib/daemon_maintenance_child.mjs",
+      "sha256": "c5f1beb752964d850d508907d6c8037c53fe73649dec0e232954d637a25ecd89",
+      "bytes": 1593,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon_phase_failure_safety.mjs",
+      "source": "scheduling/src/lib/daemon_phase_failure_safety.mjs",
+      "sha256": "a65d8356cf765ee19c34033e336df67608723dd02eccec6e536195179efa9634",
+      "bytes": 1594,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon_phase_timeouts.mjs",
+      "source": "scheduling/src/lib/daemon_phase_timeouts.mjs",
+      "sha256": "62df92d5fdcef2fb61be22c11603074d72eceee21f4e4f004ed9fa21f8faf559",
+      "bytes": 821,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon_pidfile.mjs",
+      "source": "scheduling/src/lib/daemon_pidfile.mjs",
+      "sha256": "cef7f1e030e2d82a1ed4e659d53da2ca3518495227855d9c184782bc0f4287f6",
+      "bytes": 3271,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon_quarantine.mjs",
+      "source": "scheduling/src/lib/daemon_quarantine.mjs",
+      "sha256": "7058350739619c265e77177245daa71f6fb79e4df220d1aec4aa6b32eb3eff35",
+      "bytes": 972,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon_status_server.mjs",
+      "source": "scheduling/src/lib/daemon_status_server.mjs",
+      "sha256": "543724104f91c2d0c7a31a000038cff14d69cf9ea1194fca79a16026d422a353",
+      "bytes": 3095,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/daemon.mjs",
+      "source": "scheduling/src/lib/daemon.mjs",
+      "sha256": "041c09539b394729290485ac55838124d31fbc30dcac3ebe4b1ffc8d6cd0a6b7",
+      "bytes": 54169,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/dispatch_due_projection_delete.mjs",
+      "source": "scheduling/src/lib/dispatch_due_projection_delete.mjs",
+      "sha256": "7f2220796fbb1f923122c8767d8678140d256e28281f823ae75c5473802aa644",
+      "bytes": 1174,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/dispatch_due_projection.mjs",
+      "source": "scheduling/src/lib/dispatch_due_projection.mjs",
+      "sha256": "767c0ae73f50d9545f8e45f642180d6eaba9b377dd0c9b9928fb05dcc26af234",
+      "bytes": 8566,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/dispatch_due_query.mjs",
+      "source": "scheduling/src/lib/dispatch_due_query.mjs",
+      "sha256": "f6342d0b841aea33be2c947c0031a39340c3758378d7b6e144b12c14ed103aac",
+      "bytes": 8367,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/dispatch_due_reconcile.mjs",
+      "source": "scheduling/src/lib/dispatch_due_reconcile.mjs",
+      "sha256": "f122d2399dd53f59344b42154b716253bb3df6e8a982f64bebd0cb685b632af9",
+      "bytes": 12179,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/dispatch_due_shadow.mjs",
+      "source": "scheduling/src/lib/dispatch_due_shadow.mjs",
+      "sha256": "0f501c5bd490f96b2012efe88dc47b1b94b07181cecbd9751dccb6af827183ab",
+      "bytes": 7783,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/dispatch_effects.mjs",
+      "source": "scheduling/src/lib/dispatch_effects.mjs",
+      "sha256": "5627bf4aacaadd1c3f38f37133298bb7e71991683dc7cc459f74dbc22618e8df",
+      "bytes": 3502,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/dispatch_evaluator.mjs",
+      "source": "scheduling/src/lib/dispatch_evaluator.mjs",
+      "sha256": "a1e8cbfcdaa3529f7239e069385e9f25c86c3e03bdf14b27fb04aea16f97db7e",
+      "bytes": 11034,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/dispatch_infrastructure_deferral.mjs",
+      "source": "scheduling/src/lib/dispatch_infrastructure_deferral.mjs",
+      "sha256": "e583df0952d8a5d4a2c124c198e274b15e96730e84c76c9be51fa8f0757b1f97",
+      "bytes": 8190,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/dispatch_infrastructure_marker.mjs",
+      "source": "scheduling/src/lib/dispatch_infrastructure_marker.mjs",
+      "sha256": "dbb3581a91c31e6e51b72ac0bcdacb5181fba42a7ef2d5e6e727a46c30063e82",
+      "bytes": 1850,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/dispatch_runtime_persistence.mjs",
+      "source": "scheduling/src/lib/dispatch_runtime_persistence.mjs",
+      "sha256": "ac4f28ec8432b04b5ab04f8cc8a3f76a16c4782aa77d2c5353c236acb95cb500",
+      "bytes": 5483,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/dispatch_schedule_finalization.mjs",
+      "source": "scheduling/src/lib/dispatch_schedule_finalization.mjs",
+      "sha256": "15281e6eca012f1fe2018fb1f9f3321242912030609f9b121d818a9b56fde1a1",
+      "bytes": 7584,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/dispatch_service.mjs",
+      "source": "scheduling/src/lib/dispatch_service.mjs",
+      "sha256": "00425124bf29d30437036e004f4c4d437957a4ad75312b0753fc970fea4ddf1a",
+      "bytes": 80442,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/doctor/bands.mjs",
+      "source": "scheduling/src/lib/doctor/bands.mjs",
+      "sha256": "413fbb49e3bce52240a2a2cdd3cb332b0214c6bf12e0c38785011874334b2c91",
+      "bytes": 858,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/doctor/checks.mjs",
+      "source": "scheduling/src/lib/doctor/checks.mjs",
+      "sha256": "77c349fbadee2b0a135969a28747d28f8c8b20f76ff1c10e7bb931bd3521ff36",
+      "bytes": 5776,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/doctor/cofounder.mjs",
+      "source": "scheduling/src/lib/doctor/cofounder.mjs",
+      "sha256": "6bc821d5762faaf5e2b96f337011e28d585f053f9ee25fc6c20af32507047dff",
+      "bytes": 2209,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/doctor/hint_map.mjs",
+      "source": "scheduling/src/lib/doctor/hint_map.mjs",
+      "sha256": "47ba7e052604dcda19f3d46bf6f4326c9ad0313ece07d6a04fa1587da656565b",
+      "bytes": 589,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/doctor/index.mjs",
+      "source": "scheduling/src/lib/doctor/index.mjs",
+      "sha256": "e6166ab3fffc44fc8f312d085c5c4bcd7eb9928b3664c345f213247931aa19c2",
+      "bytes": 2985,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/durable_file_io.mjs",
+      "source": "scheduling/src/lib/durable_file_io.mjs",
+      "sha256": "671ccd27322189feb30d20519627f2d2a239c6e565171328ab9d0318ae3aacec",
+      "bytes": 3877,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/effective_owner_completion.mjs",
+      "source": "scheduling/src/lib/effective_owner_completion.mjs",
+      "sha256": "ff608d4c80a0d4f25bef96d1ae4bdcc301ff3c9cebb33e8b989197cb6f70435e",
+      "bytes": 1850,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/executor_agent_start_fallback.mjs",
+      "source": "scheduling/src/lib/executor_agent_start_fallback.mjs",
+      "sha256": "b935d7354ccbfd23b1401650a709e37ac93899ba3d345287c940b719204ec5d3",
+      "bytes": 4126,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/executor_process_utils.mjs",
+      "source": "scheduling/src/lib/executor_process_utils.mjs",
+      "sha256": "42640e168876fca8f0006bbee8efbefc25ccb9d99d924bb45729f517d22d3867",
+      "bytes": 3510,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/executor_start_confirm.mjs",
+      "source": "scheduling/src/lib/executor_start_confirm.mjs",
+      "sha256": "43a1cf08e13cd94fe44c38dc518ecd822448ded3548550913fe762c57446d2e1",
+      "bytes": 10148,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/executor.mjs",
+      "source": "scheduling/src/lib/executor.mjs",
+      "sha256": "11398354d1635526c13b9485ba09d6529d2e6be103298d5dac68aec57dd7554c",
+      "bytes": 57145,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/file_tail.mjs",
+      "source": "scheduling/src/lib/file_tail.mjs",
+      "sha256": "10d4b66b79be1272fbcde1b5464153c037b650f31a67620f0d57f6d21e61243f",
+      "bytes": 817,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/heartbeat.mjs",
+      "source": "scheduling/src/lib/heartbeat.mjs",
+      "sha256": "9d9424fb0a8e167472f183e2ee052f95242a2f11bd1b9d8cef4028f5f958c296",
+      "bytes": 3024,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/helm_context.mjs",
+      "source": "scheduling/src/lib/helm_context.mjs",
+      "sha256": "a42ba02f0ca168389cee2cfd31eb8c4809939a4be59384e9138d64d13918a517",
+      "bytes": 6082,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/history_ring.mjs",
+      "source": "scheduling/src/lib/history_ring.mjs",
+      "sha256": "aecfe6241e7dbd9d2fc273f538c595a4bef9fd0b4d1a65205963688a35b7090f",
+      "bytes": 1643,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/identity_state.mjs",
+      "source": "scheduling/src/lib/identity_state.mjs",
+      "sha256": "eb020ea3cb4993bdab9891411ea1c57adcc2bcb550f5f3721b1ea5dff17845f0",
+      "bytes": 4788,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/identity.mjs",
+      "source": "scheduling/src/lib/identity.mjs",
+      "sha256": "738207a7bcabc7c74b1fb14fd7e5005f07fdd4e95c972fd6407740b8fc97ecb2",
+      "bytes": 5493,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/inflight_registry.mjs",
+      "source": "scheduling/src/lib/inflight_registry.mjs",
+      "sha256": "e94b31711595742424943d2f7f89ce1bd22bcf6001eb3ce17f74f6aaeb31075c",
+      "bytes": 2583,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/job_id.mjs",
+      "source": "scheduling/src/lib/job_id.mjs",
+      "sha256": "753af83566d49468af4313acfdd6d082fd3580731addf817dcc1a5f4e2b3bca3",
+      "bytes": 352,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/job_runtime_fields.mjs",
+      "source": "scheduling/src/lib/job_runtime_fields.mjs",
+      "sha256": "102b393b0c09c66bd410136bb5305a0e8d0c8fd9c02b173ae7a3d126ad3374a3",
+      "bytes": 1253,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/job_service.mjs",
+      "source": "scheduling/src/lib/job_service.mjs",
+      "sha256": "29cfc4f8028238d7644035e05c339b3e1e0d72926294bed3ac0dc81a2a426e3a",
+      "bytes": 32990,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/json_io.mjs",
+      "source": "scheduling/src/lib/json_io.mjs",
+      "sha256": "35d73bab47d2c1bf6b657ff88184992a5f436c5a09e94809b7f4edba2782e5af",
+      "bytes": 2217,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/launchd_bootout.mjs",
+      "source": "scheduling/src/lib/launchd_bootout.mjs",
+      "sha256": "58d62d8e80d1fb5422a127a7a822234a4bb34b3aa22babb3c99a36e658128865",
+      "bytes": 2706,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/lock.mjs",
+      "source": "scheduling/src/lib/lock.mjs",
+      "sha256": "86d2f047bbf926cbcc8b228393b52dcb47dd3c8cd8eabe8000de9c10adc234f6",
+      "bytes": 7805,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/migrate_home_rewrites.mjs",
+      "source": "scheduling/src/lib/migrate_home_rewrites.mjs",
+      "sha256": "27b6b02ca1a23d0f2f36f22ba544efa0d0549c475a410ae282c911ce8226698d",
+      "bytes": 10144,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/migrate_home.mjs",
+      "source": "scheduling/src/lib/migrate_home.mjs",
+      "sha256": "b85695587d61eb4388f09790d91713625bfdaf8a89ca8f072af8603743287e54",
+      "bytes": 9445,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/missing_scope_deferrals.mjs",
+      "source": "scheduling/src/lib/missing_scope_deferrals.mjs",
+      "sha256": "f8293e8a71ac4f6bf83dc47d317ccd1c3f8c52995267004280b45906f7612dc1",
+      "bytes": 7392,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/network_precondition_policy.mjs",
+      "source": "scheduling/src/lib/network_precondition_policy.mjs",
+      "sha256": "6561698862ec51ad3fa8a390a7087ad8f340a89617ebe8f551e8511755af8297",
+      "bytes": 202,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/network_probe.mjs",
+      "source": "scheduling/src/lib/network_probe.mjs",
+      "sha256": "309180d757c675078bc3d972be671cf4a1906086779f9fe0f2ba4ef169724e3d",
+      "bytes": 2570,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/node_exec.mjs",
+      "source": "scheduling/src/lib/node_exec.mjs",
+      "sha256": "a62ed80b15473d9ea481a83c95ed82db89728268f39ef8a99064ad707bd8704a",
+      "bytes": 13663,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/notify.mjs",
+      "source": "scheduling/src/lib/notify.mjs",
+      "sha256": "aaa8a396041d90ffe69a449579ed09c900ee467ceca611ef5963314881a4bfd2",
+      "bytes": 7164,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/observability_service.mjs",
+      "source": "scheduling/src/lib/observability_service.mjs",
+      "sha256": "d1ad13be2dbab2a77ed315e52147a8d6380bbaba96e58c042ed4a743bb7f92d7",
+      "bytes": 11560,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/outbound_guard.mjs",
+      "source": "scheduling/src/lib/outbound_guard.mjs",
+      "sha256": "ab39f7ae27d7ce5e2b0351c1d101e0f4550f75565ac48c54ef4b93fb96fbe2fa",
+      "bytes": 1664,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/perf_attribution.mjs",
+      "source": "scheduling/src/lib/perf_attribution.mjs",
+      "sha256": "5ff7e6fa441e60d7480cdf578f70ba937cdff5dcf56550cf70af94eabb8c7c16",
+      "bytes": 7123,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/process_liveness.mjs",
+      "source": "scheduling/src/lib/process_liveness.mjs",
+      "sha256": "6a887cb1c7a22d10c5a5aaa2bd6ce417c43fb16dead7c2a9dfe48fa9fd61ad8d",
+      "bytes": 3064,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/process_state.mjs",
+      "source": "scheduling/src/lib/process_state.mjs",
+      "sha256": "6f6ff0ef274294364ab6980ad6707ef0eb3ae5d82965e4e5de4eaff648580d50",
+      "bytes": 3324,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/process_wrapper.mjs",
+      "source": "scheduling/src/lib/process_wrapper.mjs",
+      "sha256": "d2c18c9aaad9fce21fcadc0e97f7cdecd3662d0f5fed7465044c83f0a2c9f898",
+      "bytes": 14946,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/public_contract.mjs",
+      "source": "scheduling/src/lib/public_contract.mjs",
+      "sha256": "29bdca5b9a31985eb79ad0aff4f86dd1692c0e30bf3dd699095dfe5d8f4e36d0",
+      "bytes": 6769,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/read_model.mjs",
+      "source": "scheduling/src/lib/read_model.mjs",
+      "sha256": "b086ff113309fcadfe51dbf7bdbe1bce4ec75b36c43ef2cae13122fc4d25498f",
+      "bytes": 59,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/read_store.mjs",
+      "source": "scheduling/src/lib/read_store.mjs",
+      "sha256": "f40842a1e2fabfdf4c145463795c8c1b8ed801fd73ce879abe1f3ffff016d003",
+      "bytes": 7870,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/reaper.mjs",
+      "source": "scheduling/src/lib/reaper.mjs",
+      "sha256": "bd9d635391cca8b1ab7d677b453306936d2beb1fa3dbc076dd5415c08fe3ddf5",
+      "bytes": 17993,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/report_cli.mjs",
+      "source": "scheduling/src/lib/report_cli.mjs",
+      "sha256": "85b11cd0731816e9997642ba0af337291dba985baf418d1e15adcd4c866d3aba",
+      "bytes": 6507,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/resource_sampler_light.mjs",
+      "source": "scheduling/src/lib/resource_sampler_light.mjs",
+      "sha256": "d9768ae009cbfc20d5aada986848a119aabd8adde91862ac4dd39e881120b34b",
+      "bytes": 2936,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/resource_sampler.mjs",
+      "source": "scheduling/src/lib/resource_sampler.mjs",
+      "sha256": "33dfd9dd9b3fb8b6f846a66d9c37a727985a31eab6f6c00a2f6df7ea07fef620",
+      "bytes": 10533,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/retention_service.mjs",
+      "source": "scheduling/src/lib/retention_service.mjs",
+      "sha256": "dbbf28ed2576fba8a97be4270432ad3704b8272f5d45ae20a4d31155b46d66a7",
+      "bytes": 4248,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/run_completion.mjs",
+      "source": "scheduling/src/lib/run_completion.mjs",
+      "sha256": "2900ec7d67e41a0c2d22b55e0f392ce56f94fc90872d94775ec65a7b9d0ac1d8",
+      "bytes": 13350,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/run_deadline.mjs",
+      "source": "scheduling/src/lib/run_deadline.mjs",
+      "sha256": "6490cb91dd04df217e180407987bbe7ae873aa9633fda2dbb95afdd6d85757a7",
+      "bytes": 1105,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/run_session_outcome.mjs",
+      "source": "scheduling/src/lib/run_session_outcome.mjs",
+      "sha256": "529af5ac81185551e59117d1b52f6c76b5811fd5ef1087beee53e25df65b964b",
+      "bytes": 6322,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/run_source.mjs",
+      "source": "scheduling/src/lib/run_source.mjs",
+      "sha256": "af0e9e7e860ad8bb16c23823b52ced20369fc186472cb09dacb08c370a29d91a",
+      "bytes": 1171,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/runtime_ledger.mjs",
+      "source": "scheduling/src/lib/runtime_ledger.mjs",
+      "sha256": "7c00ce17be13bdc78067bb5cbabba4dacb5b189208cb8a4f89b58e404a518a85",
+      "bytes": 47745,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/runtime_migrations.mjs",
+      "source": "scheduling/src/lib/runtime_migrations.mjs",
+      "sha256": "1f98f8119e23670211cb4252f199b42ff7b3128c46e208d60f0f39883a595684",
+      "bytes": 6426,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/runtime_options.mjs",
+      "source": "scheduling/src/lib/runtime_options.mjs",
+      "sha256": "248ffaceea0a2c6c718b3673a16043f4c0061dcd4bb9d2f5954f5e439f6c7ff8",
+      "bytes": 11318,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/runtime_store_fast_path.mjs",
+      "source": "scheduling/src/lib/runtime_store_fast_path.mjs",
+      "sha256": "50871ca22b18884d128483fce923b754db36e437fb8abedca96bc7505f4d662f",
+      "bytes": 1056,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/runtime_store_halcyon_migrations.mjs",
+      "source": "scheduling/src/lib/runtime_store_halcyon_migrations.mjs",
+      "sha256": "379f06b3de81f72f64771aed7f1e5f32d1b9408b6df1bde3c881e9abbd41cd82",
+      "bytes": 2213,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/runtime_store_permissions.mjs",
+      "source": "scheduling/src/lib/runtime_store_permissions.mjs",
+      "sha256": "7cf7a93d160b108c42fe4d4aa7419599c6d315e8fda57c943f6b8e43622ac99c",
+      "bytes": 441,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/runtime_store_readiness_events.mjs",
+      "source": "scheduling/src/lib/runtime_store_readiness_events.mjs",
+      "sha256": "7b91c5d3e3ea545c71c357fd9f0feb1b581687c1c0804ea99c8bd65481fdb422",
+      "bytes": 1343,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/runtime_store_retry.mjs",
+      "source": "scheduling/src/lib/runtime_store_retry.mjs",
+      "sha256": "40101dd240337ff437df5c157be2bb9d0de0dbd4e74cba3074d58cf36af03fb9",
+      "bytes": 8147,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/runtime_store.mjs",
+      "source": "scheduling/src/lib/runtime_store.mjs",
+      "sha256": "b9fb3d221d5daa680d2683d0c9023b05a7950eb8cd17eadf5af569834f1afff0",
+      "bytes": 35219,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/runtime.mjs",
+      "source": "scheduling/src/lib/runtime.mjs",
+      "sha256": "d7e710bd4216323c34ea5e98d092d49a8917b73320a8578154e7ec8fecab0ae2",
+      "bytes": 8228,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/safety_events.mjs",
+      "source": "scheduling/src/lib/safety_events.mjs",
+      "sha256": "fba82fccb04e0fb4b6f58c8ae76338e32be44ce2d64c969bf2b3c1faa42fe4a5",
+      "bytes": 1386,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/schedule_dst.mjs",
+      "source": "scheduling/src/lib/schedule_dst.mjs",
+      "sha256": "7f00c39a4fe5a4a77b815a210252f08ddf7038713c438e4c9554deac8a83b2c5",
+      "bytes": 6191,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/schedule_eval.mjs",
+      "source": "scheduling/src/lib/schedule_eval.mjs",
+      "sha256": "8398b7998a559c27f0cc68ee9d5dd67dc136e35b1df81bf33f8a1dc44d286e21",
+      "bytes": 12285,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/schedule_flags.mjs",
+      "source": "scheduling/src/lib/schedule_flags.mjs",
+      "sha256": "39e3e31a837908d92d88e7a19541170c16e5674ce871759aaf09fd48b68f2061",
+      "bytes": 3453,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/schedule_preview.mjs",
+      "source": "scheduling/src/lib/schedule_preview.mjs",
+      "sha256": "0787080f355d28ae1d70b5b696c31a27e9a139228755cf6ace9bb367671718c4",
+      "bytes": 5766,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/scheduler_tasks_api.mjs",
+      "source": "scheduling/src/lib/scheduler_tasks_api.mjs",
+      "sha256": "23c958c0caa842ef9868b8d9375feff88902dc5641007907c2a061c6143cf8b2",
+      "bytes": 9887,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/scheduler_tasks_http.mjs",
+      "source": "scheduling/src/lib/scheduler_tasks_http.mjs",
+      "sha256": "a53688638e43a1a7bcee3cb453a1695d044b38d749e7c58606332a7de7aa50be",
+      "bytes": 3980,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/scheduler_tasks_ui_css.mjs",
+      "source": "scheduling/src/lib/scheduler_tasks_ui_css.mjs",
+      "sha256": "a7ba532655e97e0e0115a6cf10fa627c3bf12e658c4084432b394412fb119f51",
+      "bytes": 7216,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/scheduler_tasks_ui.mjs",
+      "source": "scheduling/src/lib/scheduler_tasks_ui.mjs",
+      "sha256": "a544c807c99a2c2ee442f013c6946ac72ba3427ed0ab055a3464eff762d3dd79",
+      "bytes": 12295,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/scope_activation.mjs",
+      "source": "scheduling/src/lib/scope_activation.mjs",
+      "sha256": "6a8d671664017d65f73d300c8a9345d248bce492b0eed3ece1f1d61f2cc03d17",
+      "bytes": 1909,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/scope_registry_v2.mjs",
+      "source": "scheduling/src/lib/scope_registry_v2.mjs",
+      "sha256": "cafbda97eecd265da9aa728c739d8bab037ecab7c391e2480e229346fe8e1b23",
+      "bytes": 22828,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/scope_runtime.mjs",
+      "source": "scheduling/src/lib/scope_runtime.mjs",
+      "sha256": "413041b86f570a8450f84de5d3e62dce7665730d46dbc8dd65c1e71d990b91ed",
+      "bytes": 3854,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/scopes.mjs",
+      "source": "scheduling/src/lib/scopes.mjs",
+      "sha256": "458de652226ef7b18470b41825aa568b5cc724dfd2a4ddc0589ceb20d6bef42e",
+      "bytes": 11860,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/sentinel_escalation.mjs",
+      "source": "scheduling/src/lib/sentinel_escalation.mjs",
+      "sha256": "6b015fd0f7580f238af49a14d10cad2a0e36b42c10eebbe99a951439aab10c0e",
+      "bytes": 5291,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/sentinel_freshness_safety.mjs",
+      "source": "scheduling/src/lib/sentinel_freshness_safety.mjs",
+      "sha256": "b45d82394d2bc91642e795cac09311488abf0a909a96529c1b29673c237f0c3e",
+      "bytes": 3909,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/sentinel_health.mjs",
+      "source": "scheduling/src/lib/sentinel_health.mjs",
+      "sha256": "615ba8e3f4d518df27e779c3d461ba7027dde304940da9de070d0a0e630d5522",
+      "bytes": 5935,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/sentinel_repair.mjs",
+      "source": "scheduling/src/lib/sentinel_repair.mjs",
+      "sha256": "c247c4b6b7a6883ba5b7ac29bb136089934a8dd6e7359f21360bc244f401f8e2",
+      "bytes": 9795,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/sentinel_state.mjs",
+      "source": "scheduling/src/lib/sentinel_state.mjs",
+      "sha256": "1d43f0fd361fefa4b0b14606c3e38f59a1f3c2f8cd181a8493022b2d1e37e395",
+      "bytes": 4699,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/sentinel_tick_safety.mjs",
+      "source": "scheduling/src/lib/sentinel_tick_safety.mjs",
+      "sha256": "ece6eed0732633cf722e2127400b0b54046bcfdc26ef24b6f5da8578723b6fc7",
+      "bytes": 1252,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/service_restart_safety.mjs",
+      "source": "scheduling/src/lib/service_restart_safety.mjs",
+      "sha256": "c2d159f90a0b81014899f1db860c604a3e30560c3ee8982adbde2c9e21fb0383",
+      "bytes": 2677,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/service.mjs",
+      "source": "scheduling/src/lib/service.mjs",
+      "sha256": "f3b114e2eacc7f989b6dd35ce9f1ef9ecf9dc7bb78c01fcb1f0a8281d256eb0d",
+      "bytes": 47499,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/session_identity_index.mjs",
+      "source": "scheduling/src/lib/session_identity_index.mjs",
+      "sha256": "8b74b0af3ed05b99412371c896f4ce90730b8d65ee79177b8fdb9878a0ae359a",
+      "bytes": 4662,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/sessions_list.mjs",
+      "source": "scheduling/src/lib/sessions_list.mjs",
+      "sha256": "b389014db52e8ee68f2553da4fc324a2489a7cf2c865c01754a4b520dfd5faba",
+      "bytes": 3490,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/skipped_occurrence_accounting.mjs",
+      "source": "scheduling/src/lib/skipped_occurrence_accounting.mjs",
+      "sha256": "abef2185064cdf6e66c869aa788ed0dd895a8e9b7705d1c8d2778491cc99e079",
+      "bytes": 6497,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/skyhook_dispatch_policy.mjs",
+      "source": "scheduling/src/lib/skyhook_dispatch_policy.mjs",
+      "sha256": "9c4fead07ec19cc6fd0e4a519da8686769c2d9a02b85783abe0e8c9be0efbbcc",
+      "bytes": 2373,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/skyhook_history_merge.mjs",
+      "source": "scheduling/src/lib/skyhook_history_merge.mjs",
+      "sha256": "b112096170b7e6d67642c9a5fdf63c044d40fedc60b55f6e56ebafb7cb6b8c28",
+      "bytes": 1736,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/skyhook_identity_ledger.mjs",
+      "source": "scheduling/src/lib/skyhook_identity_ledger.mjs",
+      "sha256": "7bf636d34e4e2e0b64cf2dcc13dd6a4c5912df64fa23840e5c35e0977b9df4f0",
+      "bytes": 8268,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/skyhook_ledger.mjs",
+      "source": "scheduling/src/lib/skyhook_ledger.mjs",
+      "sha256": "8e18a9d323f2bbe67042559e8d265ea1a1f003a27b5de1e78a39bba86ead0b2d",
+      "bytes": 12209,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/state_root.mjs",
+      "source": "scheduling/src/lib/state_root.mjs",
+      "sha256": "7c81ca7b2998a94412f22fcff841564ca8d6da0d05b6b70318c9a7851f46d5ad",
+      "bytes": 5308,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/status_server.mjs",
+      "source": "scheduling/src/lib/status_server.mjs",
+      "sha256": "13d5b46fec4dbc9a9762c50df91d940ada6f3a8185cc4790870c92931ca4e1b6",
+      "bytes": 20903,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/store.mjs",
+      "source": "scheduling/src/lib/store.mjs",
+      "sha256": "aa0df24898bc2441c823bfa1d6a5b140223667045d10e63c00eb24310e7fb315",
+      "bytes": 19431,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/subspace_memory_launch.mjs",
+      "source": "scheduling/src/lib/subspace_memory_launch.mjs",
+      "sha256": "aa58e4c88f0622d75f785c6e84cfad53661b7a79a7e697a986d27b6bf25f0e70",
+      "bytes": 3138,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/subspace_memory_provider.mjs",
+      "source": "scheduling/src/lib/subspace_memory_provider.mjs",
+      "sha256": "b5348d4394fcf2937b97ef7a83c09fac47f5556137c59f23f1d8e24df29ee95e",
+      "bytes": 804,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/substrate/file_mutex.mjs",
+      "source": "scheduling/src/lib/substrate/file_mutex.mjs",
+      "sha256": "0599c7106966615c2a4351fec3ad8c9677721d289f39b493fb1b8f2c42c3e44f",
+      "bytes": 1477,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/substrate/workspaces.mjs",
+      "source": "scheduling/src/lib/substrate/workspaces.mjs",
+      "sha256": "f016a95bb57add5dae5a5b07c413b5691039619c47e75af99262026f1fa3dcf0",
+      "bytes": 11763,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/tightbeam_sessions.mjs",
+      "source": "scheduling/src/lib/tightbeam_sessions.mjs",
+      "sha256": "70eaecd4ec8c1b89b6546a0aa05a57eb67dc1eaf3cee8d258d1fb3c0aa7dc4a6",
+      "bytes": 10440,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/workspace_service.mjs",
+      "source": "scheduling/src/lib/workspace_service.mjs",
+      "sha256": "1adba59b0afeb1ca76856f6fd5a4f408a5a1c945569c9584b09d17a2ac6f5d85",
+      "bytes": 3407,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/lib/workspaces_list.mjs",
+      "source": "scheduling/src/lib/workspaces_list.mjs",
+      "sha256": "4e0fc49fac8c8f5f3150af56e26a88382d7ccc99947bbe97c40dda9a8602d6d0",
+      "bytes": 4267,
+      "mode": "644"
+    },
+    {
+      "path": "scheduling/src/sentinel.mjs",
+      "source": "scheduling/src/sentinel.mjs",
+      "sha256": "162b9dd73c17969a4eb3f12eecaeb4df5ba17f630ac2955482005f19bb7ac989",
+      "bytes": 35634,
+      "mode": "755"
     },
     {
       "path": "scripts/verify-public-release.mjs",
       "source": "release/public-repo/verify-public-release.mjs",
-      "sha256": "cea27774283f49c287f4d8f9b76007c09de3900fe878fbe74e1875011fb6a34b",
-      "bytes": 3925,
+      "sha256": "8965645746e7aa46da43bf03356acfb5e7c3cc6a05d012e77e78bd61a2892668",
+      "bytes": 4379,
       "mode": "644"
     },
     {
@@ -241,24 +1956,24 @@
       "mode": "644"
     },
     {
-      "path": "skills/tldr/SKILL.md",
-      "source": "skills/tldr/SKILL.md",
-      "sha256": "b0f9c44291be1e03f6f46ad5b6b61df44c8e00402af70b63aa96cb6cc7fcbe75",
-      "bytes": 5250,
+      "path": "skills/messaging/SKILL.md",
+      "source": "skills/messaging/SKILL.md",
+      "sha256": "cdc1abb960ad257297700032d98e0a0c2277ddf9e133dfe392a2cea5d2fc308c",
+      "bytes": 9361,
       "mode": "644"
     },
     {
-      "path": "src/adapters/claude.yaml",
-      "source": "src/adapters/claude.yaml",
-      "sha256": "e80bfbed4eb4855043d939dd32feba8aa5e704ac496798390117b31d562cf0ed",
-      "bytes": 706,
+      "path": "skills/setup/SKILL.md",
+      "source": "skills/setup/SKILL.md",
+      "sha256": "a6d2459e8090cf6593ee424a44003092bd0476738a2724b50ddc852c89c54453",
+      "bytes": 5872,
       "mode": "644"
     },
     {
-      "path": "src/adapters/codex.yaml",
-      "source": "src/adapters/codex.yaml",
-      "sha256": "9ea485964543dd6795e82919de15ba55caa0c34ef99f96a36feaa08268e9619b",
-      "bytes": 684,
+      "path": "skills/tasks/SKILL.md",
+      "source": "skills/tasks/SKILL.md",
+      "sha256": "a2def1c868efdafbe987557b21b4700e5d5311b204c02e7bcc6413080629e358",
+      "bytes": 7781,
       "mode": "644"
     },
     {
@@ -271,8 +1986,8 @@
     {
       "path": "src/lib/aegis_client.mjs",
       "source": "src/lib/aegis_client.mjs",
-      "sha256": "2b33dc3f2050ebcd1543bdc1ceca37fcc0eca90080b1dbb55a33af07b50a9be0",
-      "bytes": 8922,
+      "sha256": "735a6e73ba199c0aef2c45e612bcdf602fc93896692aea0ec3f3d6937ce9b92f",
+      "bytes": 11670,
       "mode": "644"
     },
     {
@@ -292,15 +2007,15 @@
     {
       "path": "src/lib/aegis_native_distribution.mjs",
       "source": "src/lib/aegis_native_distribution.mjs",
-      "sha256": "4a913c5698b803d5cc84495a1b7b0318aef008bb84ec8765cd3d6403c17cff4a",
+      "sha256": "e9f96dbc72298e3327095ce86ae2f63a6463bd2b06214d247266ef6d284d202c",
       "bytes": 17871,
       "mode": "644"
     },
     {
       "path": "src/lib/aegis_native_setup_runtime.mjs",
       "source": "src/lib/aegis_native_setup_runtime.mjs",
-      "sha256": "37db5d331ea5416429e2ad9d4bdc5466710af0a809c1bc8bfdc5a3428b69929b",
-      "bytes": 10594,
+      "sha256": "9459a89d2e0b87acd85a258440e9ed5198f8c9eca0b79d4541a124ca3c0c87c2",
+      "bytes": 10910,
       "mode": "644"
     },
     {
@@ -318,52 +2033,31 @@
       "mode": "644"
     },
     {
-      "path": "src/lib/agent_run_session.mjs",
-      "source": "src/lib/agent_run_session.mjs",
-      "sha256": "5beaa8715c0989d4e3bfe81808e6c53d4a292962a2dfa32c28b16ccd97cf89b0",
-      "bytes": 2675,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/ariadne_followup.mjs",
-      "source": "src/lib/ariadne_followup.mjs",
-      "sha256": "f60658958f21da1178a699e338004770392fb44a0f8f2f3e5c2dbab3aa2fcf87",
-      "bytes": 10540,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/ariadne_notice.mjs",
-      "source": "src/lib/ariadne_notice.mjs",
-      "sha256": "598b5d842b8c68840a690cc81904cafb524b96c11b55df3ebb13b47b8153c9d0",
-      "bytes": 2734,
-      "mode": "644"
-    },
-    {
       "path": "src/lib/bootstrap_hooks.mjs",
       "source": "src/lib/bootstrap_hooks.mjs",
-      "sha256": "c2ee0edd173ffc936783403a14cb8278e09598cc4a41185e1310e447660d1e72",
-      "bytes": 10162,
+      "sha256": "9b11d98065ff2ecc6d80ed5aa2294a436e5a40ad05ce8a1dbe5b4fb7ba9f2c08",
+      "bytes": 5019,
       "mode": "644"
     },
     {
       "path": "src/lib/daemon_child_commands.mjs",
       "source": "src/lib/daemon_child_commands.mjs",
-      "sha256": "93c600e49c32bddf7fb8549294d4653a4a79b3cae0183e147c9e6bb6e8911858",
-      "bytes": 4503,
+      "sha256": "e92e42c1d2b50c0b3a249fa5e8db4ef43f98263616d6b3522d9338f62902fc81",
+      "bytes": 4558,
       "mode": "644"
     },
     {
       "path": "src/lib/daemon_entrypoint.mjs",
       "source": "src/lib/daemon_entrypoint.mjs",
-      "sha256": "85922b6450fff56059f9417c1e550a56ae7cac332f98b9ad1fbaf13f368df3aa",
-      "bytes": 4049,
+      "sha256": "e930ca684f58a7d97662201321b758a06b9552a29aa7a182cb7579fffd393723",
+      "bytes": 3933,
       "mode": "644"
     },
     {
       "path": "src/lib/daemon_inbox_poll_phase.mjs",
       "source": "src/lib/daemon_inbox_poll_phase.mjs",
-      "sha256": "66ec52849fd1f77cba9707659f9f608029b7b4db6a6ecdcd46cb201d7cd6b0f9",
-      "bytes": 5478,
+      "sha256": "0fc4b64618d121559af203132506d720ca9dcc269d75f9cf6b39b7857e256770",
+      "bytes": 7733,
       "mode": "644"
     },
     {
@@ -388,24 +2082,17 @@
       "mode": "644"
     },
     {
-      "path": "src/lib/durable_session_identity.mjs",
-      "source": "src/lib/durable_session_identity.mjs",
-      "sha256": "5ce2a5373822bed5d5b2267d3cf261be42695a0bf32c7af83b1ee192381121a3",
-      "bytes": 608,
+      "path": "src/lib/front_door_command.mjs",
+      "source": "src/lib/front_door_command.mjs",
+      "sha256": "98cd2188c42f6f94ab4eb59fe100c8dbad4db803461babea8c4a70d1512c7ba9",
+      "bytes": 1602,
       "mode": "644"
     },
     {
       "path": "src/lib/helm_home.mjs",
       "source": "src/lib/helm_home.mjs",
-      "sha256": "b3de93f49c90382315aca0f1f3c2638ccad397b7e8a67683afd10809561bec81",
-      "bytes": 176,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/identity_state.mjs",
-      "source": "src/lib/identity_state.mjs",
-      "sha256": "2a1b94588c4670b32a9b0515e7d2c4614e9313f8cf773d9ca4b25ccfc8933c3b",
-      "bytes": 13720,
+      "sha256": "bd2f4506515dcf67758c2050744cec825521cf01de27e1889e1cb6b79c86b8f1",
+      "bytes": 129,
       "mode": "644"
     },
     {
@@ -418,22 +2105,15 @@
     {
       "path": "src/lib/node_exec.mjs",
       "source": "src/lib/node_exec.mjs",
-      "sha256": "d03523296b97ca8d60f471a599f9401c5eaf5047985f5253dda67245bc28d15b",
-      "bytes": 5811,
+      "sha256": "940e92642719d83af3ee2038fb1ddff62760c6a6ce572d9596ad521d3a195e20",
+      "bytes": 6026,
       "mode": "644"
     },
     {
       "path": "src/lib/node_sqlite_warning.mjs",
       "source": "src/lib/node_sqlite_warning.mjs",
-      "sha256": "db3435f305a792067e51730b09f2916baa6ebc455d236bf6484d6be35b0873f1",
-      "bytes": 2324,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/outbound_effect_identity.mjs",
-      "source": "src/lib/outbound_effect_identity.mjs",
-      "sha256": "1fbf6a8aafef132adca2c85e6d8b9ac626770199a4d1ff5d6161cb37e8730346",
-      "bytes": 1626,
+      "sha256": "253195e7b97199fae4fee5f7e023e7c3a1d667323687d597a61f585f22c8189b",
+      "bytes": 2345,
       "mode": "644"
     },
     {
@@ -441,76 +2121,6 @@
       "source": "src/lib/process_liveness.mjs",
       "sha256": "6a887cb1c7a22d10c5a5aaa2bd6ce417c43fb16dead7c2a9dfe48fa9fd61ad8d",
       "bytes": 3064,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/resource_sampler.mjs",
-      "source": "src/lib/resource_sampler.mjs",
-      "sha256": "6e8e1f236be0ede0bdbdd6116d7f6630c1909f326a8f99d78ac8b270d1d772ab",
-      "bytes": 8045,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/runtime_store_backup.mjs",
-      "source": "src/lib/runtime_store_backup.mjs",
-      "sha256": "be53d50eded7e2813f94ff4881b87bada96ef1017000df90fac5e03bda13932b",
-      "bytes": 3640,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/runtime_store_beacon_migration.mjs",
-      "source": "src/lib/runtime_store_beacon_migration.mjs",
-      "sha256": "31f9cf25b6edda5b08a558b0f3b9942cfb298a3bcd36c8e41c5932996927fa9f",
-      "bytes": 4005,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/runtime_store_fast_path.mjs",
-      "source": "src/lib/runtime_store_fast_path.mjs",
-      "sha256": "50871ca22b18884d128483fce923b754db36e437fb8abedca96bc7505f4d662f",
-      "bytes": 1056,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/runtime_store_halcyon_migrations.mjs",
-      "source": "src/lib/runtime_store_halcyon_migrations.mjs",
-      "sha256": "33872100e9f3d293f5a08f301c27e0aaa8c267cc1fad5bcfbf99818d3457922f",
-      "bytes": 4897,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/runtime_store_permissions.mjs",
-      "source": "src/lib/runtime_store_permissions.mjs",
-      "sha256": "7cf7a93d160b108c42fe4d4aa7419599c6d315e8fda57c943f6b8e43622ac99c",
-      "bytes": 441,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/runtime_store_readiness_events.mjs",
-      "source": "src/lib/runtime_store_readiness_events.mjs",
-      "sha256": "7b91c5d3e3ea545c71c357fd9f0feb1b581687c1c0804ea99c8bd65481fdb422",
-      "bytes": 1343,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/runtime_store_retry.mjs",
-      "source": "src/lib/runtime_store_retry.mjs",
-      "sha256": "b323a11a6aee26233d79f62851f1d273197e2258558f05dcf2d519d08fc90101",
-      "bytes": 8717,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/runtime_store_transaction.mjs",
-      "source": "src/lib/runtime_store_transaction.mjs",
-      "sha256": "f68ac128a85e695ba7eb9e6ef6f90c894f5a80425dfb1a2b8ae8941c09695bb0",
-      "bytes": 975,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/runtime_store.mjs",
-      "source": "src/lib/runtime_store.mjs",
-      "sha256": "5b2118e8a601a3e43e1710dcf7cba669ca48f0de890f913746e154eef68e2cf4",
-      "bytes": 35263,
       "mode": "644"
     },
     {
@@ -528,164 +2138,87 @@
       "mode": "644"
     },
     {
+      "path": "src/lib/starport_component_inspection.mjs",
+      "source": "src/lib/starport_component_inspection.mjs",
+      "sha256": "96dfa91851d1d7e12a3a33e25feaddea41ddef3bbe6f0bc845dfd6ca736fbe63",
+      "bytes": 5809,
+      "mode": "644"
+    },
+    {
       "path": "src/lib/starport_native_lifecycle.mjs",
       "source": "src/lib/starport_native_lifecycle.mjs",
-      "sha256": "7d414219467f33c37d9b42a740a715b07d583d96f5f06a78fa1c62726c37c4cc",
-      "bytes": 2556,
+      "sha256": "bda9f67fa42096cfd57e27026a6cb03574a110f0366c2787015f480071818c23",
+      "bytes": 2546,
       "mode": "644"
     },
     {
       "path": "src/lib/starport_onboarding.mjs",
       "source": "src/lib/starport_onboarding.mjs",
-      "sha256": "f9b166e116d1365048fd6a06d70ec2ff81245cf0e9e7c1901fa2cd478f5894e2",
-      "bytes": 10134,
+      "sha256": "b51e7f3afed8b0151b9f17bb2121a105df0eed9c54ccf81a3d77a465bcb8fcc8",
+      "bytes": 10964,
       "mode": "644"
     },
     {
       "path": "src/lib/starport_orchestrator.mjs",
       "source": "src/lib/starport_orchestrator.mjs",
-      "sha256": "251c54b2d20746999560dc35b704dfeff8d1a4f2c65a7ef07132c37157286ab6",
-      "bytes": 6153,
+      "sha256": "2952cccbf117d00823c70f8383571a293645418617593f614a1f8d572e3a96b9",
+      "bytes": 6113,
       "mode": "644"
     },
     {
-      "path": "src/lib/starport_release_contract.mjs",
-      "source": "src/lib/starport_release_contract.mjs",
-      "sha256": "193ff85c9de234f6921cbebda7dade8d3076d7dd93cc43a9708f89087e800a4a",
-      "bytes": 7061,
+      "path": "src/lib/starport_process.mjs",
+      "source": "src/lib/starport_process.mjs",
+      "sha256": "829386596845fb17d4f10af5beafe5f1b1346727518ece33e11c666c89f02f67",
+      "bytes": 1225,
       "mode": "644"
     },
     {
       "path": "src/lib/starport_runtime.mjs",
       "source": "src/lib/starport_runtime.mjs",
-      "sha256": "4d2686bebb889c8964ea71a83fa9500312d7ef68cc83520223390166f17ffa3f",
-      "bytes": 11466,
+      "sha256": "765ade5d9a3461218862640aafbc90ecd726e326a7f6638165a7f04431a367d5",
+      "bytes": 8566,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/state_root_layout.mjs",
+      "source": "src/lib/state_root_layout.mjs",
+      "sha256": "a37de6854dddcd68d64e6873e9bd96e20ab884f34d584f25c4bc2171832df91b",
+      "bytes": 5755,
       "mode": "644"
     },
     {
       "path": "src/lib/store.mjs",
       "source": "src/lib/store.mjs",
-      "sha256": "a2320ce793f48305160cb3f69e04e62edb5d6ce5c69511339b781f27d7096bdf",
-      "bytes": 17096,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/substrate/blocked_unread.mjs",
-      "source": "src/lib/substrate/blocked_unread.mjs",
-      "sha256": "8dc7a490c752b8efde22572c97e260efa74da0aad67bdb83a2d3caba23a361df",
-      "bytes": 9029,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/substrate/canonical_store_sqlite_messages.mjs",
-      "source": "src/lib/substrate/canonical_store_sqlite_messages.mjs",
-      "sha256": "5683d31afe8581044ed3ac75f21e87c2d7083a8f16c0ca30047c073a2b5ada3f",
-      "bytes": 5443,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/substrate/canonical_store_sqlite_ownership.mjs",
-      "source": "src/lib/substrate/canonical_store_sqlite_ownership.mjs",
-      "sha256": "eab78e80e983355f493731e76e5bf54b030f0e821b03108342a98449c3ba9b15",
-      "bytes": 4465,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/substrate/canonical_store_sqlite.mjs",
-      "source": "src/lib/substrate/canonical_store_sqlite.mjs",
-      "sha256": "ddf559cb99ccf4092966d884c008914fe6f775c239480acbc904ecee706aecbb",
-      "bytes": 11978,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/substrate/canonical_store.mjs",
-      "source": "src/lib/substrate/canonical_store.mjs",
-      "sha256": "eff42ddaacd9f72cd2eba35d58b8825def2968d49fd64affef2658fdb0548702",
-      "bytes": 5908,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/substrate/events.mjs",
-      "source": "src/lib/substrate/events.mjs",
-      "sha256": "af8068cfb53b360a1bcf6a364cbd186ac75be2084341ea8b463fe2897d7b1b93",
-      "bytes": 3792,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/substrate/file_mutex.mjs",
-      "source": "src/lib/substrate/file_mutex.mjs",
-      "sha256": "01cabf13a6b3657b6c8550245a373c0e49bb7b7e3982ba2b7f3ba75b718ba9b6",
-      "bytes": 5447,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/substrate/thread_ownership.mjs",
-      "source": "src/lib/substrate/thread_ownership.mjs",
-      "sha256": "94620ebf8f1dfda2e9f576758546dff31a736a705059b64f20df9d39cde39399",
-      "bytes": 4900,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/substrate/transport_interface.mjs",
-      "source": "src/lib/substrate/transport_interface.mjs",
-      "sha256": "c3bae72763f7d3b3e76c05ef545a38ea9d8725b6fdf1bea2c8737e8dda116ce7",
-      "bytes": 1586,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tachyon_eligibility.mjs",
-      "source": "src/lib/tachyon_eligibility.mjs",
-      "sha256": "de3ba141d031eefc3e751ee3afc628e60a36120c7b4d95181f40c8737299a5a8",
-      "bytes": 5426,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tachyon_listener_delivery.mjs",
-      "source": "src/lib/tachyon_listener_delivery.mjs",
-      "sha256": "a910a255256b228a141038449e6899783812c1b7a03708c301ab8f0bd7afad3c",
-      "bytes": 9625,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tachyon_listener_wait_state.mjs",
-      "source": "src/lib/tachyon_listener_wait_state.mjs",
-      "sha256": "e75cc96c23667571a9feebe4d785aa321cf942c12bb62c58e297d2b24f9d97a2",
-      "bytes": 1624,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tachyon_listener.mjs",
-      "source": "src/lib/tachyon_listener.mjs",
-      "sha256": "815fa3fc9a66af96961d47655bf70fa706a565f59d491ff42c3267d06d454762",
-      "bytes": 8307,
+      "sha256": "540183f839e4ebfb49610fd1562e8ebf675dc12a1f732e2ac9a0151ca2a44ed5",
+      "bytes": 9300,
       "mode": "644"
     },
     {
       "path": "src/lib/tightbeam_channel_runtime.mjs",
       "source": "src/lib/tightbeam_channel_runtime.mjs",
-      "sha256": "174d356decdbea340f9f624e68ad67f9b012f72d5820e16c7f9db7cd90372a77",
-      "bytes": 6623,
+      "sha256": "7612ba7953bdf7a42d68e5b82b561d52fb8584823c2b45eccd6f09540b00b1ee",
+      "bytes": 7954,
       "mode": "644"
     },
     {
       "path": "src/lib/tightbeam_channel.mjs",
       "source": "src/lib/tightbeam_channel.mjs",
-      "sha256": "90f1c3af950ff8252048d8072ff642c245614f3256eb06de5492cccfc6b3624e",
-      "bytes": 7103,
+      "sha256": "10e65a1990a3f4bcf13562fb272256d51b4e1a64f3d7aad3dcc331bc6ef735df",
+      "bytes": 7296,
       "mode": "644"
     },
     {
       "path": "src/lib/tightbeam_email_adapter.mjs",
       "source": "src/lib/tightbeam_email_adapter.mjs",
-      "sha256": "e79f63717c1b13f2e75cedf8694ef2d50cce8e0e7f7201bc80492cef9cdc5f0b",
-      "bytes": 4354,
+      "sha256": "88d35f10cdc757de6eff5e0cd92ad02b5036deb93a172fe436696c84c3fa149d",
+      "bytes": 5343,
       "mode": "644"
     },
     {
       "path": "src/lib/tightbeam_email_delivery_channel.mjs",
       "source": "src/lib/tightbeam_email_delivery_channel.mjs",
-      "sha256": "0706c3cbf5ae202738a638e6fb1d213e1109e309c3f3853eddd21a9821f009ef",
-      "bytes": 8655,
+      "sha256": "57cff6f5f088d8f6f4bee9edaaa05f5626aa036bc826cbf3a0cbd3305c9da00c",
+      "bytes": 9382,
       "mode": "644"
     },
     {
@@ -703,52 +2236,17 @@
       "mode": "644"
     },
     {
+      "path": "src/lib/tightbeam_verified_runtime.mjs",
+      "source": "src/lib/tightbeam_verified_runtime.mjs",
+      "sha256": "c86f8665227d67a6201b230d91bf89678681660649b3c00bdfde06cb25fbe05f",
+      "bytes": 5654,
+      "mode": "644"
+    },
+    {
       "path": "src/lib/tightbeam_welcome_dispatch.mjs",
       "source": "src/lib/tightbeam_welcome_dispatch.mjs",
       "sha256": "b192d56dc0f90113e81d25930e15cc50d36ec84db025d1844bf91e23cb44694d",
       "bytes": 6097,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_ariadne.mjs",
-      "source": "src/lib/tldr_agent_ariadne.mjs",
-      "sha256": "a2ba8b90172c00bec975abe972600416d7243ddcb3b672a3e38a14a4ff453c90",
-      "bytes": 6644,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_beacon_marker.mjs",
-      "source": "src/lib/tldr_agent_beacon_marker.mjs",
-      "sha256": "1d38bb277cce4b0bb78719e199e13e12e72274ffb948d8a9633a57e7a14cce5a",
-      "bytes": 12231,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_beacon_message_evidence.mjs",
-      "source": "src/lib/tldr_agent_beacon_message_evidence.mjs",
-      "sha256": "205b61344d94426b06a0971d80621ba59555cacc25e525aa2ff6c088135a1f7a",
-      "bytes": 7470,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_beacon_outbound_effect.mjs",
-      "source": "src/lib/tldr_agent_beacon_outbound_effect.mjs",
-      "sha256": "b431139d23dcf686a2385173edadbb726b425076da0f83c5230cf26057fbde70",
-      "bytes": 7225,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_beacon_stop_index.mjs",
-      "source": "src/lib/tldr_agent_beacon_stop_index.mjs",
-      "sha256": "b715a3c8b6cd93595db198b2d3f7ac6b8b3e1967700b856f54daee2760d188d4",
-      "bytes": 4575,
-      "mode": "644"
-    },
-    {
-      "path": "src/lib/tldr_agent_beacon_stop.mjs",
-      "source": "src/lib/tldr_agent_beacon_stop.mjs",
-      "sha256": "2df2723d6323423e0e492bd4cd30a67d40e1d9d157821a51fedfe9348d04bea3",
-      "bytes": 8574,
       "mode": "644"
     },
     {
@@ -775,8 +2273,8 @@
     {
       "path": "src/lib/tldr_agent_daemon_phase_timeouts.mjs",
       "source": "src/lib/tldr_agent_daemon_phase_timeouts.mjs",
-      "sha256": "47fc199723107b9daad74338fc1746fd62f4bd9fd5366da82251f063b49beb04",
-      "bytes": 1639,
+      "sha256": "0ed407e44ca642dbccf856f75dd3d71a1c1ecffd8fe44b9d6606d59a63af16be",
+      "bytes": 1793,
       "mode": "644"
     },
     {
@@ -789,15 +2287,15 @@
     {
       "path": "src/lib/tldr_agent_diagnostic_schema.mjs",
       "source": "src/lib/tldr_agent_diagnostic_schema.mjs",
-      "sha256": "0a433173993732d7dc54bc673019b85e5ff6afa172514ed7f90833e99c037b18",
-      "bytes": 6866,
+      "sha256": "b75ba21ff9966e5f8bd8d5fd23f90451e811d6e0b0e9116efedcd40ebcc3c444",
+      "bytes": 5256,
       "mode": "644"
     },
     {
       "path": "src/lib/tldr_agent_diagnostics.mjs",
       "source": "src/lib/tldr_agent_diagnostics.mjs",
-      "sha256": "b1a2b18e46b0964309e40fb085145d5409b132443803392a4a48090091b56c0f",
-      "bytes": 10263,
+      "sha256": "f262fbad225195035ce5c6a08f8bdd36b2356bb391f4b0cbdfec935e7de17504",
+      "bytes": 10669,
       "mode": "644"
     },
     {
@@ -810,43 +2308,64 @@
     {
       "path": "src/lib/tldr_agent_launchd_definition.mjs",
       "source": "src/lib/tldr_agent_launchd_definition.mjs",
-      "sha256": "4f854f64b0ddf5761c1a4a17ebd4b58199b74aba17ecdf6afb011fcefcff5c97",
-      "bytes": 1325,
+      "sha256": "167ec65b1b49b8a12982c352e9954fbcf6d2273298410b57cc840f1cc132d20d",
+      "bytes": 1600,
       "mode": "644"
     },
     {
       "path": "src/lib/tldr_agent_launchd_lifecycle.mjs",
       "source": "src/lib/tldr_agent_launchd_lifecycle.mjs",
-      "sha256": "b875b3fc0ce8f0dedc8a782a39a7dcc57e971d7c80176d337827abd74358a72c",
-      "bytes": 11727,
+      "sha256": "49e8ca2311589c95033e3e2cb36cc14b4c91709a65ecb47d62a2a547211355cc",
+      "bytes": 12027,
       "mode": "644"
     },
     {
-      "path": "src/lib/tldr_agent_read_boundary.mjs",
-      "source": "src/lib/tldr_agent_read_boundary.mjs",
-      "sha256": "f599082b11236636017f25d05256d5fb7f302a9a92ebf266d24846be2f6c691a",
-      "bytes": 543,
+      "path": "src/lib/tldr_agent_lifecycle_store_sqlite.mjs",
+      "source": "src/lib/tldr_agent_lifecycle_store_sqlite.mjs",
+      "sha256": "dbe540438ac4fcf22a434b32297414985e9b3b7a24a2c5ae1359f27e119afee8",
+      "bytes": 7504,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_lifecycle_store.mjs",
+      "source": "src/lib/tldr_agent_lifecycle_store.mjs",
+      "sha256": "c7a09a823e60ae5979a9174bf71bd671876b12ba54f665e2ae62b6b83d62eec2",
+      "bytes": 9513,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_presplit_evidence.mjs",
+      "source": "src/lib/tldr_agent_presplit_evidence.mjs",
+      "sha256": "272abfd94b6af9450aa746e1241e5ac7a7710f16f77fb7ec475edee9bfe10fa2",
+      "bytes": 4786,
       "mode": "644"
     },
     {
       "path": "src/lib/tldr_agent_runtime_identity.mjs",
       "source": "src/lib/tldr_agent_runtime_identity.mjs",
-      "sha256": "1fe9cbe4f434972e8938937f784b76b63ed7744eab8d3ea373febf5564059729",
-      "bytes": 3947,
+      "sha256": "229dc0cec84d7a72569f7399a0f1aa1619503832c08a1fd73e75ae22335c5395",
+      "bytes": 3155,
       "mode": "644"
     },
     {
       "path": "src/lib/tldr_agent_source_lifecycle.mjs",
       "source": "src/lib/tldr_agent_source_lifecycle.mjs",
-      "sha256": "33da40b4c8c830d0bb69eec6fbc2819afe97d77ccaa3c2b5c951a4d17fbfd74b",
-      "bytes": 3405,
+      "sha256": "33358005c619dda698cfce2e46b72d108510d8bfff8e8617a1ab1d8a26f6d473",
+      "bytes": 13417,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_source_plist.mjs",
+      "source": "src/lib/tldr_agent_source_plist.mjs",
+      "sha256": "651e43f859c40bc3dd1fc4c36d032691beb63ad6db924b8664dc50a9ad116a3f",
+      "bytes": 1525,
       "mode": "644"
     },
     {
       "path": "src/lib/transports/email.mjs",
       "source": "src/lib/transports/email.mjs",
-      "sha256": "1e5c674be677864b3debe906d25d5ea6271f15a0ca46d19cda535102f18e53cd",
-      "bytes": 76818,
+      "sha256": "fa409082568b0931087a5a777a163330c6106fa8fbcda690e504cccca23ac333",
+      "bytes": 19229,
       "mode": "644"
     },
     {
@@ -864,17 +2383,24 @@
       "mode": "644"
     },
     {
+      "path": "src/lib/transports/email/inbox_list_failure.mjs",
+      "source": "src/lib/transports/email/inbox_list_failure.mjs",
+      "sha256": "cf85633f15462044fb1c36c43c8f64eb87afac8a89bfe7cd66da898746146951",
+      "bytes": 4780,
+      "mode": "644"
+    },
+    {
       "path": "src/lib/transports/email/render/email.mjs",
       "source": "src/lib/transports/email/render/email.mjs",
-      "sha256": "8fa174640f15bbe6c2c51d3c01bf43c404c4fa2a0b4d0ad297b8ee1ab76144fe",
-      "bytes": 8104,
+      "sha256": "c8e99bec730cc5116ff1d0ad5068462ba982a5a9cc771d984df598210dcaa9e3",
+      "bytes": 6142,
       "mode": "644"
     },
     {
       "path": "src/lib/transports/email/render/html.mjs",
       "source": "src/lib/transports/email/render/html.mjs",
-      "sha256": "770ecfec359b996b47f39db1c3b250284535fe3fe2b988208519904b1d1f866a",
-      "bytes": 10952,
+      "sha256": "6ab3b0f063bad553fc350eba6b666134baa848738996c49dbafe76509c00773d",
+      "bytes": 8506,
       "mode": "644"
     },
     {
@@ -894,8 +2420,8 @@
     {
       "path": "src/lib/transports/email/render/panel.mjs",
       "source": "src/lib/transports/email/render/panel.mjs",
-      "sha256": "8f383fddb0d3b627fef112b75a83dd55f6a65cb7476ec419939cadc33f0a7b94",
-      "bytes": 1960,
+      "sha256": "afd5f5a49836eec1665b2bce979932f1ce69b7150ab8aa57083d8cba3e45266a",
+      "bytes": 1694,
       "mode": "644"
     },
     {
@@ -915,8 +2441,8 @@
     {
       "path": "src/lib/transports/email/render/tokens.mjs",
       "source": "src/lib/transports/email/render/tokens.mjs",
-      "sha256": "6816b3a104b75e06ef68425542dc4bc675f08e758b713bc6b54be58c6ed4008e",
-      "bytes": 3397,
+      "sha256": "f1d308b0448d68bafc864a8b5df4ec547df55b21e6f1f851ec8de02f44c991a9",
+      "bytes": 1669,
       "mode": "644"
     },
     {
@@ -929,22 +2455,22 @@
     {
       "path": "src/lib/transports/email/templates.mjs",
       "source": "src/lib/transports/email/templates.mjs",
-      "sha256": "229a8efb65aa07007f2d109b7cc6600dbdad720c635f05ef4d79b5bddd40ca59",
-      "bytes": 8204,
+      "sha256": "e9d06798eb288dc405211f011cbbeafe3350ed5f16088e6f859632c1e8182a8a",
+      "bytes": 11289,
       "mode": "644"
     },
     {
       "path": "src/starport.mjs",
       "source": "src/starport.mjs",
-      "sha256": "5513faaf1ab04299792768d76b74ef45644480787f1c4ef51c5f784f33eaa191",
-      "bytes": 3599,
+      "sha256": "152514470d333a6fc5084d4d0108b79b00758407d554dbf1e081022d0a2f87dc",
+      "bytes": 4369,
       "mode": "644"
     },
     {
       "path": "src/tldr-agent-private-runner.mjs",
       "source": "src/tldr-agent-private-runner.mjs",
-      "sha256": "43f63b0309cabbd67a140f5e969f9656e4a161e4086a06c19f69c00071b069ec",
-      "bytes": 4312,
+      "sha256": "a26edb4dd6e90c67e272db7a2ded3ac93de5e3186b2632138586622e22274c69",
+      "bytes": 8168,
       "mode": "644"
     }
   ]

@@ -14,8 +14,10 @@ export function renderTldrAgentProductionPlist({
   statusPort,
   nodePath = process.execPath,
   tightbeamBin = null,
+  tightbeamStateRoot = null,
 }) {
   const daemonScript = join(dirname(schedulerScriptPath), "helm-daemon.mjs");
+  const runtimePath = `${dirname(nodePath)}:/usr/bin:/bin:/usr/sbin:/sbin`;
   return `<?xml version="1.0" encoding="UTF-8"?>
 <plist version="1.0"><dict>
 <key>Label</key><string>ai.tldr-agent.daemon</string>
@@ -28,7 +30,9 @@ export function renderTldrAgentProductionPlist({
 <key>TLDR_AGENT_DAEMON_MODE</key><string>poll-only</string>
 <key>HELM_CANONICAL_SQLITE</key><string>1</string>
 <key>HELM_STATUS_PORT</key><string>${statusPort}</string>
+<key>PATH</key><string>${xmlEscape(runtimePath)}</string>
 ${tightbeamBin ? `<key>TIGHTBEAM_BIN</key><string>${xmlEscape(tightbeamBin)}</string>` : ""}
+${tightbeamStateRoot ? `<key>TIGHTBEAM_STATE_ROOT</key><string>${xmlEscape(tightbeamStateRoot)}</string>` : ""}
 </dict>
 <key>StandardOutPath</key><string>/dev/null</string>
 <key>StandardErrorPath</key><string>/dev/null</string>

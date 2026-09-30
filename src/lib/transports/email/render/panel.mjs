@@ -10,7 +10,7 @@
 
 import { homedir as osHomedir } from "node:os";
 
-import { AGENTS } from "./email.mjs";
+import { agentForRuntime } from "./email.mjs";
 
 /* Real ids are UUIDs. The owner reads this to tell one thread from another and
  * never types it, so it is shown at the length that distinguishes them. */
@@ -25,12 +25,6 @@ function abbreviateHome(cwd, home) {
   if (rest === "") return "~";
   return rest.startsWith("/") ? `~${rest}` : cwd;
 }
-
-/* An adapter id we do not have a label for is left off entirely. A footer that
- * invents a name for the thing that wrote the message is worse than one that
- * stays quiet about it. */
-const agentFor = (runtime) =>
-  Object.values(AGENTS).find((entry) => entry.adapter === runtime) ?? null;
 
 export function statePanelForRow(row, { homedir = osHomedir } = {}) {
   const metadata = row?.metadata ?? {};
@@ -49,5 +43,8 @@ export function statePanelForRow(row, { homedir = osHomedir } = {}) {
     ]);
   }
 
-  return { statePanel, agent: agentFor(metadata.originator_runtime) };
+  return {
+    statePanel,
+    agent: agentForRuntime(metadata.originator_runtime),
+  };
 }

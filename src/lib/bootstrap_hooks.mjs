@@ -1,311 +1,164 @@
-// PRFAQ-0-1 Phase 1 — helm-tasks bootstrap-hooks command.
-//
-// Idempotently installs Helm's SessionStart/UserPromptSubmit/Stop hooks
-// into the agent runtime's hook settings. Supports --install, --uninstall,
-// and --dry-run.
-//
-// Supported runtimes (probed in this order):
-//   claude   →  $HOME/.claude/settings.json
-//   codex    →  $HOME/.codex/hooks.json
-//
-// Hook entries are tagged with a tldr; marker so --uninstall can remove
-// only entries this tool installed, leaving user-authored entries intact.
-
 import {
-  accessSync,
-  constants as fsConstants,
+  chmodSync,
   existsSync,
   readFileSync,
   mkdirSync,
   renameSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
-import { homedir } from "node:os";
 import { randomBytes } from "node:crypto";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 
-const HELM_MARKER = "tldr-agent-managed:runtime-hooks-v1";
-const TACHYON_STOP_HOOK_TIMEOUT_SECONDS = 4 * 60 * 60;
+import { defaultStateRoot, legacyStateRoot } from "./store.mjs";
 
-// PRFAQ-0-7 B-T3.1 (plan_review OQ-4) — marker allow-set.
-// When TASK-848D9F88 (Agent Adapter Contract v2) lands it appends a new
-// marker generation here (e.g., 'helm-managed:adapter-contract-v2'); the
-// allow-set lets isHelmGroup recognize both generations so a v1 install
-// cleanly upgrades to v2 on the next bootstrap-hooks --install. Replacement
-// logic in planChanges already overwrites any group matching isHelmGroup().
-export const HELM_MARKERS = [HELM_MARKER];
+const TLDR_MARKER = "tldr-agent-managed:runtime-hooks-v1";
+const LEGACY_MARKERS = new Set([TLDR_MARKER]);
+const EVENTS = [
+  "SessionStart",
+  "UserPromptSubmit",
+  "Stop",
+  "PreToolUse",
+  "PostToolUse",
+];
+const RETIRED_HOOK_NAMES = new Set([
+  "tldr-agent-capture-session-identity.sh",
+  "tldr-agent-mark-session-busy.sh",
+  "tldr-agent-hold-stop-for-unread.sh",
+  "tldr-agent-prefetch-session-inbox.sh",
+  "tldr-agent-inject-session-messages.sh",
+  "helm-session-start.sh",
+  "helm-capture-session-identity.sh",
+  "helm-user-prompt-submit.sh",
+  "helm-mark-session-busy.sh",
+  "helm-stop.sh",
+  "helm-hold-stop-for-unread.sh",
+  "helm-pre-tool-use.sh",
+  "helm-prefetch-session-inbox.sh",
+  "helm-post-tool-use.sh",
+  "helm-inject-session-messages.sh",
+]);
 
-// The hook script names. Resolved at install-time to absolute paths
-// inside the running helm install so the recorded command is portable.
-const HOOK_FILES = {
-  SessionStart: "tldr-agent-capture-session-identity.sh",
-  UserPromptSubmit: "tldr-agent-mark-session-busy.sh",
-  Stop: "tldr-agent-hold-stop-for-unread.sh",
-  PreToolUse: "tldr-agent-prefetch-session-inbox.sh",
-  PostToolUse: "tldr-agent-inject-session-messages.sh",
-};
-
-const LEGACY_HOOK_FILES = {
-  SessionStart: ["helm-session-start.sh", "helm-capture-session-identity.sh"],
-  UserPromptSubmit: ["helm-user-prompt-submit.sh", "helm-mark-session-busy.sh"],
-  Stop: ["helm-stop.sh", "helm-hold-stop-for-unread.sh"],
-  PreToolUse: ["helm-pre-tool-use.sh", "helm-prefetch-session-inbox.sh"],
-  PostToolUse: ["helm-post-tool-use.sh", "helm-inject-session-messages.sh"],
-};
-
-function helmRepoRoot() {
-  return resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-}
-
-function hookScriptPath(name) {
-  return join(helmRepoRoot(), "hooks", name);
-}
-
-function settingsPath(runtime) {
-  if (runtime === "claude") return join(homedir(), ".claude", "settings.json");
-  if (runtime === "codex") return join(homedir(), ".codex", "hooks.json");
+function settingsPath(runtime, home = homedir()) {
+  if (runtime === "claude") return join(home, ".claude", "settings.json");
+  if (runtime === "codex") return join(home, ".codex", "hooks.json");
   throw new Error(`unknown runtime: ${runtime}`);
 }
 
 function readSettings(file) {
   if (!existsSync(file)) return { exists: false, value: {} };
-  try {
-    return { exists: true, value: JSON.parse(readFileSync(file, "utf8")) };
-  } catch (err) {
-    throw new Error(`failed to parse ${file}: ${err.message}`);
-  }
+  return { exists: true, value: JSON.parse(readFileSync(file, "utf8")) };
 }
 
 function atomicWriteJson(file, value) {
   mkdirSync(dirname(file), { recursive: true });
-  const tmp = `${file}.${randomBytes(4).toString("hex")}.tmp`;
-  writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8");
-  renameSync(tmp, file);
+  const temporary = `${file}.${randomBytes(4).toString("hex")}.tmp`;
+  const mode = existsSync(file) ? statSync(file).mode & 0o777 : 0o600;
+  writeFileSync(temporary, JSON.stringify(value, null, 2), {
+    encoding: "utf8",
+    mode: 0o600,
+  });
+  chmodSync(temporary, mode);
+  renameSync(temporary, file);
 }
 
-// Claude Code's hooks structure (canonical):
-//   { "hooks": { "<EventName>": [ { "hooks": [ { "type": "command", "command": "..." } ] } ] } }
-// We append one matcher-less group per event with our Helm-tagged command.
-function buildHookGroup(event) {
-  const cmd = hookScriptPath(HOOK_FILES[event]);
-  const hook = { type: "command", command: cmd, _tldr_agent: HELM_MARKER };
-  if (event === "Stop") hook.timeout = TACHYON_STOP_HOOK_TIMEOUT_SECONDS;
-  return {
-    hooks: [hook],
-  };
-}
-
-function isHelmGroup(group) {
-  if (!group || !Array.isArray(group.hooks)) return false;
-  return group.hooks.some(
-    (h) =>
-      h &&
-      typeof h._tldr_agent === "string" &&
-      HELM_MARKERS.includes(h._tldr_agent),
-  );
-}
-
-function isCurrentHelmGroup(group, event) {
-  if (!group || !Array.isArray(group.hooks) || !HOOK_FILES[event]) return false;
-  const command = hookScriptPath(HOOK_FILES[event]);
-  return group.hooks.some(
-    (h) =>
-      h?.type === "command" &&
-      h?.command === command &&
-      h?._tldr_agent === HELM_MARKER,
-  );
-}
-
-function isTldrAgentCommand(command, event) {
-  if (typeof command !== "string" || !HOOK_FILES[event]) return false;
-  return [HOOK_FILES[event], ...(LEGACY_HOOK_FILES[event] ?? [])].some(
-    (file) => command === hookScriptPath(file),
-  );
-}
-
-function isRemovableHelmGroup(group, event) {
-  if (isHelmGroup(group)) return true;
-  return group?.hooks?.some(
-    (hook) =>
-      hook?.type === "command" && isTldrAgentCommand(hook.command, event),
-  );
-}
-
-function detectedHelmMarker(group) {
+function commandTokens(command) {
   return (
-    group?.hooks?.find(
-      (h) =>
-        h &&
-        typeof h._tldr_agent === "string" &&
-        HELM_MARKERS.includes(h._tldr_agent),
-    )?._tldr_agent || null
+    command
+      .match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g)
+      ?.map((token) => token.replace(/^(?:"|')|(?:"|')$/g, "")) ?? []
   );
 }
 
-function isExecutable(path) {
-  try {
-    accessSync(path, fsConstants.X_OK);
-    return true;
-  } catch {
-    return false;
-  }
+// Retired hook commands were written with the legacy ~/.tldr-agent path, so
+// that literal stays a matcher; the state root default is matched too.
+function retiredHookRoots(home) {
+  return [legacyStateRoot("agent", home), defaultStateRoot("agent", home)].map(
+    (root) => join(root, "install", "tldr-agent", "hooks"),
+  );
 }
 
-// PRFAQ-0-7 B-T3.2 — read-only inspection of installed Helm hooks.
-// Returns shape suitable for behavior.hooks.<runtime>_hooks_installed and
-// for the verify stage's FOR hint generation. Picks up PRFAQ-0-6's eventual
-// PreToolUse/PostToolUse hooks automatically (HOOK_FILES is the source of
-// truth for the event taxonomy).
-export function inspectInstalledHooks({ runtime } = {}) {
-  if (!runtime) {
-    return { ok: false, error: "missing_runtime" };
-  }
-  const file = settingsPath(runtime);
-  const { exists, value } = readSettings(file);
-  const events = {};
-  for (const event of Object.keys(HOOK_FILES)) {
-    const groups =
-      exists && Array.isArray(value?.hooks?.[event]) ? value.hooks[event] : [];
-    const helmGroup = groups.find((group) => isCurrentHelmGroup(group, event));
-    const legacyHelmGroup = groups.find(isHelmGroup);
-    const scriptPath = hookScriptPath(HOOK_FILES[event]);
-    const markerDetected = detectedHelmMarker(helmGroup);
-    const legacyMarkerDetected = detectedHelmMarker(legacyHelmGroup);
-    const commandEntry =
-      helmGroup?.hooks?.find((h) => h?.type === "command") ||
-      legacyHelmGroup?.hooks?.find((h) => h?.type === "command");
-    events[event] = {
-      installed: Boolean(helmGroup),
-      command: commandEntry?.command || null,
-      marker_present: Boolean(markerDetected),
-      marker_detected: markerDetected || legacyMarkerDetected,
-      script_exists: existsSync(scriptPath),
-      script_executable: isExecutable(scriptPath),
-    };
-  }
-  return { runtime, file, events };
+function isRetiredCommand(command, home) {
+  if (typeof command !== "string") return false;
+  const hookRoots = retiredHookRoots(home);
+  return commandTokens(command).some((token) =>
+    hookRoots.some((hookRoot) =>
+      [...RETIRED_HOOK_NAMES].some((name) => token === join(hookRoot, name)),
+    ),
+  );
 }
 
-function planChanges(settings, action) {
-  const next = JSON.parse(JSON.stringify(settings.value || {}));
-  if (!next.hooks || typeof next.hooks !== "object") next.hooks = {};
+function isOwnedHook(hook, home) {
+  return (
+    LEGACY_MARKERS.has(hook?._tldr_agent) ||
+    isRetiredCommand(hook?.command, home)
+  );
+}
+
+function removeOwnedHooks(group, home) {
+  if (!Array.isArray(group?.hooks)) return group;
+  const hooks = group.hooks.filter((hook) => !isOwnedHook(hook, home));
+  if (hooks.length === group.hooks.length) return group;
+  if (hooks.length === 0) return null;
+  return { ...group, hooks };
+}
+
+function planRemoval(settings, home) {
+  const next = structuredClone(settings.value || {});
+  if (!next.hooks || typeof next.hooks !== "object")
+    return { next, changes: [], changed: false };
   const changes = [];
-  for (const event of Object.keys(HOOK_FILES)) {
-    const existing = Array.isArray(next.hooks[event]) ? next.hooks[event] : [];
-    if (action === "install") {
-      const desired = buildHookGroup(event);
-      const filtered = existing.filter((g) => !isRemovableHelmGroup(g, event));
-      const helmish = existing.filter((g) => isRemovableHelmGroup(g, event));
-      if (helmish.length === 0) {
-        changes.push({
-          event,
-          op: "add",
-          command: hookScriptPath(HOOK_FILES[event]),
-        });
-        next.hooks[event] = [...existing, desired];
-      } else {
-        const prev = helmish.find(isHelmGroup) || helmish[0];
-        // Idempotent re-install: refresh the command path in case helm moved.
-        const prevCommand = prev?.hooks?.[0]?.command;
-        const nextCommand = hookScriptPath(HOOK_FILES[event]);
-        const prevMarker = detectedHelmMarker(prev);
-        const prevTimeout = prev?.hooks?.find(
-          (hook) => hook?.type === "command" && hook?.command === nextCommand,
-        )?.timeout;
-        if (
-          prevCommand !== nextCommand ||
-          prevMarker !== HELM_MARKER ||
-          (event === "Stop" &&
-            prevTimeout !== TACHYON_STOP_HOOK_TIMEOUT_SECONDS) ||
-          helmish.length > 1
-        ) {
-          changes.push({
-            event,
-            op: "refresh",
-            from: prevCommand,
-            to: nextCommand,
-            from_marker: prevMarker,
-            to_marker: HELM_MARKER,
-          });
-          next.hooks[event] = [...filtered, desired];
-        } else {
-          changes.push({ event, op: "noop", command: nextCommand });
-        }
-      }
-    } else if (action === "uninstall") {
-      const filtered = existing.filter((g) => !isRemovableHelmGroup(g, event));
-      if (filtered.length !== existing.length) {
-        changes.push({ event, op: "remove" });
-      } else {
-        changes.push({ event, op: "absent" });
-      }
-      if (filtered.length === 0) {
-        delete next.hooks[event];
-      } else {
-        next.hooks[event] = filtered;
-      }
-    }
+  for (const event of EVENTS) {
+    const groups = Array.isArray(next.hooks[event]) ? next.hooks[event] : [];
+    const retained = groups
+      .map((group) => removeOwnedHooks(group, home))
+      .filter(Boolean);
+    if (
+      retained.length === groups.length &&
+      retained.every((group, index) => group === groups[index])
+    )
+      continue;
+    changes.push({ event, op: "remove" });
+    if (retained.length === 0) delete next.hooks[event];
+    else next.hooks[event] = retained;
   }
-  return { next, changes };
+  if (Object.keys(next.hooks).length === 0) delete next.hooks;
+  return { next, changes, changed: changes.length > 0 };
 }
 
 export function bootstrapHooks({
   action,
   runtime = null,
   dryRun = false,
+  home = homedir(),
 } = {}) {
-  if (!["install", "uninstall"].includes(action)) {
-    return {
-      ok: false,
-      error: {
-        code: "invalid_action",
-        message: `action must be install or uninstall (got ${action})`,
-      },
-    };
-  }
-  const runtimes = runtime ? [runtime] : ["claude", "codex"];
+  if (!["install", "uninstall"].includes(action))
+    return { ok: false, error: { code: "invalid_action" } };
   const report = [];
-  for (const rt of runtimes) {
-    const file = settingsPath(rt);
+  for (const currentRuntime of runtime ? [runtime] : ["claude", "codex"]) {
+    const file = settingsPath(currentRuntime, home);
     const settings = readSettings(file);
-    const { next, changes } = planChanges(settings, action);
+    const removal = planRemoval(settings, home);
     const entry = {
-      runtime: rt,
+      runtime: currentRuntime,
       file,
       settings_existed: settings.exists,
-      changes,
+      changes: removal.changes,
+      status: dryRun ? "dry_run" : removal.changed ? "written" : "unchanged",
     };
-    if (dryRun) {
-      entry.status = "dry_run";
-      entry.preview = next;
-    } else {
-      atomicWriteJson(file, next);
-      entry.status = "written";
-    }
+    if (dryRun) entry.preview = removal.next;
+    else if (removal.changed) atomicWriteJson(file, removal.next);
     report.push(entry);
   }
-  return {
-    ok: true,
-    action,
-    dryRun,
-    report,
-    hook_marker: HELM_MARKER,
-    helm_marker: HELM_MARKER,
-    hook_files: HOOK_FILES,
-  };
+  return { ok: true, action, dryRun, report, hook_marker: TLDR_MARKER };
 }
 
 export const _internals = {
-  HELM_MARKER,
-  HELM_MARKERS,
-  HOOK_FILES,
-  LEGACY_HOOK_FILES,
-  hookScriptPath,
+  TLDR_MARKER,
+  RETIRED_HOOK_NAMES,
   settingsPath,
-  planChanges,
-  helmRepoRoot,
-  isHelmGroup,
-  isCurrentHelmGroup,
-  isExecutable,
+  isOwnedHook,
+  removeOwnedHooks,
+  planRemoval,
 };

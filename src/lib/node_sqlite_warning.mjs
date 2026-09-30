@@ -1,8 +1,9 @@
 // Suppresses Node's `ExperimentalWarning: SQLite is an experimental feature`.
 //
-// node:sqlite is unflagged from Node 22.13.0 (the supported floor — see
-// MIN_NODE_VERSION in node_exec.mjs) but still emits an ExperimentalWarning on
-// stderr for the whole 22.x and 23.x line. Node 24 does not. Left alone, every
+// node:sqlite is unflagged from Node 22.13.0, but still emits an
+// ExperimentalWarning on stderr for the whole 22.x and 23.x line. Node 24
+// does not, and Node 24.20.0 is the supported floor (see MIN_NODE_VERSION in
+// node_exec.mjs). Left alone, every
 // `tldr-agent` invocation on a supported Node prints a warning that looks like
 // a defect, and the daemon writes one into its log on each start.
 //

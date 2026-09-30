@@ -7,6 +7,7 @@ import { defaultStarportOperation } from "./lib/tldr_agent_gui_session.mjs";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 
 import { createProductionStarportRuntime } from "./lib/starport_runtime.mjs";
 
@@ -17,6 +18,21 @@ const OPERATIONS = new Set([
   "repair",
   "uninstall",
 ]);
+
+function runAppLauncher(operation) {
+  const launcher = fileURLToPath(
+    new URL("../install/tldr-agent-bootstrap.sh", import.meta.url),
+  );
+  try {
+    return execFileSync("/bin/sh", [launcher, "--operation", operation], {
+      encoding: "utf8",
+      timeout: 15_000,
+    });
+  } catch (error) {
+    if (error.stdout) return String(error.stdout);
+    throw error;
+  }
+}
 
 function unsupported() {
   return Object.freeze({
@@ -82,10 +98,14 @@ function unavailable(error) {
 
 export async function dispatchStarportOperation(
   operation,
-  { createRuntime = createProductionStarportRuntime } = {},
+  {
+    createRuntime = createProductionStarportRuntime,
+    openApp = () => JSON.parse(runAppLauncher("configure")),
+  } = {},
 ) {
   if (!OPERATIONS.has(operation)) return unsupported();
   try {
+    if (operation === "configure") return await openApp();
     const runtime = await createRuntime();
     if (typeof runtime?.[operation] !== "function") return unsupported();
     return await runtime[operation]();
@@ -105,6 +125,14 @@ export async function main(
   } = {},
 ) {
   const operation = args[0] ?? defaultStarportOperation();
+  if (
+    ["--help", "-h", "help"].includes(operation) ||
+    (OPERATIONS.has(operation) &&
+      args.some((arg) => ["--help", "-h"].includes(arg)))
+  ) {
+    write(runAppLauncher("--help"));
+    return null;
+  }
   if (args.slice(1).some((argument) => argument !== "--json")) {
     const invalid = unsupported();
     write(`${JSON.stringify(invalid)}\n`);

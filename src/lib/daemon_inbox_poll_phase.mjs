@@ -120,29 +120,50 @@ async function runScheduledPoll({
       dispatchCaptured: true,
       timeoutMs: childTimeoutMs,
     });
-    if (!child.ok) throw new Error(child.error || "inbox poll child failed");
+    if (!child.ok) {
+      // A tick can fail after inbound mail was already polled (an outbound
+      // failure is reported last); its envelope still carries those counts.
+      throw Object.assign(new Error(child.error || "inbox poll child failed"), {
+        code: child.error_code || null,
+        // The diagnostics allowlist drops unknown child codes and stderr goes
+        // to /dev/null, so this class is what records why a tick failed.
+        reasonCode: child.timed_out
+          ? "poll_child_timeout"
+          : child.abort_source
+            ? "poll_child_aborted"
+            : "poll_child_failed",
+        inbound: child.data?.inbound || null,
+        outbound: child.data?.outbound || null,
+      });
+    }
     const data = child.data || {};
+    // pollChannel nests the inbound counts beside the outbound result.
+    const inbound = data.inbound || {};
     const candidateFound =
-      Number(data.fresh || 0) > 0 || Number(data.written || 0) > 0;
+      Number(inbound.fresh || 0) > 0 || Number(inbound.written || 0) > 0;
     appendActivityEvent({
       event_type: "daemon_inbox_poll_tick",
       daemon_instance_id: daemonInstanceId,
       scope_id: targetScope.scope_id,
       cwd: targetScope.cwd,
       metadata: {
-        ok: Boolean(data.ok),
-        error: data.error || null,
-        fetched: data.fetched ?? 0,
-        fresh: data.fresh ?? 0,
-        written: data.written ?? 0,
-        skipped_duplicates: data.skipped_duplicates ?? 0,
-        errors: Array.isArray(data.errors) ? data.errors.length : 0,
+        ok: Boolean(inbound.ok),
+        error: inbound.error || null,
+        fetched: inbound.fetched ?? 0,
+        fresh: inbound.fresh ?? 0,
+        written: inbound.written ?? 0,
+        skipped_duplicates: inbound.skipped_duplicates ?? 0,
+        errors: Array.isArray(inbound.errors) ? inbound.errors.length : 0,
         latency_ms: Date.now() - startedAt,
         inbox_id: inboxId,
         next_poll_at: new Date(started.nextPollAtMs).toISOString(),
+        delivered: data.outbound?.delivered ?? 0,
+        failed: data.outbound?.failed ?? 0,
+        // Item 41: a read that recovered on its one in-tick retry.
+        retried: inbound.list_retries ?? 0,
       },
     });
-    return pollResult(data, started, candidateFound);
+    return pollResult(inbound, started, candidateFound);
   } catch (err) {
     process.stderr.write(`helm daemon inbox poll failed: ${err.message}\n`);
     appendActivityEvent({
@@ -150,11 +171,38 @@ async function runScheduledPoll({
       daemon_instance_id: daemonInstanceId,
       scope_id: targetScope.scope_id,
       cwd: targetScope.cwd,
+      error_code: err.code || null,
+      reason_code: err.reasonCode || "poll_child_failed",
       metadata: {
         error: err.message,
         latency_ms: Date.now() - startedAt,
         inbox_id: inboxId,
         next_poll_at: new Date(started.nextPollAtMs).toISOString(),
+        ...(err.inbound
+          ? {
+              fetched: err.inbound.fetched ?? 0,
+              fresh: err.inbound.fresh ?? 0,
+              written: err.inbound.written ?? 0,
+              // Item 41: why the inbox read failed (allowlisted enums and
+              // numbers; see inboxListFailureCause in transports/email.mjs).
+              // Absent keys stay absent: the count projection reads null as 0.
+              ...Object.fromEntries(
+                ["cause", "broker_code", "bridge_ms", "bridge_exit_code"]
+                  .filter((key) => (err.inbound[key] ?? null) !== null)
+                  .map((key) => [key, err.inbound[key]]),
+              ),
+              retried: err.inbound.list_retries ?? 0,
+            }
+          : {}),
+        // Item 49: an outbound failure the tick reports (a failed claim) is
+        // counted like any other; its cause wins, as its code is error_code.
+        ...(err.outbound
+          ? {
+              delivered: err.outbound.delivered ?? 0,
+              failed: err.outbound.failed ?? 0,
+              ...(err.outbound.cause ? { cause: err.outbound.cause } : {}),
+            }
+          : {}),
       },
     });
     return {

@@ -1,0 +1,63 @@
+#!/usr/bin/env node
+// Starts the Tightbeam daemon in the foreground against a state root
+// (--state-root flag, TIGHTBEAM_STATE_ROOT env var, or the
+// ~/.tldr-agents/tightbeam default — the architecture contract §3). Exit code 0 on a clean SIGINT/SIGTERM
+// shutdown; nonzero with a clear stderr message on a lock conflict or any
+// other startup failure.
+
+import { startDaemon, attachProcessLifecycle } from '../src/daemon/daemon.mjs';
+import { resolveStateRoot } from '../src/daemon/state_root.mjs';
+import { DAEMON_VERSION, PROTOCOL_VERSION } from '../src/protocol/envelope.mjs';
+
+function parseArgs(argv) {
+  let stateRoot;
+  let version = false;
+  let json = false;
+  for (let i = 0; i < argv.length; i += 1) {
+    const arg = argv[i];
+    if (arg === '--state-root') {
+      stateRoot = argv[i + 1];
+      i += 1;
+    } else if (arg.startsWith('--state-root=')) {
+      stateRoot = arg.slice('--state-root='.length);
+    } else if (arg === '--version') {
+      version = true;
+    } else if (arg === '--json') {
+      json = true;
+    }
+  }
+  return { stateRoot, version, json };
+}
+
+async function main() {
+  const { stateRoot: cliStateRoot, version, json } = parseArgs(process.argv.slice(2));
+  if (version) {
+    const report = { daemon_version: DAEMON_VERSION, protocol_version: PROTOCOL_VERSION };
+    if (json) process.stdout.write(JSON.stringify(report) + '\n');
+    else process.stdout.write(`daemon_version: ${report.daemon_version}\nprotocol_version: ${report.protocol_version}\n`);
+    return;
+  }
+  const stateRoot = cliStateRoot || resolveStateRoot();
+
+  let daemon;
+  try {
+    daemon = await startDaemon({ stateRoot });
+  } catch (err) {
+    if (err.code === 'DAEMON_LOCK_HELD') {
+      process.stderr.write(`tightbeam-daemon: ${err.message}\n`);
+      process.exit(1);
+    }
+    // A named refusal (such as STATE_ROOT_MIGRATION_PENDING) keeps its code.
+    const code = typeof err.code === 'string' && /^[A-Z][A-Z0-9_]+$/.test(err.code) ? `${err.code}: ` : '';
+    process.stderr.write(`tightbeam-daemon: failed to start against state root "${stateRoot}": ${code}${err.message}\n`);
+    process.exit(1);
+  }
+
+  attachProcessLifecycle(daemon);
+  process.stderr.write(`tightbeam-daemon: listening on ${daemon.paths.socket} (state root ${stateRoot})\n`);
+}
+
+main().catch((err) => {
+  process.stderr.write(`tightbeam-daemon: unexpected failure: ${err.stack ?? err.message}\n`);
+  process.exit(1);
+});

@@ -1,0 +1,19 @@
+name: droid
+version: 1
+
+command:
+  argv: [droid, exec, --stream-json, "{{prompt}}"]
+  env: {}
+
+session_id:
+  capture:
+    strategy: stdout_parse
+    from: stdout
+    parse: jsonl
+    match: { type: session_started }
+    path: $.session_id
+
+resume:
+  command: "droid exec -s {{session_id}}"
+  cwd: "{{job.cwd}}"
+  caveats: ["requires Factory account"]

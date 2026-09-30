@@ -1,15 +1,13 @@
-import { execFile } from "node:child_process";
+import { closeSync, mkdirSync, openSync, unlinkSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { promisify } from "node:util";
+import { dirname, join } from "node:path";
 import { writeTextAtomic } from "./durable_file_io.mjs";
+import { defaultTightbeamCommand } from "./tightbeam_channel_runtime.mjs";
+import { runWithClosedStdin } from "./starport_process.mjs";
 import { renderTldrAgentWelcomeEmail } from "./transports/email/templates.mjs";
-
 export const WELCOME_IDEMPOTENCY_KEY = "tldr-agent-welcome:v1";
 export const WELCOME_REASON =
   "Confirm the setup session can receive owner replies";
-const execFileAsync = promisify(execFile);
 const WELCOME_EVIDENCE_VERSION = 1;
 const WELCOME_EVIDENCE_FILE = "welcome-evidence.json";
 const SAFE_WELCOME_REMEDIATION =
@@ -20,11 +18,9 @@ const DEFINITE_TIGHTBEAM_FAILURE_CODES = new Set([
   "permission_denied",
   "bootstrap_required",
 ]);
-
 async function noWelcomeEvidence() {
   return "not-started";
 }
-
 function status(value, remediation = null) {
   return Object.freeze({
     status: value,
@@ -33,15 +29,15 @@ function status(value, remediation = null) {
       : {}),
   });
 }
-
-function sessionEnvironment(session) {
-  const sessionId = session?.sessionId;
+function sessionEnvironment(context) {
+  const sessionId = context?.sessionId;
   if (typeof sessionId !== "string" || sessionId.length === 0) return null;
-  return session?.identity?.runtime === "codex"
+  return context?.runtime === "codex"
     ? { CODEX_THREAD_ID: sessionId }
-    : { CLAUDE_CODE_SESSION_ID: sessionId };
+    : context?.runtime === "claude"
+      ? { CLAUDE_CODE_SESSION_ID: sessionId }
+      : null;
 }
-
 function welcomeData(result) {
   const value = result?.result ?? result?.data ?? result;
   if (!value || typeof value !== "object") return {};
@@ -63,12 +59,11 @@ function welcomeData(result) {
     ),
   );
 }
-
 async function productionSessionRun({
   command,
   args,
   env,
-  exec = execFileAsync,
+  exec = runWithClosedStdin,
 }) {
   try {
     const { stdout } = await exec(command, args, {
@@ -112,22 +107,14 @@ async function productionSessionRun({
     };
   }
 }
-
 export function createSessionWelcomeDispatcher({
-  command = process.env.TIGHTBEAM_BIN ||
-    join(
-      process.env.HOME ?? homedir(),
-      ".tightbeam",
-      "install",
-      "bin",
-      "tightbeam",
-    ),
+  command = defaultTightbeamCommand(),
   stateRoot = process.env.TIGHTBEAM_STATE_ROOT,
-  session,
+  context,
   run = productionSessionRun,
   evidence = null,
 } = {}) {
-  const identityEnvironment = sessionEnvironment(session);
+  const identityEnvironment = sessionEnvironment(context);
   return async ({ subject, body } = {}) => {
     if (!identityEnvironment) {
       return {
@@ -139,12 +126,21 @@ export function createSessionWelcomeDispatcher({
         },
       };
     }
+    let claimed;
     try {
-      await evidence?.begin();
+      claimed = evidence?.claimDispatch
+        ? await evidence.claimDispatch()
+        : (await evidence?.begin(), true);
     } catch {
       return {
         ok: false,
         error: { code: "welcome_evidence_unavailable", ambiguous: true },
+      };
+    }
+    if (!claimed) {
+      return {
+        ok: false,
+        error: { code: "welcome_dispatch_in_progress", ambiguous: true },
       };
     }
     const result = await run({
@@ -194,7 +190,6 @@ export function createSessionWelcomeDispatcher({
     return normalized;
   };
 }
-
 function evidenceRecord(value) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const allowed = new Set([
@@ -216,7 +211,6 @@ function evidenceRecord(value) {
   }
   return value;
 }
-
 export function createWelcomeEvidenceStore({
   home,
   path = join(home || "", WELCOME_EVIDENCE_FILE),
@@ -228,7 +222,6 @@ export function createWelcomeEvidenceStore({
   function writeRecord(record) {
     write(path, `${JSON.stringify(record)}\n`, { durable: true, mode: 0o600 });
   }
-
   async function readRecord() {
     try {
       return evidenceRecord(JSON.parse(await read(path, "utf8")));
@@ -236,15 +229,41 @@ export function createWelcomeEvidenceStore({
       return error?.code === "ENOENT" ? undefined : null;
     }
   }
-
-  return Object.freeze({
-    path,
-    async begin() {
+  async function claimDispatch() {
+    const lockPath = `${path}.claim`;
+    let descriptor;
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      descriptor = openSync(lockPath, "wx", 0o600);
+    } catch {
+      return false;
+    }
+    try {
+      const record = await readRecord();
+      if (
+        record !== undefined &&
+        (record === null || record.status !== "failed")
+      ) {
+        return false;
+      }
       writeRecord({
         version: WELCOME_EVIDENCE_VERSION,
         status: "dispatching",
         timestamp: now(),
       });
+      return true;
+    } catch {
+      return false;
+    } finally {
+      closeSync(descriptor);
+      unlinkSync(lockPath);
+    }
+  }
+  return Object.freeze({
+    path,
+    claimDispatch,
+    async begin() {
+      return claimDispatch();
     },
     async complete(result) {
       const data = welcomeData(result);
@@ -277,14 +296,12 @@ export function createWelcomeEvidenceStore({
     },
   });
 }
-
 function debugSetupTemplateDrift(stage, data) {
   if (process.env.TLDR_AGENT_DEBUG_TEMPLATE_DRIFT !== "1") return;
   process.stderr.write(
     `[🪳 TEMP SETUP_EMAIL_TEMPLATE_DRIFT] ${stage} ${JSON.stringify(data)}\n`,
   );
 }
-
 export function createStarportOnboarding({
   sessionId,
   scope,
@@ -296,9 +313,7 @@ export function createStarportOnboarding({
   if (!sessionId || !scope?.scope_id) {
     throw new TypeError("Starport onboarding requires setup session and scope");
   }
-
   let failedRemediation = null;
-
   async function readStatus() {
     const evidence = await readEvidence({
       scope,
@@ -311,7 +326,6 @@ export function createStarportOnboarding({
         : "not-started",
     );
   }
-
   async function send() {
     const before = await readStatus();
     if (before.status === "accepted" || before.status === "ambiguous") {
@@ -356,10 +370,8 @@ export function createStarportOnboarding({
     const after = await readStatus();
     return after.status === "accepted" ? after : status("ambiguous");
   }
-
   return Object.freeze({ status: readStatus, send });
 }
-
 export const _internals = Object.freeze({
   DEFINITE_TIGHTBEAM_FAILURE_CODES,
   noWelcomeEvidence,

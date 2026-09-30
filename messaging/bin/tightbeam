@@ -1,0 +1,1566 @@
+#!/usr/bin/env node
+// Tightbeam CLI — a thin wrapper over src/client (the product plan
+// Technical Approach §3: "Clients can validate obvious input errors. Only
+// the daemon can create canonical messages..."). No business logic and no
+// local state beyond reading credentials from flags/env/file: every
+// subcommand below maps 1:1 onto one docs/protocol.md operation. CLI verb
+// naming (nouns before verbs, e.g. `app register`, `endpoint set-state`)
+// is informed by Helm's message CLI contract
+// (Helm's message CLI, inspected for flag-naming
+// convention only — see the internal provenance record), per the product plan Technical
+// Approach §1 ("Use Helm as the source for ... the existing message CLI
+// contract"). Tightbeam's own surface maps onto docs/protocol.md
+// verbatim; no Helm flags are copied wholesale.
+
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+
+import { connect, writeAdminNonce } from '../src/client/client.mjs';
+import { HookError, runHookVerb, HOOK_EVENT_VERBS } from '../src/cli/hook_commands.mjs';
+import { bootstrapHooks } from '../src/cli/hooks_install.mjs';
+// The install-time bootstrap shared with `hook session-start`: one
+// implementation, two entry points.
+import { bootstrap, BootstrapError, DEFAULT_APP_NAME, DEFAULT_AUTHORITY_NAME } from '../src/cli/bootstrap.mjs';
+import { readHookCredentials } from '../src/cli/hook_credentials.mjs';
+import { statePaths } from '../src/daemon/state_root.mjs';
+import { resolveStateRoot as resolveConfiguredStateRoot } from '../src/protocol/state_root_location.mjs';
+// Read-only loader for registered runtime manifests: doctor reports on the
+// runtimes a state root actually has, never writes the registry itself.
+import { createRuntimeSnapshot, loadPersistedRuntimeEntries } from '../src/daemon/runtime_store.mjs';
+// The expected schema version is data, not behavior: doctor compares it
+// against what schema_migrations records, read directly, and never calls
+// anything in schema.mjs that opens or migrates.
+import { SCHEMA_VERSION } from '../src/daemon/schema.mjs';
+import { runDoctorChecks } from '../src/cli/doctor_checks.mjs';
+import { AgentCommandError, loadAgentSession, parseAgentCommand, runAgentCommand } from '../src/cli/agent_commands.mjs';
+// Text for a person or an agent to run names the front door
+// (`tldr-agents messaging`), not the retired `tightbeam` bin alias (item 36).
+import { tightbeamCommandName } from '../src/cli/package_context.mjs';
+// Client-side manifest validation for `runtime register`: the same strict
+// parser the daemon runs, so an invalid manifest fails before any daemon
+// contact.
+import { parseRuntimeManifest } from '../src/runtimes/registry.mjs';
+import { BASELINE_CAPABILITIES, DAEMON_VERSION, PROTOCOL_VERSION, TightbeamError } from '../src/protocol/envelope.mjs';
+
+class UsageError extends Error {}
+
+// --state-root, else TIGHTBEAM_STATE_ROOT, else ~/.tldr-agents/tightbeam.
+function resolveStateRoot(explicit) {
+  return resolveConfiguredStateRoot({ explicit });
+}
+
+/**
+ * Removes and returns a `--name value` / `--name=value` / (boolean)
+ * `--name` flag from `args` in place. Returns undefined if absent.
+ */
+function extractFlag(args, name, { boolean: isBoolean = false } = {}) {
+  const eq = `--${name}=`;
+  const idx = args.findIndex((a) => a === `--${name}` || a.startsWith(eq));
+  if (idx === -1) return undefined;
+  const token = args[idx];
+  if (token.startsWith(eq)) {
+    args.splice(idx, 1);
+    return token.slice(eq.length);
+  }
+  if (isBoolean) {
+    args.splice(idx, 1);
+    return true;
+  }
+  const value = args[idx + 1];
+  if (value === undefined) throw new UsageError(`--${name} requires a value`);
+  args.splice(idx, 2);
+  return value;
+}
+
+function requirePositional(args, name) {
+  const value = args.shift();
+  if (value === undefined) throw new UsageError(`missing required argument: ${name}`);
+  return value;
+}
+
+function requireFlag(args, name) {
+  const value = extractFlag(args, name);
+  if (value === undefined) throw new UsageError(`--${name} is required`);
+  return value;
+}
+
+function requireFenceGeneration(args) {
+  const value = Number(requireFlag(args, 'generation'));
+  if (!Number.isInteger(value) || value < 1) throw new UsageError('--generation must be a positive integer');
+  return value;
+}
+
+function requireNonblankFlag(args, name) {
+  const value = requireFlag(args, name);
+  if (value.trim().length === 0) throw new UsageError(`--${name} must be nonblank`);
+  return value;
+}
+
+function requirePositiveIntegerFlag(args, name) {
+  const value = Number(requireFlag(args, name));
+  if (!Number.isInteger(value) || value < 1) throw new UsageError(`--${name} must be a positive integer`);
+  return value;
+}
+
+function splitCsv(value) {
+  return String(value ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// Shared shaper for `recovery retry` and `recovery switch`: identical
+// request fields per the plan's Recovery operations API.
+function buildRecoveryPayload(args) {
+  const payload = {
+    root_obligation_id: requireFlag(args, 'root'),
+    root_generation: requirePositiveIntegerFlag(args, 'generation'),
+    target_endpoint_id: requireFlag(args, 'target-endpoint'),
+    target_process_generation: requirePositiveIntegerFlag(args, 'target-process-generation'),
+    idempotency_key: requireFlag(args, 'key'),
+  };
+  if (args.length > 0) throw new UsageError(`unknown argument: ${args.join(' ')}`);
+  return payload;
+}
+
+// ---------------------------------------------------------------------
+// Global flags
+// ---------------------------------------------------------------------
+
+function parseGlobalFlags(argv) {
+  const args = [...argv];
+  const stateRoot = extractFlag(args, 'state-root');
+  const appId = extractFlag(args, 'app-id');
+  const secretFile = extractFlag(args, 'secret-file');
+  const admin = extractFlag(args, 'admin', { boolean: true }) ?? false;
+  const json = extractFlag(args, 'json', { boolean: true }) ?? false;
+  return { rest: args, stateRoot, appId, secretFile, admin: Boolean(admin), json: Boolean(json) };
+}
+
+function readAppSecret(secretFile) {
+  if (secretFile) return fs.readFileSync(secretFile, 'utf8').trim();
+  if (process.env.TIGHTBEAM_APP_SECRET) return process.env.TIGHTBEAM_APP_SECRET;
+  return undefined;
+}
+
+function versionReport() {
+  return {
+    package_version: DAEMON_VERSION,
+    protocol_version: PROTOCOL_VERSION,
+    state_schema_version: SCHEMA_VERSION,
+    capabilities: [...BASELINE_CAPABILITIES],
+  };
+}
+
+function extractRepeatableFlag(args, name) {
+  const values = [];
+  while (true) {
+    const value = extractFlag(args, name);
+    if (value === undefined) return values;
+    values.push(value);
+  }
+}
+
+function parseProtocolOperand(value, name) {
+  if (typeof value !== 'string' || !/^\d+(?:\.\d+)?$/.test(value)) {
+    throw new UsageError(`--${name} must be a protocol version like 1 or 1.0`);
+  }
+  const [major, minor] = value.split('.').map(Number);
+  return { major, minor: minor ?? 0, hasMinor: value.includes('.') };
+}
+
+function parseSchemaOperand(value) {
+  if (typeof value !== 'string' || !/^\d+$/.test(value) || Number(value) < 1) {
+    throw new UsageError('--expect-schema must be an integer >= 1');
+  }
+  return Number(value);
+}
+
+function parsePreflightArgs(args) {
+  const minProtocolRaw = extractFlag(args, 'min-protocol');
+  const maxProtocolRaw = extractFlag(args, 'max-protocol');
+  const schemaRaw = extractFlag(args, 'expect-schema');
+  const daemonVersion = extractFlag(args, 'expect-daemon-version');
+  const requiredCapabilities = extractRepeatableFlag(args, 'require-capability');
+  if (args.length > 0) throw new UsageError(`unknown preflight argument: ${args.join(' ')}`);
+  if (daemonVersion !== undefined && daemonVersion.length === 0) {
+    throw new UsageError('--expect-daemon-version must be a non-empty version string');
+  }
+  for (const capability of requiredCapabilities) {
+    if (capability.length === 0) throw new UsageError('--require-capability must be a non-empty capability name');
+  }
+  return {
+    minProtocol: minProtocolRaw === undefined ? null : parseProtocolOperand(minProtocolRaw, 'min-protocol'),
+    maxProtocol: maxProtocolRaw === undefined ? null : parseProtocolOperand(maxProtocolRaw, 'max-protocol'),
+    expectedSchema: schemaRaw === undefined ? null : parseSchemaOperand(schemaRaw),
+    expectedDaemonVersion: daemonVersion ?? null,
+    requiredCapabilities,
+  };
+}
+
+function parseObservedProtocol(value) {
+  if (typeof value !== 'string' || !/^\d+\.\d+$/.test(value)) {
+    throw new Error(`daemon returned malformed protocol_version ${JSON.stringify(value)}`);
+  }
+  const [major, minor] = value.split('.').map(Number);
+  return { major, minor };
+}
+
+function protocolAtLeast(observed, expected) {
+  return observed.major > expected.major || (observed.major === expected.major && observed.minor >= expected.minor);
+}
+
+function protocolAtMost(observed, expected) {
+  if (observed.major !== expected.major) return observed.major < expected.major;
+  return !expected.hasMinor || observed.minor <= expected.minor;
+}
+
+async function runPreflight(globalFlags, args) {
+  const expected = parsePreflightArgs(args);
+  const client = await buildClient(globalFlags);
+  try {
+    // buildClient has already completed the handshake. Its public results
+    // live on the client instance by design: capabilities arrive on the
+    // handshake envelope, not via capabilities.list (which needs read_health).
+    const observed = {
+      protocol_version: client.handshakeResult.protocol_version,
+      state_schema_version: client.handshakeResult.state_schema_version,
+      capabilities: [...(client.capabilities ?? [])],
+      daemon_version: 'unavailable (not requested)',
+    };
+
+    const protocol = parseObservedProtocol(observed.protocol_version);
+    const checks = [];
+    if (expected.minProtocol) {
+      checks.push({ field: 'min_protocol', expected: `${expected.minProtocol.major}.${expected.minProtocol.minor}`, observed: observed.protocol_version, ok: protocolAtLeast(protocol, expected.minProtocol) });
+    }
+    if (expected.maxProtocol) {
+      checks.push({ field: 'max_protocol', expected: expected.maxProtocol.hasMinor ? `${expected.maxProtocol.major}.${expected.maxProtocol.minor}` : `${expected.maxProtocol.major}`, observed: observed.protocol_version, ok: protocolAtMost(protocol, expected.maxProtocol) });
+    }
+    if (expected.expectedSchema !== null) {
+      checks.push({ field: 'state_schema_version', expected: expected.expectedSchema, observed: observed.state_schema_version, ok: observed.state_schema_version === expected.expectedSchema });
+    }
+    for (const capability of expected.requiredCapabilities) {
+      checks.push({ field: 'capability', expected: capability, observed: observed.capabilities.includes(capability), ok: observed.capabilities.includes(capability) });
+    }
+    if (expected.expectedDaemonVersion !== null) {
+      try {
+        const status = await client.request('daemon.status', {});
+        observed.daemon_version = status.daemon_version;
+        checks.push({ field: 'daemon_version', expected: expected.expectedDaemonVersion, observed: status.daemon_version, ok: status.daemon_version === expected.expectedDaemonVersion });
+      } catch (err) {
+        observed.daemon_version = `unavailable (${err.code ?? err.message})`;
+        checks.push({ field: 'daemon_version', expected: expected.expectedDaemonVersion, observed: observed.daemon_version, ok: false });
+      }
+    }
+    const compatible = checks.every((check) => check.ok);
+    const report = { compatible, observed, checks };
+    if (globalFlags.json) printJson({ ok: compatible, result: report });
+    else printHuman(report);
+    if (!compatible) process.exitCode = 1;
+  } finally {
+    await client.close();
+  }
+}
+
+async function buildClient({ stateRoot, admin, appId, secretFile, onEvent }) {
+  const client = await connect(stateRoot, onEvent ? { onEvent } : {});
+  if (admin) {
+    const nonce = writeAdminNonce(stateRoot);
+    client.handshakeResult = await client.handshake({ credential: { kind: 'admin', nonce } });
+    return client;
+  }
+  let resolvedAppId = appId || process.env.TIGHTBEAM_APP_ID;
+  let secret = readAppSecret(secretFile);
+  if (!resolvedAppId && !secret) {
+    const credentials = readHookCredentials(stateRoot);
+    resolvedAppId = credentials?.app_id;
+    secret = credentials?.app_secret;
+  }
+  if (!resolvedAppId) throw new UsageError('--app-id (or TIGHTBEAM_APP_ID) is required for a non-admin command');
+  if (!secret) throw new UsageError('--secret-file (or TIGHTBEAM_APP_SECRET) is required for a non-admin command');
+  client.handshakeResult = await client.handshake({ appId: resolvedAppId, credential: { kind: 'app', app_secret: secret } });
+  return client;
+}
+
+// ---------------------------------------------------------------------
+// Output
+// ---------------------------------------------------------------------
+
+function printJson(payload) {
+  process.stdout.write(JSON.stringify(payload) + '\n');
+}
+
+function printHuman(result) {
+  for (const [key, value] of Object.entries(result ?? {})) {
+    if (Array.isArray(value)) {
+      process.stdout.write(`${key}:\n`);
+      if (value.length === 0) process.stdout.write('  (none)\n');
+      for (const item of value) process.stdout.write(`  ${JSON.stringify(item)}\n`);
+    } else if (value !== null && typeof value === 'object') {
+      process.stdout.write(`${key}: ${JSON.stringify(value)}\n`);
+    } else {
+      process.stdout.write(`${key}: ${value}\n`);
+    }
+  }
+}
+
+function printResult(json, result) {
+  if (json) printJson({ ok: true, result });
+  else printHuman(result);
+}
+
+// ---------------------------------------------------------------------
+// Subcommand table. Each entry: requiresAdmin (default false), positional
+// argument names consumed in order, and a payload(args, flags) builder.
+// `args` is whatever remains after positionals are shifted off.
+// ---------------------------------------------------------------------
+
+const COMMANDS = {
+  status: {
+    op: 'daemon.status',
+    build(args) {
+      return {};
+    },
+  },
+  agent: {
+    local: true,
+    async run(args, globalFlags) {
+      if (args.length === 1 && (args[0] === '--help' || args[0] === '-h')) return { help: true };
+      const command = parseAgentCommand(args);
+      if (command.help) return { help: true, command: command.command };
+      // Agent commands deliberately share the SessionStart registration path
+      // rather than implementing a second cache repair protocol. The cache is
+      // a hint; registration is idempotent and refreshes missing/incomplete
+      // identity facts for this live runtime session.
+      const refreshSession = async () => {
+        const paths = statePaths(globalFlags.stateRoot);
+        const registry = createRuntimeSnapshot({
+          stateRoot: globalFlags.stateRoot,
+          runtimesDir: paths.runtimesDir,
+          entries: loadPersistedRuntimeEntries({ runtimesDir: paths.runtimesDir }),
+        });
+        await runHookVerb('session-start', {
+          stateRoot: globalFlags.stateRoot,
+          // An agent command is not a hook: nothing writes a payload to its
+          // stdin, and the session is the one loadAgentSession resolves from
+          // the environment. Reading fd 0 here blocked forever when the
+          // caller's stdin was an open, silent pipe or socket (a Claude Code
+          // Bash tool shell; item 41), so the refresh uses an empty payload.
+          stdin: '',
+          flags: {
+            appId: globalFlags.appId,
+            appSecret: globalFlags.secretFile ? readAppSecret(globalFlags.secretFile) : undefined,
+          },
+          registry,
+          socketPath: paths.socket,
+        });
+        return loadAgentSession(globalFlags.stateRoot);
+      };
+      let session;
+      try {
+        session = loadAgentSession(globalFlags.stateRoot);
+      } catch (error) {
+        if (!(error instanceof AgentCommandError) || error.code !== 'session_unavailable') throw error;
+        session = await refreshSession();
+      }
+      const client = await buildClient(globalFlags);
+      try {
+        return await runAgentCommand(client, session, command, { refreshSession });
+      } finally {
+        await client.close();
+      }
+    },
+    print(result, globalFlags) {
+      if (result.help) {
+        process.stderr.write(agentUsage(result.command) + '\n');
+        return;
+      }
+      if (!globalFlags.json && typeof result.confirmation === 'string') {
+        process.stdout.write(result.confirmation + '\n');
+        printHuman(Object.fromEntries(['message_id', 'work_id', 'work_status', 'delivery_wait', 'delivery_check_error', 'next_action', 'guidance', 'warning'].filter((key) => result[key] !== undefined).map((key) => [key, result[key]])));
+        return;
+      }
+      printResult(globalFlags.json, result);
+    },
+  },
+  capabilities: {
+    op: 'capabilities.list',
+    build() {
+      return {};
+    },
+  },
+
+  'app register': {
+    admin: true,
+    op: 'application.register',
+    build(args) {
+      const name = requirePositional(args, 'name');
+      return { name };
+    },
+  },
+  'app reregister': {
+    admin: true,
+    op: 'application.reregister',
+    build(args) {
+      const name = requirePositional(args, 'name');
+      return { name };
+    },
+  },
+  'app set-permissions': {
+    admin: true,
+    op: 'application.permissions.set',
+    build(args) {
+      const appIdArg = requirePositional(args, 'app_id');
+      const permissionsJson = extractFlag(args, 'permissions-json');
+      if (!permissionsJson) throw new UsageError('--permissions-json is required');
+      let permissions;
+      try {
+        permissions = JSON.parse(permissionsJson);
+      } catch (err) {
+        throw new UsageError(`--permissions-json must be valid JSON: ${err.message}`);
+      }
+      return { app_id: appIdArg, permissions };
+    },
+  },
+
+  'authority register': {
+    admin: true,
+    op: 'authority.register',
+    build(args) {
+      const name = requirePositional(args, 'name');
+      const description = extractFlag(args, 'description');
+      return description !== undefined ? { name, description } : { name };
+    },
+  },
+
+  'runtime register': {
+    admin: true,
+    op: 'runtime.register',
+    build(args) {
+      const file = requirePositional(args, 'file');
+      let raw;
+      try {
+        raw = fs.readFileSync(file, 'utf8');
+      } catch (err) {
+        throw new UsageError(`cannot read manifest file "${file}": ${err.message}`);
+      }
+      // Client-side validation mirrors the daemon's parser exactly, so an
+      // invalid manifest fails here before any daemon contact. What goes
+      // over the wire is the parsed OBJECT, never a path: the daemon never
+      // reads operator files.
+      let document;
+      try {
+        document = JSON.parse(raw);
+      } catch (err) {
+        throw new UsageError(`manifest file "${file}" is not valid JSON: ${err.message}`);
+      }
+      const parsed = parseRuntimeManifest(raw);
+      if (!parsed.ok) {
+        throw new UsageError(`invalid manifest in "${file}" (${parsed.code}): ${parsed.message}`);
+      }
+      return { manifest: document };
+    },
+  },
+
+  'principal register': {
+    op: 'principal.register',
+    build(args) {
+      const authorityName = extractFlag(args, 'authority');
+      if (!authorityName) throw new UsageError('--authority is required');
+      const externalRef = extractFlag(args, 'external-ref');
+      const displayName = extractFlag(args, 'display-name');
+      const payload = { authority_name: authorityName };
+      // --external-ref is what makes a repeat idempotent: the partial
+      // unique index it feeds is the identity the daemon replays against.
+      if (externalRef !== undefined) payload.external_principal_ref = externalRef;
+      if (displayName !== undefined) payload.display_name = displayName;
+      return payload;
+    },
+  },
+
+  'endpoint register': {
+    op: 'endpoint.register',
+    build(args) {
+      const authorityName = extractFlag(args, 'authority');
+      const principalId = extractFlag(args, 'principal');
+      if (!authorityName) throw new UsageError('--authority is required');
+      if (!principalId) throw new UsageError('--principal is required');
+      const runtime = extractFlag(args, 'runtime');
+      const session = extractFlag(args, 'session');
+      const launchMode = extractFlag(args, 'launch-mode');
+      const reference = extractFlag(args, 'reference');
+      const payload = { authority_name: authorityName, principal_id: principalId };
+      // --runtime is required, but the daemon owns that verdict: it
+      // answers malformed_request naming the field, which is the contract
+      // a caller can act on.
+      if (runtime !== undefined) payload.runtime = runtime;
+      if (session !== undefined) payload.provider_session_id = session;
+      if (launchMode !== undefined) payload.launch_mode = launchMode;
+      if (reference !== undefined) payload.authority_reference = reference;
+      return payload;
+    },
+  },
+  'endpoint set-state': {
+    op: 'endpoint.state.set',
+    build(args) {
+      const endpointId = requirePositional(args, 'endpoint_id');
+      const state = requirePositional(args, 'state');
+      return { endpoint_id: endpointId, state, process_generation: requireFenceGeneration(args) };
+    },
+  },
+  'endpoint close': {
+    op: 'endpoint.close',
+    build(args) {
+      const endpointId = requirePositional(args, 'endpoint_id');
+      return { endpoint_id: endpointId, process_generation: requireFenceGeneration(args) };
+    },
+  },
+  // Read-only: the calling application's own endpoints, newest first.
+  // Helm reads session facts here instead of from its retired hooks.
+  'endpoint list': {
+    op: 'endpoint.list',
+    build(args) {
+      const session = extractFlag(args, 'session');
+      const runtime = extractFlag(args, 'runtime');
+      const createdAfter = extractFlag(args, 'created-after');
+      const createdBefore = extractFlag(args, 'created-before');
+      const includeClosed = extractFlag(args, 'include-closed', { boolean: true });
+      const limit = extractFlag(args, 'limit');
+      const payload = {};
+      if (session !== undefined) payload.provider_session_id = session;
+      if (runtime !== undefined) payload.runtime = runtime;
+      if (createdAfter !== undefined) payload.created_after = createdAfter;
+      if (createdBefore !== undefined) payload.created_before = createdBefore;
+      if (includeClosed) payload.include_closed = true;
+      if (limit !== undefined) {
+        const parsed = Number(limit);
+        if (!Number.isInteger(parsed) || parsed < 1) throw new UsageError('--limit must be a positive integer');
+        payload.limit = parsed;
+      }
+      if (args.length > 0) throw new UsageError(`unknown argument: ${args.join(' ')}`);
+      return payload;
+    },
+  },
+
+  'conversation create': {
+    op: 'conversation.create',
+    build(args) {
+      const participants = extractFlag(args, 'participants');
+      if (!participants) throw new UsageError('--participants is required');
+      return {
+        participant_principal_ids: splitCsv(participants),
+        metadata: { subject: requireNonblankFlag(args, 'subject'), reason: requireNonblankFlag(args, 'reason') },
+      };
+    },
+  },
+
+  send: {
+    op: 'message.send',
+    // Retired by the forward lifecycle cutover (plan «Technical Approach
+    // 1»): the daemon owns this verdict, so main() answers it BEFORE arg
+    // shaping — a client-side usage error must never mask the typed truth.
+    retiredByCutover: true,
+    build(args) {
+      const from = extractFlag(args, 'from');
+      const to = extractFlag(args, 'to');
+      const conversationId = extractFlag(args, 'conversation');
+      const body = extractFlag(args, 'body');
+      const key = extractFlag(args, 'key');
+      const source = extractOptionalSource(args);
+      if (!from) throw new UsageError('--from is required');
+      if (!body) throw new UsageError('--body is required');
+      if (!key) throw new UsageError('--key is required');
+      if (Boolean(to) === Boolean(conversationId)) {
+        throw new UsageError('exactly one of --to or --conversation is required');
+      }
+      const payload = { sender_principal_id: from, body, idempotency_key: key };
+      if (to) payload.destination_principal_id = to;
+      else payload.conversation_id = conversationId;
+      applySource(payload, source);
+      return payload;
+    },
+  },
+  reply: {
+    op: 'message.reply',
+    retiredByCutover: true,
+    build(args) {
+      const conversationId = extractFlag(args, 'conversation');
+      const from = extractFlag(args, 'from');
+      const body = extractFlag(args, 'body');
+      const key = extractFlag(args, 'key');
+      const inReplyTo = extractFlag(args, 'in-reply-to');
+      const source = extractOptionalSource(args);
+      if (!conversationId) throw new UsageError('--conversation is required');
+      if (!from) throw new UsageError('--from is required');
+      if (!body) throw new UsageError('--body is required');
+      if (!key) throw new UsageError('--key is required');
+      const payload = { conversation_id: conversationId, sender_principal_id: from, body, idempotency_key: key };
+      if (inReplyTo !== undefined) payload.in_reply_to_message_id = inReplyTo;
+      applySource(payload, source);
+      return payload;
+    },
+  },
+
+  // The sole forward application-authored message writer (plan
+  // «API Design — message.commit»). The effect is ALWAYS explicit:
+  // --effect is a usage error when missing, and no prose, metadata
+  // convention, or missing field ever selects one. Per-family fields are
+  // shaped (strings vs integers) and passed through verbatim; the daemon
+  // owns every completeness and custody verdict.
+  'message commit': {
+    op: 'message.commit',
+    build(args) {
+      const from = extractFlag(args, 'from');
+      const to = extractFlag(args, 'to');
+      const conversationId = extractFlag(args, 'conversation');
+      const body = extractFlag(args, 'body');
+      const key = extractFlag(args, 'key');
+      const inReplyTo = extractFlag(args, 'in-reply-to');
+      const channelSelectors = extractRepeatableFlag(args, 'channel-selector');
+      const originChannelRouteId = extractFlag(args, 'origin-channel-route');
+      const inboundTargetEndpointId = extractFlag(args, 'inbound-target-endpoint');
+      const effectType = extractFlag(args, 'effect');
+      const subject = extractFlag(args, 'subject');
+      const reason = extractFlag(args, 'reason');
+      if (!from) throw new UsageError('--from is required');
+      if (!body) throw new UsageError('--body is required');
+      if (!key) throw new UsageError('--key is required');
+      if (!effectType) {
+        throw new UsageError(
+          '--effect is required and must name exactly one effect (open|update|handoff.offer|handoff.accept|handoff.decline|close.fulfilled|close.cancelled|none); effects are never inferred',
+        );
+      }
+      if (Boolean(to) === Boolean(conversationId)) {
+        throw new UsageError('exactly one of --to or --conversation is required');
+      }
+      if (to && (typeof subject !== 'string' || subject.trim().length === 0 || typeof reason !== 'string' || reason.trim().length === 0)) {
+        throw new UsageError('--subject and --reason are required and must be nonblank with --to');
+      }
+      if (!to && (subject !== undefined || reason !== undefined)) throw new UsageError('--subject and --reason are only accepted with --to');
+
+      const effect = { type: effectType };
+      if (effectType === 'open') {
+        effect.target_principal_id = requireFlag(args, 'target-principal');
+        effect.target_endpoint_id = requireFlag(args, 'target-endpoint');
+        effect.sender_endpoint_id = requireFlag(args, 'sender-endpoint');
+        effect.process_generation = requirePositiveIntegerFlag(args, 'process-generation');
+        effect.completion_mode = requireFlag(args, 'completion-mode');
+      } else if (effectType === 'none') {
+        effect.sender_endpoint_id = requireFlag(args, 'sender-endpoint');
+        effect.process_generation = requirePositiveIntegerFlag(args, 'process-generation');
+      } else if (effectType === 'close.cancelled') {
+        effect.obligation_id = requireFlag(args, 'obligation');
+        effect.generation = requirePositiveIntegerFlag(args, 'generation');
+        effect.reason = requireFlag(args, 'reason');
+        effect.source = requireFlag(args, 'source');
+      } else if (['update', 'handoff.offer', 'handoff.accept', 'handoff.decline', 'close.fulfilled'].includes(effectType)) {
+        effect.obligation_id = requireFlag(args, 'obligation');
+        effect.generation = requirePositiveIntegerFlag(args, 'generation');
+        effect.sender_endpoint_id = requireFlag(args, 'sender-endpoint');
+        effect.process_generation = requirePositiveIntegerFlag(args, 'process-generation');
+        if (effectType === 'handoff.offer') {
+          effect.target_principal_id = requireFlag(args, 'target-principal');
+          effect.registration_key = requireFlag(args, 'registration-key');
+          effect.acceptance_deadline_at = requireFlag(args, 'acceptance-deadline');
+        }
+        if (effectType === 'close.fulfilled') {
+          effect.outcome = requireFlag(args, 'outcome');
+        }
+      } else {
+        throw new UsageError(
+          '--effect must be one of open|update|handoff.offer|handoff.accept|handoff.decline|close.fulfilled|close.cancelled|none',
+        );
+      }
+
+      if (args.length > 0) throw new UsageError(`unknown argument: ${args.join(' ')}`);
+
+      const payload = { sender_principal_id: from, body, idempotency_key: key, obligation_effect: effect };
+      if (to) payload.destination_principal_id = to;
+      else payload.conversation_id = conversationId;
+      if (to) payload.conversation_metadata = { subject, reason };
+      if (inReplyTo !== undefined) payload.in_reply_to_message_id = inReplyTo;
+      if (channelSelectors.length > 0) payload.channel_selectors = channelSelectors;
+      if (originChannelRouteId !== undefined) payload.origin_channel_route_id = originChannelRouteId;
+      if (inboundTargetEndpointId !== undefined) payload.inbound_target_endpoint_id = inboundTargetEndpointId;
+      return payload;
+    },
+  },
+
+  'channel route register': {
+    op: 'channel.route.register',
+    build(args) {
+      const selector = requireFlag(args, 'selector');
+      const label = requireFlag(args, 'label');
+      const principalId = requireFlag(args, 'principal');
+      const endpointId = requireFlag(args, 'endpoint');
+      const capabilities = extractRepeatableFlag(args, 'capability');
+      if (capabilities.length === 0) throw new UsageError('--capability is required');
+      if (args.length > 0) throw new UsageError(`unknown argument: ${args.join(' ')}`);
+      return { selector, label, principal_id: principalId, endpoint_id: endpointId, capabilities };
+    },
+  },
+
+  'channel route list': {
+    op: 'channel.route.list',
+    build(args) {
+      const availableOnly = extractFlag(args, 'available', { boolean: true });
+      const requiredCapability = extractFlag(args, 'require-capability');
+      if (args.length > 0) throw new UsageError(`unknown argument: ${args.join(' ')}`);
+      const payload = {};
+      if (availableOnly) payload.available_only = true;
+      if (requiredCapability !== undefined) payload.required_capability = requiredCapability;
+      return payload;
+    },
+  },
+
+  'channel route retire': {
+    op: 'channel.route.retire',
+    build(args) {
+      const routeId = requirePositional(args, 'route_id');
+      if (args.length > 0) throw new UsageError(`unknown argument: ${args.join(' ')}`);
+      return { route_id: routeId };
+    },
+  },
+
+  'channel reply publish': {
+    op: 'channel.reply.publish',
+    build(args) {
+      const replyBinding = requireFlag(args, 'reply-binding');
+      const body = requireFlag(args, 'body');
+      const externalEventId = requireFlag(args, 'external-event-id');
+      const providerMetadataJson = requireFlag(args, 'provider-metadata-json');
+      let providerMetadata;
+      try {
+        providerMetadata = JSON.parse(providerMetadataJson);
+      } catch {
+        throw new UsageError('--provider-metadata-json must be valid JSON');
+      }
+      if (!providerMetadata || typeof providerMetadata !== 'object' || Array.isArray(providerMetadata)) {
+        throw new UsageError('--provider-metadata-json must be a JSON object');
+      }
+      if (args.length > 0) throw new UsageError(`unknown argument: ${args.join(' ')}`);
+      return {
+        reply_binding: replyBinding,
+        body,
+        external_event_id: externalEventId,
+        provider_metadata: providerMetadata,
+      };
+    },
+  },
+
+  'message delivery list': {
+    op: 'message.delivery.list',
+    build(args) {
+      const messageId = requirePositional(args, 'message_id');
+      if (args.length > 0) throw new UsageError(`unknown argument: ${args.join(' ')}`);
+      return { message_id: messageId };
+    },
+  },
+
+  // Explicit administrative recovery (transitions.yaml RECOVERY-RETRY /
+  // RECOVERY-SWITCH): every field is required and shaped here, but the
+  // daemon owns every verdict — a stale generation or an unauthorized
+  // target is the daemon's typed rejection, never a client-side guess.
+  'recovery retry': {
+    op: 'recovery.retry',
+    build(args) {
+      return buildRecoveryPayload(args);
+    },
+  },
+  'recovery switch': {
+    op: 'recovery.switch',
+    build(args) {
+      return buildRecoveryPayload(args);
+    },
+  },
+
+  // The forward derived projection (plan «Technical Approach 6»): labels
+  // derive at read time from canonical records; the CLI only narrows the
+  // read with optional filters and never stores or infers a status.
+  'lifecycle view': {
+    op: 'lifecycle.view',
+    build(args) {
+      const rootId = extractFlag(args, 'root');
+      const conversationId = extractFlag(args, 'conversation');
+      const payload = {};
+      if (rootId !== undefined) payload.root_obligation_id = rootId;
+      if (conversationId !== undefined) payload.conversation_id = conversationId;
+      if (args.length > 0) throw new UsageError(`unknown argument: ${args.join(' ')}`);
+      return payload;
+    },
+  },
+
+  inbox: {
+    op: 'inbox.list',
+    build(args) {
+      const principalId = requirePositional(args, 'principal_id');
+      const unread = extractFlag(args, 'unread', { boolean: true });
+      const payload = { principal_id: principalId };
+      if (unread) payload.unread_only = true;
+      return payload;
+    },
+  },
+  read: {
+    op: 'message.read',
+    build(args) {
+      const messageId = requirePositional(args, 'message_id');
+      const principalId = extractFlag(args, 'principal');
+      if (!principalId) throw new UsageError('--principal is required');
+      return { message_id: messageId, principal_id: principalId };
+    },
+  },
+  ack: {
+    op: 'message.acknowledge',
+    build(args) {
+      const messageId = requirePositional(args, 'message_id');
+      const endpointId = extractFlag(args, 'endpoint');
+      if (!endpointId) throw new UsageError('--endpoint is required');
+      return { message_id: messageId, endpoint_id: endpointId, process_generation: requireFenceGeneration(args) };
+    },
+  },
+
+  obligations: {
+    op: 'obligation.list',
+    retiredByCutover: true,
+    build(args) {
+      const principalId = requirePositional(args, 'principal_id');
+      return { principal_id: principalId };
+    },
+  },
+  'obligation create': {
+    op: 'obligation.create',
+    retiredByCutover: true,
+    build(args) {
+      const endpointId = extractFlag(args, 'endpoint');
+      const registrationKey = extractFlag(args, 'key');
+      const conversationId = extractFlag(args, 'conversation');
+      if (!endpointId) throw new UsageError('--endpoint is required');
+      if (!registrationKey) throw new UsageError('--key is required');
+      if (!conversationId) throw new UsageError('--conversation is required');
+      const confirmation = extractFlag(args, 'confirmation');
+      // obligation.create has no summary field (docs/protocol.md
+      // "obligation.create"). Said out loud rather than dropped on the
+      // floor: a caller who passes text they expect to be stored should
+      // hear that it is not, which is the whole reason the field went away.
+      if (extractFlag(args, 'summary') !== undefined) {
+        throw new UsageError(
+          'obligation create has no --summary: Tightbeam stores only what it enforces, and the human-readable text ' +
+            'of a promise belongs to the application that renders its confirmation',
+        );
+      }
+      const payload = { endpoint_id: endpointId, kind: 'promise', registration_key: registrationKey, conversation_id: conversationId };
+      if (confirmation !== undefined) payload.confirmation_message_id = confirmation;
+      return payload;
+    },
+  },
+  'obligation resolve': {
+    op: 'obligation.resolve',
+    retiredByCutover: true,
+    build(args) {
+      const obligationId = requirePositional(args, 'obligation_id');
+      const by = extractFlag(args, 'by');
+      const outcome = extractFlag(args, 'outcome');
+      const cancel = extractFlag(args, 'cancel', { boolean: true }) ?? false;
+      const reason = extractFlag(args, 'reason');
+      const sourceRef = extractFlag(args, 'source-ref');
+      const payload = { obligation_id: obligationId };
+      if (by !== undefined) payload.satisfied_by_message_id = by;
+      if (outcome !== undefined) payload.terminal_outcome = outcome;
+      if (cancel) {
+        // Both fields are the daemon's requirement, not the CLI's: it
+        // refuses an unaudited cancellation for every obligation kind.
+        payload.outcome = 'cancelled';
+        if (reason !== undefined) payload.reason = reason;
+        if (sourceRef !== undefined) payload.source_ref = sourceRef;
+      }
+      return payload;
+    },
+  },
+
+  'delivery claim': {
+    op: 'delivery.claim',
+    build(args) {
+      const endpointId = extractFlag(args, 'endpoint');
+      const deliveryId = extractFlag(args, 'delivery');
+      const channelRouteId = extractFlag(args, 'channel-route');
+      const leaseMs = extractFlag(args, 'lease-ms');
+      const acceptReplyBinding = extractFlag(args, 'accept-reply-binding', { boolean: true }) ?? false;
+      const payload = {};
+      if (endpointId !== undefined) payload.endpoint_id = endpointId;
+      if (deliveryId !== undefined) payload.delivery_id = deliveryId;
+      if (channelRouteId !== undefined) payload.channel_route_id = channelRouteId;
+      if (leaseMs !== undefined) payload.lease_ms = Number(leaseMs);
+      if (acceptReplyBinding) payload.accept_reply_binding = true;
+      return payload;
+    },
+  },
+  'delivery complete': {
+    op: 'delivery.complete',
+    build(args) {
+      const deliveryId = requirePositional(args, 'delivery_id');
+      const token = extractFlag(args, 'token');
+      const outcome = extractFlag(args, 'outcome');
+      if (!token) throw new UsageError('--token is required');
+      if (outcome !== 'delivered' && outcome !== 'failed') throw new UsageError('--outcome must be "delivered" or "failed"');
+      return { delivery_id: deliveryId, token, outcome };
+    },
+  },
+  'delivery release': {
+    op: 'delivery.release',
+    build(args) {
+      const deliveryId = requirePositional(args, 'delivery_id');
+      const token = extractFlag(args, 'token');
+      if (!token) throw new UsageError('--token is required');
+      return { delivery_id: deliveryId, token };
+    },
+  },
+
+  'resume list': {
+    op: 'resume.list',
+    build(args) {
+      const runtimeType = extractFlag(args, 'runtime-type');
+      const state = extractFlag(args, 'state');
+      const payload = {};
+      if (runtimeType !== undefined) payload.runtime_type = runtimeType;
+      if (state !== undefined) payload.state = state;
+      return payload;
+    },
+  },
+  'resume claim': {
+    op: 'resume.claim',
+    build(args) {
+      const id = extractFlag(args, 'id');
+      const runtimeType = extractFlag(args, 'runtime-type');
+      const leaseMs = extractFlag(args, 'lease-ms');
+      const payload = {};
+      if (id !== undefined) payload.resume_request_id = id;
+      if (runtimeType !== undefined) payload.runtime_type = runtimeType;
+      if (leaseMs !== undefined) payload.lease_ms = Number(leaseMs);
+      return payload;
+    },
+  },
+  'resume complete': {
+    op: 'resume.complete',
+    build(args) {
+      const resumeRequestId = requirePositional(args, 'resume_request_id');
+      const token = extractFlag(args, 'token');
+      if (!token) throw new UsageError('--token is required');
+      return { resume_request_id: resumeRequestId, token };
+    },
+  },
+  'resume fail': {
+    op: 'resume.fail',
+    build(args) {
+      const resumeRequestId = requirePositional(args, 'resume_request_id');
+      const token = extractFlag(args, 'token');
+      const retryable = extractFlag(args, 'retryable', { boolean: true }) ?? false;
+      const reason = extractFlag(args, 'reason');
+      if (!token) throw new UsageError('--token is required');
+      const payload = { resume_request_id: resumeRequestId, token, retryable: Boolean(retryable) };
+      if (reason !== undefined) payload.reason = reason;
+      return payload;
+    },
+  },
+
+  export: {
+    local: true,
+    async run(args, globalFlags) {
+      const appIdScope = extractFlag(args, 'app-id-scope');
+      const out = extractFlag(args, 'out');
+      if (args.length > 0) throw new UsageError(`unknown export argument: ${args.join(' ')}`);
+      if (out !== undefined && out.length === 0) throw new UsageError('--out requires a file path');
+      const client = await buildClient({ ...globalFlags, admin: true });
+      try {
+        const result = await client.request('state.export', appIdScope !== undefined ? { scope: { app_id: appIdScope } } : {});
+        if (out !== undefined) fs.writeFileSync(out, `${JSON.stringify({ manifest: result.manifest, records: result.records })}\n`, { mode: 0o600 });
+        return result;
+      } finally {
+        await client.close();
+      }
+    },
+    print(result, globalFlags) {
+      printResult(globalFlags.json, result);
+    },
+  },
+  import: {
+    admin: true,
+    op: 'state.import',
+    build(args) {
+      const file = requirePositional(args, 'file');
+      const contents = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return { manifest: contents.manifest, records: contents.records };
+    },
+  },
+  'migration-status': {
+    op: 'migration.status',
+    build() {
+      return {};
+    },
+  },
+
+  // Bootstrap owns its own connections (it starts a daemon, then performs
+  // an admin handshake), so it runs as a local verb rather than through
+  // the single-op path every other daemon-backed command uses.
+  bootstrap: {
+    local: true,
+    async run(args, globalFlags) {
+      const appName = extractFlag(args, 'app-name') ?? DEFAULT_APP_NAME;
+      const authorityName = extractFlag(args, 'authority') ?? DEFAULT_AUTHORITY_NAME;
+      const force = Boolean(extractFlag(args, 'force', { boolean: true }) ?? false);
+      if (args.length > 0) throw new UsageError(`unknown bootstrap argument: ${args.join(' ')}`);
+      // src/cli/ may not reach into src/daemon/ (the architecture contract §5), so
+      // the state paths and this state root's runtime ids are resolved
+      // here and injected, the same way doctor and the hooks installer
+      // receive theirs.
+      const paths = statePaths(globalFlags.stateRoot);
+      const registry = createRuntimeSnapshot({
+        stateRoot: globalFlags.stateRoot,
+        runtimesDir: paths.runtimesDir,
+        entries: loadPersistedRuntimeEntries({ runtimesDir: paths.runtimesDir }),
+      });
+      return bootstrap({
+        stateRoot: globalFlags.stateRoot,
+        socketPath: paths.socket,
+        runtimeTypes: [...registry.names()],
+        appName,
+        authorityName,
+        force,
+      });
+    },
+    print(result, globalFlags) {
+      if (globalFlags.json) {
+        printJson({ ok: true, result });
+        return;
+      }
+      if (result.status === 'already_configured') {
+        process.stdout.write(`already configured: ${result.credentials_file}\n`);
+        process.stdout.write(`  app_id: ${result.app_id}\n`);
+        process.stdout.write(`  authority: ${result.authority_name}\n`);
+        process.stdout.write(`  daemon: ${result.daemon}\n`);
+        process.stdout.write('  re-run with --force to register a new application\n');
+        return;
+      }
+      if (result.status === 'reconciled') {
+        process.stdout.write(`reconciled existing application grants: ${result.credentials_file}\n`);
+        process.stdout.write(`  app_id: ${result.app_id}\n`);
+        process.stdout.write(`  authority: ${result.authority_name}\n`);
+        process.stdout.write(`  daemon: ${result.daemon}\n`);
+        process.stdout.write(`  permissions: ${result.permissions.join(', ')}\n`);
+        process.stdout.write(`  runtimes: ${result.runtime_types.join(', ')}\n`);
+        return;
+      }
+      process.stdout.write(`configured ${globalFlags.stateRoot}\n`);
+      process.stdout.write(`  daemon: ${result.daemon}\n`);
+      process.stdout.write(`  application: ${result.app_name} (${result.app_id})\n`);
+      process.stdout.write(`  authority: ${result.authority_name} (${result.authority})\n`);
+      process.stdout.write(`  permissions: ${result.permissions.join(', ')}\n`);
+      process.stdout.write(`  runtimes: ${result.runtime_types.join(', ')}\n`);
+      process.stdout.write(`  credentials: ${result.credentials_file} (mode 0600)\n`);
+      process.stdout.write(`agent sessions can now start; run "${tightbeamCommandName()} doctor" to verify\n`);
+    },
+  },
+
+  // Local verbs never contact the daemon; `run` does filesystem work only.
+  logs: {
+    local: true,
+    run(args, globalFlags) {
+      const linesArg = extractFlag(args, 'lines');
+      const lines = linesArg !== undefined ? parseLogLines(linesArg) : LOGS_DEFAULT_LINES;
+      return tailDaemonLog(globalFlags.stateRoot, lines);
+    },
+  },
+  // Read-only diagnostic (plan W3): ordered local checks over the state
+  // root. Reports; never repairs. No flags on purpose.
+  doctor: {
+    local: true,
+    async run(args, globalFlags) {
+      if (args.length > 0) throw new UsageError(`doctor takes no arguments (got ${args.join(' ')})`);
+      const paths = statePaths(globalFlags.stateRoot);
+      // Registered manifest runtimes join the check loop through the same
+      // read-only loader the daemon starts from. A load failure is itself a
+      // finding — the daemon would refuse to start — so it is passed on as
+      // a result instead of crashing the diagnostic.
+      let manifestRecords = [];
+      let runtimeManifestError = null;
+      try {
+        manifestRecords = loadPersistedRuntimeEntries({ runtimesDir: paths.runtimesDir }).map((entry) => entry.record);
+      } catch (err) {
+        runtimeManifestError = err;
+      }
+      return runDoctorChecks({
+        paths,
+        home: os.homedir(),
+        pathEnv: process.env.PATH ?? '',
+        schemaVersion: SCHEMA_VERSION,
+        manifestRecords,
+        runtimeManifestError,
+      });
+    },
+    print(result, globalFlags) {
+      if (globalFlags.json) {
+        printJson({ ok: result.healthy, result });
+        return;
+      }
+      for (const check of result.checks) {
+        process.stdout.write(
+          check.status === 'pass' ? `PASS ${check.check}: ${check.detail}\n` : `FAIL ${check.check}: ${check.code} ${check.detail}\n`,
+        );
+        if (check.fix) process.stdout.write(`  fix: ${check.fix}\n`);
+      }
+    },
+  },
+};
+
+const GROUP_COMMANDS = new Set(['app', 'authority', 'principal', 'endpoint', 'conversation', 'lifecycle', 'obligation', 'delivery', 'resume', 'runtime', 'message', 'recovery', 'channel', 'agent']);
+
+function resolveCommand(rest) {
+  const first = rest[0];
+  if (first && rest[1] && rest[2]) {
+    const key = `${first} ${rest[1]} ${rest[2]}`;
+    if (COMMANDS[key]) return { key, args: rest.slice(3) };
+  }
+  if (first && GROUP_COMMANDS.has(first) && rest[1]) {
+    const key = `${first} ${rest[1]}`;
+    if (COMMANDS[key]) return { key, args: rest.slice(2) };
+  }
+  if (first && COMMANDS[first]) return { key: first, args: rest.slice(1) };
+  return null;
+}
+
+// ---------------------------------------------------------------------
+// watch <principal_id> — inbox.subscribe + live event printing until
+// Ctrl-C. Not a request/response op: it holds the connection open.
+// ---------------------------------------------------------------------
+
+async function runWatch(globalFlags, args) {
+  const principalId = requirePositional(args, 'principal_id');
+  const events = [];
+  let printer = null;
+  const client = await buildClient({
+    ...globalFlags,
+    onEvent: (event, payload) => {
+      if (printer) printer(event, payload);
+      else events.push([event, payload]);
+    },
+  });
+  printer = (event, payload) => {
+    if (globalFlags.json) printJson({ event, payload });
+    else process.stdout.write(`event: ${event} ${JSON.stringify(payload)}\n`);
+  };
+  for (const [event, payload] of events.splice(0)) printer(event, payload);
+
+  await client.request('inbox.subscribe', { principal_id: principalId });
+  if (!globalFlags.json) process.stdout.write(`watching ${principalId} (Ctrl-C to stop)\n`);
+
+  await new Promise((resolve) => {
+    const stop = async () => {
+      await client.close();
+      resolve();
+    };
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+  });
+}
+
+// ---------------------------------------------------------------------
+// hook <event> — one runtime lifecycle event. Reads the runtime's JSON
+// payload on stdin; stays quiet on stdout unless --json is given, because
+// a SessionStart hook's stdout is injected into the session's context.
+// ---------------------------------------------------------------------
+
+async function runHook(globalFlags, args) {
+  const verb = requirePositional(args, 'event');
+  const flags = {
+    runtime: extractFlag(args, 'runtime'),
+    authority: extractFlag(args, 'authority'),
+    principalRef: extractFlag(args, 'principal-ref'),
+    appId: globalFlags.appId,
+    appSecret: globalFlags.secretFile ? readAppSecret(globalFlags.secretFile) : undefined,
+  };
+  // Identity resolves through this state root's full registry — builtins
+  // plus registered manifests — through the same read-only loader the
+  // hooks installer and doctor use. An explicit --runtime is validated
+  // against it; unknown values fail closed named before any endpoint
+  // registration write.
+  const paths = statePaths(globalFlags.stateRoot);
+  const registry = createRuntimeSnapshot({
+    stateRoot: globalFlags.stateRoot,
+    runtimesDir: paths.runtimesDir,
+    entries: loadPersistedRuntimeEntries({ runtimesDir: paths.runtimesDir }),
+  });
+  const result = await runHookVerb(verb, {
+    stateRoot: globalFlags.stateRoot,
+    flags,
+    registry,
+    // What the lazy SessionStart bootstrap needs, injected for the same
+    // layering reason as the explicit `bootstrap` verb above.
+    socketPath: paths.socket,
+  });
+  if (result && result.output) process.stdout.write(JSON.stringify(result.output) + '\n');
+  if (globalFlags.json) printJson({ ok: true, result });
+}
+
+// ---------------------------------------------------------------------
+// hooks install|uninstall — settings-file merge for a runtime. Local
+// filesystem work only: it never contacts the daemon.
+// ---------------------------------------------------------------------
+
+function runHooks(globalFlags, args) {
+  const action = requirePositional(args, 'install|uninstall');
+  if (action !== 'install' && action !== 'uninstall') {
+    throw new UsageError(`unknown hooks action: ${action} (expected install or uninstall)`);
+  }
+  const runtime = extractFlag(args, 'runtime');
+  const settingsFile = extractFlag(args, 'settings-file');
+  const dryRun = Boolean(extractFlag(args, 'dry-run', { boolean: true }) ?? false);
+
+  if (settingsFile !== undefined && action !== 'uninstall') {
+    throw new UsageError('--settings-file is supported for hooks uninstall only');
+  }
+  if (settingsFile !== undefined && runtime === undefined) {
+    throw new UsageError('--settings-file requires --runtime <id>');
+  }
+
+  // The target set is whatever this state root's registry holds — builtins
+  // plus registered manifests — through the same read-only loader doctor
+  // uses. An invalid persisted manifest fails here, named: the daemon
+  // would refuse to start on it either. Unknown --runtime values are
+  // rejected by the installer itself; there is no default fallback.
+  const paths = statePaths(globalFlags.stateRoot);
+  const registry = createRuntimeSnapshot({
+    stateRoot: globalFlags.stateRoot,
+    runtimesDir: paths.runtimesDir,
+    entries: loadPersistedRuntimeEntries({ runtimesDir: paths.runtimesDir }),
+  });
+
+  const report = bootstrapHooks({
+    action,
+    runtime: runtime ?? null,
+    dryRun,
+    registry,
+    ...(settingsFile !== undefined ? { settingsFile } : {}),
+  });
+  if (globalFlags.json) {
+    printJson({ ok: true, result: report });
+    return;
+  }
+  for (const entry of report.report) {
+    process.stdout.write(`${entry.runtime}: ${entry.file} [${entry.status}]\n`);
+    for (const change of entry.changes) {
+      process.stdout.write(`  ${change.event}: ${change.op}${change.command ? ` ${change.command}` : ''}\n`);
+    }
+    // Codex records per-entry hook trust in ~/.codex/config.toml keyed by
+    // the entry's position in hooks.json. An install keeps every existing
+    // entry at its index (it never reorders), but a newly added entry has
+    // no trust record yet and Codex will ask before running it.
+    if (entry.runtime === 'codex' && action === 'install' && entry.changes.some((change) => change.op === 'add')) {
+      process.stdout.write('  note: Codex asks you to approve each newly added hook entry before it runs\n');
+    }
+    // An uninstall cannot keep those indexes: removing our group shifts
+    // every entry behind it, so the trust records at these keys now name
+    // a different hook. Naming them is the difference between a
+    // re-approval the operator expects and one they cannot explain.
+    if (entry.codex_trust_keys) {
+      process.stdout.write('  note: removing our entry shifts the entries after it, and Codex keys hook trust by index\n');
+      process.stdout.write('  note: re-approve these entries in ~/.codex/config.toml:\n');
+      for (const key of entry.codex_trust_keys) process.stdout.write(`    [hooks.state."${key}"]\n`);
+    }
+  }
+
+  // Deleting the manifest file is the documented registration rollback, so
+  // an unregistered id reaching this point is a half-rolled-back runtime,
+  // not a typo — say so, and make plain what was matched.
+  if (action === 'uninstall' && runtime !== undefined && registry.get(runtime) === null) {
+    process.stdout.write(`note: runtime "${runtime}" is no longer registered; only Tightbeam-tagged entries were removed\n`);
+  }
+}
+
+// ---------------------------------------------------------------------
+// logs [--lines N] — a bounded tail of <state-root>/daemon.log, read
+// directly from disk with no daemon contact (plan W3). Tail only by
+// design: there is deliberately no follow/streaming mode.
+// ---------------------------------------------------------------------
+
+const LOGS_DEFAULT_LINES = 50;
+
+function parseLogLines(value) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new UsageError(`--lines must be an integer >= 1 (got "${value}")`);
+  }
+  return n;
+}
+
+function tailDaemonLog(root, lines) {
+  const { log } = statePaths(root);
+  let contents;
+  try {
+    contents = fs.readFileSync(log, 'utf8');
+  } catch (err) {
+    // Reading never creates: a missing log stays missing and is reported,
+    // not conjured into existence.
+    const error = new Error(
+      err.code === 'ENOENT'
+        ? `no daemon log at "${log}" (the daemon has never started here)`
+        : `cannot read daemon log at "${log}": ${err.code ?? err.message}`,
+    );
+    error.code = 'LOG_UNREADABLE';
+    throw error;
+  }
+  const all = contents.split('\n');
+  if (all.length > 0 && all[all.length - 1] === '') all.pop();
+  return { log, lines: all.slice(-lines) };
+}
+
+// ---------------------------------------------------------------------
+// main
+// ---------------------------------------------------------------------
+
+async function main() {
+  const globalFlagsRaw = parseGlobalFlags(process.argv.slice(2));
+  const globalFlags = { stateRoot: resolveStateRoot(globalFlagsRaw.stateRoot), admin: globalFlagsRaw.admin, appId: globalFlagsRaw.appId, secretFile: globalFlagsRaw.secretFile, json: globalFlagsRaw.json };
+  const rest = globalFlagsRaw.rest;
+
+  if (rest[0] === '--help-all') {
+    printUsage({ all: true });
+    process.exit(0);
+  }
+
+  if (rest.length === 0 || rest[0] === '--help' || rest[0] === '-h') {
+    printUsage();
+    process.exit(rest.length === 0 ? 2 : 0);
+  }
+
+  if (rest[0] === '--version') {
+    if (rest.length !== 1) throw new UsageError('--version does not accept command arguments');
+    if (globalFlags.json) printJson(versionReport());
+    else printHuman(versionReport());
+    return;
+  }
+
+  if (rest[0] === 'preflight') {
+    await runPreflight(globalFlags, rest.slice(1));
+    return;
+  }
+
+  if (rest[0] === 'watch') {
+    await runWatch(globalFlags, rest.slice(1));
+    return;
+  }
+
+  if (rest[0] === 'hook') {
+    await runHook(globalFlags, rest.slice(1));
+    return;
+  }
+
+  if (rest[0] === 'hooks') {
+    runHooks(globalFlags, rest.slice(1));
+    return;
+  }
+
+  const resolved = resolveCommand(rest);
+  if (!resolved) throw new UsageError(`unknown command: ${rest.join(' ')}`);
+
+  const def = COMMANDS[resolved.key];
+
+  // Retired lifecycle writers answer the daemon's typed verdict BEFORE any
+  // arg shaping: a client-side usage error must never mask the cutover
+  // truth (plan «Technical Approach 1»), and nothing here re-enables them.
+  if (def.retiredByCutover) {
+    process.stderr.write(
+      `error operation_disabled: ${def.op} is disabled by the forward lifecycle cutover; application-authored messages and their lifecycle effects go through message.commit ('${tightbeamCommandName()} message commit')\n`,
+    );
+    process.exit(1);
+  }
+
+  if (def.local) {
+    const result = await def.run(resolved.args, globalFlags);
+    // A verb with its own printer owns both output shapes; the default is
+    // logs' line list.
+    if (def.print) def.print(result, globalFlags);
+    else if (globalFlags.json) printJson({ ok: true, result });
+    else for (const line of result.lines) process.stdout.write(line + '\n');
+    // doctor reports failures as results, not as a thrown error; the exit
+    // code carries the verdict (0 only when every check passed).
+    if (result && result.healthy === false) process.exitCode = 1;
+    return;
+  }
+
+  const payload = def.build(resolved.args, globalFlags);
+
+  const client = await buildClient({ ...globalFlags, admin: globalFlags.admin || Boolean(def.admin) });
+  try {
+    const result = await client.request(def.op, payload);
+    printResult(globalFlags.json, result);
+  } finally {
+    await client.close();
+  }
+}
+
+// The `message commit` block is the one surface both usage views share
+// verbatim: it is the command an agent reaches for most, and
+// test/unit/cli_usage_drift.test.mjs pins its flags against the builder.
+const COMMIT_USAGE = [
+  '  message commit (--to <principal> --subject <text> --reason <text> | --conversation <id>) --from <principal> --body <text> --key <k> --effect <open|update|handoff.offer|handoff.accept|handoff.decline|close.fulfilled|close.cancelled|none> [--channel-selector <selector>] [--origin-channel-route <route_id>] [effect flags]',
+  '    open: --target-principal <id> --target-endpoint <id> --sender-endpoint <id> --process-generation <n> --completion-mode <message_committed|delivery_confirmed>',
+  '    update/handoff.*/close.fulfilled: --obligation <id> --generation <n> --sender-endpoint <id> --process-generation <n>',
+  '    handoff.offer also: --target-principal <id> --registration-key <k> --acceptance-deadline <iso>',
+  '    close.fulfilled also: --outcome <success|failure|blocked>; close.cancelled: --obligation <id> --generation <n> --reason <text> --source <ref>',
+  '    none: --sender-endpoint <id> --process-generation <n>',
+];
+
+const USAGE_HEADER =
+  `usage: ${tightbeamCommandName()} [--state-root <dir>] [--app-id <id>] [--secret-file <file>] [--admin] [--json] <command> [args]`;
+
+/**
+ * The default view is what an agent needs and nothing else.
+ *
+ * Receiving is passive — the runtime hooks register this session, drain
+ * the inbox at each tool boundary, and inject what arrived — so the
+ * everyday surface is one writer plus one read. Everything else (setup,
+ * the delivery and resume queues, admin, state transfer) is real but is
+ * not what an agent reaches for, and burying the two useful verbs in a
+ * flat list of forty was the actual usability problem.
+ */
+function agentUsage(command) {
+  const lines = [
+    USAGE_HEADER,
+    '',
+    'send and track work:',
+    '  agent send --to agent:<ref> --subject <text> --reason <text> (--body <text> | --body-file <path>) [--no-reply]',
+    '  agent send --to user --subject <text> --reason <text> (--body <text> | --body-file <path>) [--channel <selector>|all] [--no-reply]',
+    '  agent request --to self|agent:<ref> --subject <text> --reason <text> (--body <text> | --body-file <path>) --completion-mode <message_committed|delivery_confirmed> [--notify user] [--channel <selector>]',
+    '  agent reply --message <message_id> (--body <text> | --body-file <path>) [--channel <selector>] [--no-reply] [--wait-delivery <duration>]',
+    '  agent ack --work <work_id> (--body <text> | --body-file <path>)',
+    '  agent update --work <work_id> (--body <text> | --body-file <path>)',
+    '  agent delegate --work <work_id> --to agent:<ref> (--body <text> | --body-file <path>)',
+    '  agent accept --work <delegation_id> (--body <text> | --body-file <path>)',
+    '  agent decline --work <delegation_id> (--body <text> | --body-file <path>)',
+    '  agent complete --work <work_id> (--body <text> | --body-file <path>) [--notify user] [--wait-delivery <duration>]',
+    '  agent cancel --work <work_id> --reason <text>',
+    '  agent inbox [--unread]',
+    '  agent receive --message <message_id>',
+    '  agent status (--work <work_id>|--message <message_id>) [--wait-delivery <duration>]',
+    '',
+    'advanced protocol (only when maintaining an existing integration):',
+    ...COMMIT_USAGE,
+    '',
+    'read messages (the runtime hooks do this for you; these are for an offline check):',
+    '  inbox <principal_id> [--unread]',
+    '  read <message_id> --principal <id>',
+    '  ack <message_id> --endpoint <id>',
+    '',
+    'when something is wrong:',
+    '  doctor',
+    '  logs [--lines <n>]',
+    '  bootstrap [--app-name <name>] [--authority <name>] [--force]',
+    '  (doctor is read-only and every failure it reports names its own fix; bootstrap is safe to re-run)',
+    '',
+    `${tightbeamCommandName()} --help-all   setup, delivery/resume queues, admin, and state transfer`,
+  ];
+  if (command) return [
+    USAGE_HEADER,
+    ...lines.filter((line) => line.startsWith(`  agent ${command} `)),
+    '',
+    ...(['reply', 'complete', 'ack'].includes(command) ? ['reply sends the final user response; ack acknowledges work that continues.'] : []),
+    ...(command === 'status' ? ['status --message uses the outbound message_id returned by reply/complete.'] : []),
+    ...(['reply', 'complete', 'status'].includes(command) ? ['--wait-delivery 30s waits up to the duration (1ms–60s); timeout never resends.'] : []),
+    ...(['reply', 'inbox'].includes(command) ? ['Runtime notifications already contain the reply target; inbox is for recovery.'] : []),
+  ].join('\n');
+  return lines.join('\n');
+}
+
+function fullUsage() {
+  return (
+    [
+      USAGE_HEADER,
+      '',
+      'commands:',
+      '  status',
+      '  capabilities',
+      '  bootstrap [--app-name <name>] [--authority <name>] [--force]',
+      '  app register <name>',
+      '  app reregister <name>',
+    ]
+      .concat(FULL_USAGE_BEFORE_COMMIT, COMMIT_USAGE, FULL_USAGE_AFTER_COMMIT)
+      .join('\n')
+  );
+}
+
+function printUsage({ all = false } = {}) {
+  process.stderr.write((all ? fullUsage() : agentUsage()) + '\n');
+}
+
+const FULL_USAGE_BEFORE_COMMIT = [
+      '  app set-permissions <app_id> --permissions-json <json>',
+      '  authority register <name> [--description <text>]',
+      '  runtime register <file> (admin; sends the parsed manifest, not the path)',
+      '  principal register --authority <name> [--external-ref <ref>] [--display-name <name>]',
+      '  endpoint register --authority <name> --principal <id> --runtime <rt> [--session <id>] [--launch-mode <m>] [--reference <ref>]',
+      '  endpoint set-state <endpoint_id> <state> --generation <n>',
+      '  endpoint close <endpoint_id> --generation <n>',
+      '  endpoint list [--session <id>] [--runtime <rt>] [--created-after <iso>] [--created-before <iso>] [--include-closed] [--limit <n>]',
+      '  conversation create --participants <id,id> --subject <text> --reason <text>',
+      '  channel route register --selector <selector> --label <label> --principal <id> --endpoint <id> --capability <send|reply>',
+      '  channel route list [--available] [--require-capability <send|reply>]',
+      '  channel route retire <route_id>',
+      '  channel reply publish --reply-binding <opaque_token> --body <text> --external-event-id <id> --provider-metadata-json <json>',
+];
+
+const FULL_USAGE_AFTER_COMMIT = [
+      '  message delivery list <message_id>',
+      '  recovery retry --root <obligation_id> --generation <n> --target-endpoint <id> --target-process-generation <n> --key <k>',
+      '  recovery switch --root <obligation_id> --generation <n> --target-endpoint <id> --target-process-generation <n> --key <k>',
+      '  lifecycle view [--root <obligation_id>] [--conversation <id>]   (derived labels, read-time only)',
+      '  (send/reply/obligations/obligation create/obligation resolve are disabled by the forward lifecycle cutover)',
+      '  inbox <principal_id> [--unread]',
+      '  read <message_id> --principal <id>',
+      '  ack <message_id> --endpoint <id> --generation <n>',
+      '  obligations <principal_id>',
+      '  obligation create --endpoint <id> --key <k> --conversation <id> [--confirmation <message_id>]',
+      '  obligation resolve <obligation_id> [--by <message_id>] [--outcome <success|failure|blocked>]',
+      '  obligation resolve <obligation_id> --cancel --reason <text> --source-ref <ref>',
+      '  delivery claim [--endpoint <id>] [--delivery <id>] [--lease-ms <n>] [--accept-reply-binding]',
+      '  delivery complete <delivery_id> --token <token> --outcome <delivered|failed>',
+      '  delivery release <delivery_id> --token <token>',
+      '  resume list [--runtime-type <type>] [--state <state>]',
+      '  resume claim [--id <resume_request_id>] [--runtime-type <type>] [--lease-ms <n>]',
+      '  resume complete <resume_request_id> --token <token>',
+      '  resume fail <resume_request_id> --token <token> [--retryable] [--reason <text>]',
+      '  watch <principal_id>',
+      `  hook ${HOOK_EVENT_VERBS.join('|')}   (reads the runtime hook payload on stdin)`,
+      '  hooks install [--runtime <id>] [--dry-run]   (id: a builtin or a registered manifest runtime)',
+      '  hooks uninstall [--runtime <id>] [--settings-file <path>]',
+      '  export [--app-id-scope <app_id>] [--out <file>] (admin)',
+      '  import <file> (admin)',
+      '  migration-status',
+      '  logs [--lines <n>]',
+      '  doctor',
+      '  preflight [--min-protocol <major[.minor]>] [--max-protocol <major[.minor]>] [--expect-schema <n>] [--require-capability <name>] [--expect-daemon-version <version>]',
+      '  --version',
+];
+
+main().catch((err) => {
+  // Exit 1, never 2: Claude Code reads exit code 2 as "block this turn",
+  // and a hook that cannot do its job must not stop the agent's work.
+  if (err instanceof HookError) {
+    process.stderr.write(`tightbeam hook: ${err.message}\n`);
+    process.exit(1);
+  }
+  if (err instanceof UsageError) {
+    process.stderr.write(`usage error: ${err.message}\n`);
+    process.exit(2);
+  }
+  if (err instanceof BootstrapError) {
+    process.stderr.write(`tightbeam bootstrap: ${err.message}\n`);
+    process.exit(1);
+  }
+  if (err instanceof TightbeamError || (err && typeof err.code === 'string')) {
+    process.stderr.write(`error ${err.code}: ${err.message}\n`);
+    process.exit(1);
+  }
+  process.stderr.write(`tightbeam: ${err.stack ?? err.message}\n`);
+  process.exit(1);
+});

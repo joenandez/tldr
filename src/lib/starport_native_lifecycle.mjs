@@ -3,6 +3,8 @@ import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { helmHome } from "./store.mjs";
+
 function commandReportsAbsent(command, arguments_) {
   const observed = spawnSync(command, arguments_, {
     encoding: "utf8",
@@ -13,7 +15,7 @@ function commandReportsAbsent(command, arguments_) {
 }
 
 export function inspectDefaultUninstallResidue({
-  home = process.env.TLDR_AGENT_HOME || join(homedir(), ".tldr-agent"),
+  home = helmHome(),
   nativeSetupApp,
   userID = process.getuid?.(),
 } = {}) {

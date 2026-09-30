@@ -1,7 +1,6 @@
 const COMPONENTS = Object.freeze([
   "plugin",
   "runtime",
-  "hooks",
   "service",
   "aegis",
   "outbound",
@@ -142,6 +141,10 @@ export function createStarportOrchestrator({
     const preflightFailure = await preflightTightbeam();
     if (preflightFailure) return preflightFailure;
     const before = await status();
+    // A runtime swap re-enters setup, and the early returns below skip the
+    // source install, so settle the swap's replacement evidence first. It is a
+    // no-op until the lifecycle store is ready.
+    await source?.reconcile?.();
     if (before.data.state === "onboarding-verified") {
       return before;
     }
@@ -171,13 +174,7 @@ export function createStarportOrchestrator({
     setup,
     status,
     async configure() {
-      let configured = await native.configure?.();
-      if (configured?.error?.code === "NATIVE_SETUP_NOT_INSTALLED") {
-        await source?.install?.();
-        configured = await native.configure?.();
-      }
-      if (configured?.ok === false) return configured;
-      return status();
+      return native.configure();
     },
     async repair() {
       const preflightFailure = await preflightTightbeam();
@@ -203,7 +200,7 @@ export function createStarportOrchestrator({
       } catch {
         return success(
           "uninstall-incomplete",
-          ["hooks", "service", "runtime"],
+          ["service", "runtime"],
           "retry-uninstall",
           "Uninstall tldr;",
         );

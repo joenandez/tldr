@@ -1,6 +1,9 @@
 # tldr;
 
-tldr; gives each Claude Code session a private email thread with its verified owner. The owner can reply from anywhere, and tldr; continues the originating session in its original directory without exposing an email address or provider credential to the agent.
+tldr; is a local lifecycle and private-email bridge for supported Claude Code
+and Codex sessions. It keeps AgentMail credentials, provider delivery receipts,
+polling, and recovery on the Mac. Tightbeam owns messaging, session routing,
+and continuation using the safely inherited current-session context.
 
 ## 🚧 CAUTION 🚧 - Pre-Alpha
 
@@ -43,28 +46,36 @@ If email confirmation is still pending, Claude gives one continuation phrase:
 Continue setting up tldr;
 ```
 
-Successful setup sends one welcome email. That accepted delivery proves the owner path is usable and explains how replies return to the originating Claude session. Repeating setup does not reenroll, reinstall, or resend the welcome message.
+Successful setup sends one welcome email. That accepted delivery proves the
+owner path is usable and explains that Tightbeam handles reply routing for the
+inherited current session. Repeating setup does not reenroll, reinstall, or
+resend the welcome message.
 
 ## Use and maintain
 
-Talk to Claude in natural language:
+Use the lifecycle front door in Claude:
 
 ```text
-Email me when this is done
-Reply that I am on it
 Check tldr;
 Configure tldr;
 Repair tldr;
 Uninstall tldr;
 ```
 
-`Check tldr;` is observational. Configure and repair open Aegis only when the protected boundary is required. Each blocked state provides one bounded action; setup can resume later from durable safe state.
+`Check tldr;` is observational. Configure and repair open Aegis only when the
+protected boundary is required. Each blocked state provides one bounded action;
+setup can resume later from durable safe state.
 
-tldr; always chooses the verified owner internally. It rejects arbitrary recipients, CC/BCC, raw provider options, and cross-session thread reuse.
+tldr; has no public send, reply, inbox, scheduler, or agent-hook command.
+Tightbeam owns messaging and recipient routing; tldr; never creates a local
+session identity or reconstructs a route from provider data.
 
 ## Uninstall
 
-Tell Claude `Uninstall tldr;`. tldr; explains the impact, obtains fresh macOS authorization in signed Aegis, stops its services, and verifies removal of product-owned runtime, hooks, launch definitions, and protected state. Unrelated files remain untouched.
+Tell Claude `Uninstall tldr;`. tldr; explains the impact, obtains fresh macOS
+authorization in signed Aegis, stops its services, removes any previously
+managed hook entries, and verifies removal of product-owned runtime, launch
+definitions, and protected state. Unrelated files remain untouched.
 
 After Claude reports that local cleanup is complete, remove the plugin itself:
 

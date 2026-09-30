@@ -1,15 +1,17 @@
-import { createHash } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
 import { createProductionOwnerSetupService } from "./aegis_native_setup_runtime.mjs";
 import { createTldrAgentSourceInstallLifecycle } from "./tldr_agent_source_lifecycle.mjs";
 import {
-  readIdentity,
-  resolveSessionFromPidAncestry,
-} from "./identity_state.mjs";
-import { resolveTldrAgentScope } from "./store.mjs";
+  assertStateRootsCreatable,
+  resolveStateRoots,
+  STATE_ROOT_MIGRATION_PENDING,
+  resolveTldrAgentScope,
+  stateRootsReport,
+  tldrAgentHomeFor,
+} from "./store.mjs";
 import { installVerifiedLocalAegisPackage } from "./starport_aegis_package.mjs";
 import {
   _internals as onboardingInternals,
@@ -19,118 +21,38 @@ import {
 } from "./starport_onboarding.mjs";
 import { createStarportOrchestrator } from "./starport_orchestrator.mjs";
 import { createTightbeamChannel } from "./tightbeam_channel.mjs";
+import {
+  AEGIS_APP,
+  createLocalSnapshotComponentInspector,
+  createStarportComponentInspector,
+  matchesFileRecord,
+  normalizedArchitecture,
+  safeJson,
+} from "./starport_component_inspection.mjs";
 
-const AEGIS_APP =
-  "/Library/Application Support/Codename/Aegis/TldrAgentAegis.app";
+export {
+  createLocalSnapshotComponentInspector,
+  createStarportComponentInspector,
+} from "./starport_component_inspection.mjs";
+
 const AEGIS_TEAM_ID = "VVG962SM5J";
-const ARCHITECTURES = new Set(["arm64"]);
 
-function normalizedArchitecture(architecture = process.arch) {
-  return ARCHITECTURES.has(architecture) ? architecture : null;
-}
-
-function safeJson(path) {
-  try {
-    return JSON.parse(readFileSync(path, "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function matchesFileRecord(root, record) {
-  if (
-    !root ||
-    !record ||
-    typeof record.path !== "string" ||
-    record.path.startsWith("/") ||
-    record.path.split("/").includes("..")
-  ) {
-    return false;
-  }
-  try {
-    const path = resolve(root, record.path);
-    if (!path.startsWith(`${resolve(root)}/`) || !statSync(path).isFile()) {
-      return false;
-    }
-    const bytes = readFileSync(path);
-    return (
-      bytes.length === record.bytes &&
-      createHash("sha256").update(bytes).digest("hex") === record.sha256
-    );
-  } catch {
-    return false;
-  }
-}
-
-function matchesLocalFileRecord(root, record) {
-  if (
-    !root ||
-    !record ||
-    typeof record.path !== "string" ||
-    record.path.startsWith("/") ||
-    record.path.split("/").includes("..")
-  ) {
-    return false;
-  }
-  try {
-    const path = resolve(root, record.path);
-    if (!path.startsWith(`${resolve(root)}/`) || !statSync(path).isFile()) {
-      return false;
-    }
-    return (
-      createHash("sha256").update(readFileSync(path)).digest("hex") ===
-      record.sha256
-    );
-  } catch {
-    return false;
-  }
-}
-
-function releaseMatchesSource(sourceRoot, release) {
-  const packageJson = safeJson(join(sourceRoot, "package.json"));
-  return (
-    packageJson?.name === "@joenandez/tldr" && packageJson.version === release
-  );
-}
-
-function localSnapshotMatches(root) {
-  const manifest = safeJson(join(root || "", "LOCAL-SNAPSHOT-MANIFEST.json"));
-  if (!manifest?.sourceDigest || !Array.isArray(manifest.files)) return false;
-  try {
-    for (const entry of manifest.files) {
-      if (!matchesLocalFileRecord(root, entry)) return false;
-    }
-    const listed = manifest.files.map((entry) => entry.path).sort();
-    const walk = (path, base = path) =>
-      readdirSync(path, { withFileTypes: true })
-        .flatMap((entry) => {
-          const child = join(path, entry.name);
-          return entry.isDirectory()
-            ? walk(child, base)
-            : entry.isFile() || entry.isSymbolicLink()
-              ? [child.slice(base.length + 1)]
-              : [];
-        })
-        .sort();
-    const actual = walk(root).filter(
-      (path) => path !== "LOCAL-SNAPSHOT-MANIFEST.json",
-    );
-    return JSON.stringify(actual) === JSON.stringify(listed);
-  } catch {
-    return false;
-  }
-}
-
-function resolveSetupSession(env = process.env) {
-  const explicit = String(env.CLAUDE_CODE_SESSION_ID ?? "").trim();
-  if (explicit) {
-    const identity = readIdentity(explicit);
-    return identity ? { sessionId: explicit, identity } : null;
-  }
-  const resolved = resolveSessionFromPidAncestry();
-  return resolved.ok
-    ? { sessionId: resolved.session_id, identity: resolved.identity }
+function safeContextId(value) {
+  return typeof value === "string" &&
+    value.length > 0 &&
+    value.trim() === value &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+    ? value
     : null;
+}
+
+function resolveSetupContext(env = process.env) {
+  const claude = safeContextId(env.CLAUDE_CODE_SESSION_ID);
+  const codex = safeContextId(env.CODEX_THREAD_ID);
+  if (Boolean(claude) === Boolean(codex)) return null;
+  return claude
+    ? { runtime: "claude", sessionId: claude }
+    : { runtime: "codex", sessionId: codex };
 }
 
 function unavailableOnboarding() {
@@ -155,94 +77,6 @@ function shouldInstallBundledAegis({ appExists, nativeStatus }) {
     !appExists ||
     !["ready", "pending_verification", "unconfigured"].includes(nativeStatus)
   );
-}
-
-export function createStarportComponentInspector({
-  home,
-  sourceRoot,
-  pluginRoot,
-  activationManifest,
-  architecture = normalizedArchitecture(),
-  aegisApp = AEGIS_APP,
-  launchAgent = join(
-    homedir(),
-    "Library",
-    "LaunchAgents",
-    "ai.tldr-agent.daemon.plist",
-  ),
-  nodeExecutable = process.execPath,
-} = {}) {
-  return async () => {
-    const activation = safeJson(activationManifest);
-    const release = activation?.release;
-    const pluginManifest = activation?.plugin_manifest;
-    const hookManifest = activation?.hook_manifest;
-    const installedNode = join(home, "install", "runtime", "bin", "node");
-    let activationRecord = null;
-    try {
-      const bytes = readFileSync(activationManifest);
-      activationRecord = {
-        path: "release/activation-manifest.json",
-        bytes: bytes.length,
-        sha256: createHash("sha256").update(bytes).digest("hex"),
-      };
-    } catch {
-      activationRecord = null;
-    }
-    const activationHealthy = matchesFileRecord(pluginRoot, activationRecord);
-    const pluginHealthy =
-      activationHealthy &&
-      matchesFileRecord(pluginRoot, pluginManifest) &&
-      releaseMatchesSource(sourceRoot, release);
-    const runtimeHealthy =
-      activationHealthy &&
-      Boolean(activation?.architectures?.[architecture]?.runtime) &&
-      resolve(nodeExecutable) === resolve(installedNode) &&
-      releaseMatchesSource(sourceRoot, release);
-    const nativeInstalled = existsSync(aegisApp);
-    return Object.freeze({
-      plugin: pluginHealthy,
-      runtime: runtimeHealthy,
-      hooks: matchesFileRecord(pluginRoot, hookManifest),
-      service: existsSync(launchAgent),
-      aegis: nativeInstalled,
-      outbound: nativeInstalled,
-    });
-  };
-}
-
-export function createLocalSnapshotComponentInspector({
-  home,
-  sourceRoot,
-  pluginRoot,
-  aegisApp = AEGIS_APP,
-  launchAgent = join(
-    homedir(),
-    "Library",
-    "LaunchAgents",
-    "ai.tldr-agent.daemon.plist",
-  ),
-  nodeExecutable = process.execPath,
-} = {}) {
-  return async () => {
-    const snapshotHealthy =
-      localSnapshotMatches(pluginRoot) &&
-      resolve(pluginRoot) === resolve(sourceRoot);
-    const installedNode = join(home, "install", "runtime", "bin", "node");
-    const nativeInstalled = existsSync(aegisApp);
-    return Object.freeze({
-      plugin: snapshotHealthy,
-      runtime:
-        snapshotHealthy && resolve(nodeExecutable) === resolve(installedNode),
-      hooks: snapshotHealthy,
-      service:
-        snapshotHealthy &&
-        existsSync(launchAgent) &&
-        readFileSync(launchAgent, "utf8").includes(resolve(sourceRoot)),
-      aegis: nativeInstalled,
-      outbound: nativeInstalled,
-    });
-  };
 }
 
 function bundledAegisInstaller({
@@ -287,7 +121,13 @@ export async function createProductionStarportRuntime({
   installBundledAegis = null,
   tightbeam = null,
 } = {}) {
-  const home = resolve(env.TLDR_AGENT_HOME || join(userHome, ".tldr-agent"));
+  // The roots as the caller configured them, before this runtime pins
+  // TLDR_AGENT_HOME and HELM_HOME into env below.
+  const stateRootEnv = Object.freeze({
+    TLDR_AGENT_HOME: env.TLDR_AGENT_HOME,
+    TIGHTBEAM_STATE_ROOT: env.TIGHTBEAM_STATE_ROOT,
+  });
+  const home = resolve(tldrAgentHomeFor({ env, userHome }));
   env.TLDR_AGENT_HOME = home;
   env.HELM_HOME = home;
   env.HELM_CANONICAL_SQLITE = "1";
@@ -303,8 +143,7 @@ export async function createProductionStarportRuntime({
     : null;
   const nativeService = native ?? createProductionOwnerSetupService();
   const sourceLifecycle =
-    source ??
-    createTldrAgentSourceInstallLifecycle({ home, pluginHooksOwned: true });
+    source ?? createTldrAgentSourceInstallLifecycle({ home });
   const installAegis = installBundledAegis ?? bundledAegisInstaller({ home });
   const sourceAdapter = Object.freeze({
     async install() {
@@ -319,12 +158,13 @@ export async function createProductionStarportRuntime({
       }
       return sourceLifecycle.install();
     },
+    reconcile: () => sourceLifecycle.reconcileReplacementEvidence?.(),
     uninstall: () => sourceLifecycle.uninstall(),
   });
 
-  const session = resolveSetupSession(env);
+  const context = resolveSetupContext(env);
   const scope = resolveTldrAgentScope({
-    cwd: session?.identity?.cwd || process.cwd(),
+    cwd: process.cwd(),
     tldrAgentHome: home,
   });
   const tightbeamService = tightbeam ?? createTightbeamChannel({ home });
@@ -336,14 +176,14 @@ export async function createProductionStarportRuntime({
   const dispatchWelcome = createSessionWelcomeDispatcher({
     command: env.TIGHTBEAM_BIN,
     stateRoot: env.TIGHTBEAM_STATE_ROOT,
-    session,
+    context,
     evidence: welcomeEvidence,
   });
   const onboardingService =
     onboarding ??
-    (session
+    (context
       ? createStarportOnboarding({
-          sessionId: session.sessionId,
+          sessionId: context.sessionId,
           scope,
           home,
           readEvidence: () => welcomeEvidence.read(),
@@ -364,20 +204,80 @@ export async function createProductionStarportRuntime({
           pluginRoot: activePluginRoot,
           activationManifest,
         }));
-  return createStarportOrchestrator({
+  const orchestrator = createStarportOrchestrator({
     inspectComponents: inspector,
     native: nativeService,
     onboarding: onboardingService,
     source: sourceAdapter,
     tightbeam: tightbeamService,
   });
+  return withStateRoots(orchestrator, { env: stateRootEnv, userHome });
+}
+
+function stateRootMigrationPending(error) {
+  const pending = error.details?.pending || [];
+  return Object.freeze({
+    ok: false,
+    data: Object.freeze({
+      pending: Object.freeze(
+        pending.map((entry) =>
+          Object.freeze({
+            component: entry.component,
+            path: entry.path,
+            legacy_path: entry.legacy_path,
+          }),
+        ),
+      ),
+    }),
+    error: Object.freeze({
+      code: error.code,
+      message: "tldr; state has not moved to ~/.tldr-agents yet.",
+      retryable: false,
+      remediation: "Move tldr; state into ~/.tldr-agents, then try again.",
+    }),
+  });
+}
+
+// Status reports the three resolved state roots (read-only; it creates none).
+// Setup and repair create roots, so they refuse while a legacy root is still a
+// real directory and its new root is missing.
+function withStateRoots(orchestrator, { env, userHome }) {
+  const guarded = (operation) => async () => {
+    try {
+      assertStateRootsCreatable({
+        roots: resolveStateRoots({ env, userHome }),
+        userHome,
+        operation: `starport_${operation}`,
+      });
+    } catch (error) {
+      if (error?.code !== STATE_ROOT_MIGRATION_PENDING) throw error;
+      return stateRootMigrationPending(error);
+    }
+    return orchestrator[operation]();
+  };
+  return Object.freeze({
+    ...orchestrator,
+    async status() {
+      const result = await orchestrator.status();
+      if (!result?.ok || !result.data) return result;
+      return Object.freeze({
+        ...result,
+        data: Object.freeze({
+          ...result.data,
+          ...stateRootsReport({ env, userHome }),
+        }),
+      });
+    },
+    setup: guarded("setup"),
+    repair: guarded("repair"),
+  });
 }
 
 export const _internals = Object.freeze({
+  resolveSetupContext,
   AEGIS_APP,
   AEGIS_TEAM_ID,
   normalizedArchitecture,
-  resolveSetupSession,
   shouldInstallBundledAegis,
   unavailableOnboarding,
 });

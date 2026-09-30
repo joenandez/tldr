@@ -1,0 +1,13 @@
+#!/bin/sh
+# Runs the Helm assignments CLI on this package's verified Node runtime (bin/component-dispatch).
+set -eu
+
+shim=$0
+if [ -L "$shim" ]; then
+  link_target=$(/usr/bin/readlink "$shim")
+  case "$link_target" in
+    /*) shim=$link_target ;;
+    *) shim=$(/usr/bin/dirname -- "$shim")/$link_target ;;
+  esac
+fi
+exec /bin/sh "$(/usr/bin/dirname -- "$shim")/component-dispatch" helm-assignments "$@"

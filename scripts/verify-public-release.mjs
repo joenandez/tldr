@@ -16,6 +16,8 @@ const sourceManifest = readJson("PUBLIC-SOURCE-MANIFEST.json");
 const packageJson = readJson("package.json");
 const plugin = readJson(".claude-plugin/plugin.json");
 const marketplace = readJson(".claude-plugin/marketplace.json");
+const codexPlugin = readJson(".codex-plugin/plugin.json");
+const codexMarketplace = readJson(".agents/plugins/marketplace.json");
 const activation = readJson("release/activation-manifest.json");
 
 assert.equal(sourceManifest.schema_version, 1);
@@ -30,12 +32,18 @@ assert.equal(packageJson.publishConfig.access, "public");
 assert.equal(packageJson.publishConfig.provenance, true);
 assert.deepEqual(packageJson.os, ["darwin"]);
 assert.deepEqual(packageJson.cpu, ["arm64"]);
-assert.deepEqual(packageJson.bin, { "tldr-agent": "./bin/tldr-agent" });
+// The unified package installs exactly one command.
+assert.deepEqual(packageJson.bin, { "tldr-agents": "./bin/tldr-agents" });
 assert.equal(plugin.name, "tldr");
 assert.equal(plugin.displayName, "tldr;");
 assert.equal(plugin.version, packageJson.version);
 assert.equal(marketplace.plugins[0].source.package, packageJson.name);
 assert.equal(marketplace.plugins[0].source.version, packageJson.version);
+// Codex reads the marketplace shipped inside the installed npm package.
+assert.equal(codexPlugin.name, "tldr");
+assert.equal(codexPlugin.version, packageJson.version);
+assert.equal(codexMarketplace.plugins[0].name, "tldr");
+assert.equal(codexMarketplace.plugins[0].version, packageJson.version);
 assert.equal(activation.release, packageJson.version);
 assert.deepEqual(Object.keys(activation.architectures).sort(), ["arm64"]);
 
@@ -70,7 +78,6 @@ for (const file of sourceManifest.files) {
 
 const activationRecords = [
   activation.plugin_manifest,
-  activation.hook_manifest,
   activation.node_license,
   ...Object.values(activation.architectures).flatMap((architecture) => [
     architecture.runtime,

@@ -1,5 +1,4 @@
-import { homedir } from "node:os";
-import { join, resolve } from "node:path";
+import { resolve } from "node:path";
 import { createTightbeamEmailDeliveryChannel } from "./tightbeam_email_delivery_channel.mjs";
 import { createTightbeamInboundPublisher } from "./tightbeam_inbound_publish.mjs";
 import {
@@ -13,6 +12,7 @@ import {
   commandFailure,
   debugIdentity,
   defaultIdentityStore,
+  defaultTightbeamCommand,
   expectedPreflightArgs,
   identityInvalid,
   launcherUnavailable,
@@ -23,20 +23,14 @@ import {
   createTightbeamWelcomeDispatcher,
   createTightbeamWelcomeIdentityManager,
 } from "./tightbeam_welcome_dispatch.mjs";
+import { helmHome } from "./store.mjs";
 
 export function createTightbeamChannel({
   run = productionRun,
   loadIdentity,
   saveIdentity,
-  command = process.env.TIGHTBEAM_BIN ||
-    join(
-      process.env.HOME ?? homedir(),
-      ".tightbeam",
-      "install",
-      "bin",
-      "tightbeam",
-    ),
-  home = resolve(process.env.TLDR_AGENT_HOME || join(homedir(), ".tldr-agent")),
+  command = defaultTightbeamCommand(),
+  home = resolve(helmHome()),
 } = {}) {
   const store = defaultIdentityStore(home);
   const readIdentity = loadIdentity ?? (() => store.load());
@@ -61,7 +55,11 @@ export function createTightbeamChannel({
     return { result, reregistered: true };
   }
 
+  // Capabilities the daemon reported in the last compatible preflight.
+  let reportedCapabilities = null;
+
   async function preflight() {
+    reportedCapabilities = null;
     const result = await execute({
       admin: true,
       credentials: null,
@@ -75,7 +73,10 @@ export function createTightbeamChannel({
           .map((check) => check.field),
       );
     }
-    return result?.ok === true ? Object.freeze({ ok: true }) : result;
+    if (result?.ok !== true) return result;
+    const observed = result.result?.observed?.capabilities;
+    reportedCapabilities = Array.isArray(observed) ? [...observed] : null;
+    return Object.freeze({ ok: true });
   }
 
   async function registerEmailChannel(route) {
@@ -242,6 +243,7 @@ export function createTightbeamChannel({
     authority: AUTHORITY,
     principalRef: PRINCIPAL_REF,
     endpointSession: ENDPOINT_SESSION,
+    reportedCapabilities: () => reportedCapabilities,
   });
   const publishInboundEmail = createTightbeamInboundPublisher({
     execute,

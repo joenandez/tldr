@@ -1,0 +1,192 @@
+#!/bin/sh
+# Runs one imported component CLI on the Node runtime carried by this package's
+# own release payload. Usage: component-dispatch <component> [args...]
+#
+# `component-dispatch --resolve <component>` runs the same verification and
+# extraction, then prints node=, entrypoint=, and sha256= lines instead of
+# running the component. The tldr-agent poll child uses it to verify the
+# payload once per poll tick and run that tick's Tightbeam calls on the
+# verified runtime (item 38 option E); any failure exits non-zero as below.
+#
+# The payload is verified against release/activation-manifest.json on every
+# run, including runs that reuse the extracted cache, so a package whose
+# payload is later removed or altered fails closed. There is no fallback to
+# PATH or to the lifecycle runtime under install/, which the bootstrap owns.
+set -eu
+
+fail() {
+  printf 'tldr-agent runtime: %s: %s\n' "$2" "$3" >&2
+  exit "$1"
+}
+
+resolve_only=0
+if [ "${1:-}" = "--resolve" ]; then
+  resolve_only=1
+  shift
+  [ "$#" -le 1 ] || fail 64 RUNTIME_COMPONENT_UNKNOWN "--resolve takes one component"
+fi
+[ "$#" -gt 0 ] || fail 64 RUNTIME_COMPONENT_UNKNOWN "no component named"
+component=$1
+shift
+case "$component" in
+  helm-tasks) entrypoint=scheduling/src/helm-tasks.mjs ;;
+  helm-assignments) entrypoint=scheduling/src/helm-assignments.mjs ;;
+  tightbeam) entrypoint=messaging/bin/tightbeam ;;
+  tightbeam-daemon) entrypoint=messaging/bin/tightbeam-daemon ;;
+  *) fail 64 RUNTIME_COMPONENT_UNKNOWN "unknown component: $component" ;;
+esac
+
+package_root=$(CDPATH= cd -- "$(/usr/bin/dirname -- "$0")/.." && pwd -P) || \
+  fail 68 RUNTIME_MANIFEST_MISSING "cannot resolve the package root from $0"
+manifest="${package_root}/release/activation-manifest.json"
+
+[ "$(/usr/bin/uname -s)/$(/usr/bin/uname -m)" = "Darwin/arm64" ] || \
+  fail 67 RUNTIME_ARCHITECTURE_UNSUPPORTED \
+    "only darwin/arm64 is supported, found $(/usr/bin/uname -s)/$(/usr/bin/uname -m)"
+architecture=arm64
+
+[ -f "$manifest" ] || \
+  fail 68 RUNTIME_MANIFEST_MISSING "release/activation-manifest.json is absent"
+field() {
+  /usr/bin/plutil -extract "$1" raw -o - "$manifest" 2>/dev/null
+}
+[ "$(field schema_version)" = "1" ] || \
+  fail 68 RUNTIME_MANIFEST_INVALID "unsupported activation manifest schema"
+prefix="architectures.${architecture}.runtime"
+relative_path=$(field "${prefix}.path") || relative_path=""
+expected_bytes=$(field "${prefix}.bytes") || expected_bytes=""
+expected_sha=$(field "${prefix}.sha256") || expected_sha=""
+case "$relative_path" in
+  ""|/*|../*|*/../*|*/..)
+    fail 68 RUNTIME_MANIFEST_INVALID "runtime payload path is invalid" ;;
+esac
+[ -n "$expected_bytes" ] && [ -n "$expected_sha" ] || \
+  fail 68 RUNTIME_MANIFEST_INVALID "runtime payload digest is incomplete"
+
+archive="${package_root}/${relative_path}"
+[ -f "$archive" ] || \
+  fail 68 RUNTIME_PAYLOAD_MISSING "${relative_path} is absent"
+actual_bytes=$(/usr/bin/stat -f %z "$archive") || actual_bytes=""
+lowercase() {
+  printf '%s\n' "$1" | /usr/bin/tr 'A-F' 'a-f'
+}
+# openssl digests the payload several times faster than shasum. Without a
+# well-formed digest the payload is unverified, so the run stops here.
+[ -x /usr/bin/openssl ] || \
+  fail 68 RUNTIME_DIGEST_UNAVAILABLE "/usr/bin/openssl is absent"
+digest=$(/usr/bin/openssl dgst -sha256 -r "$archive" 2>/dev/null) || \
+  fail 68 RUNTIME_DIGEST_UNAVAILABLE "/usr/bin/openssl cannot digest ${relative_path}"
+actual_sha=$(lowercase "${digest%%[[:space:]]*}")
+case "$actual_sha" in
+  *[!0-9a-f]*|"")
+    fail 68 RUNTIME_DIGEST_UNAVAILABLE "/usr/bin/openssl gave no sha256 for ${relative_path}" ;;
+esac
+[ "${#actual_sha}" -eq 64 ] || \
+  fail 68 RUNTIME_DIGEST_UNAVAILABLE "/usr/bin/openssl gave no sha256 for ${relative_path}"
+[ "$actual_bytes" = "$expected_bytes" ] && [ "$actual_sha" = "$(lowercase "$expected_sha")" ] || \
+  fail 68 RUNTIME_PAYLOAD_MISMATCH "${relative_path} does not match its sha256 and size"
+
+[ -n "${TLDR_AGENT_HOME:-}${HOME:-}" ] || \
+  fail 70 RUNTIME_HOME_UNAVAILABLE "set TLDR_AGENT_HOME or HOME"
+# The state root default (src/lib/store.mjs). The runtime cache is exempt
+# from the state root migration guard: it is regenerated on demand.
+tldr_agent_home=${TLDR_AGENT_HOME:-${HOME}/.tldr-agents/agent}
+runtimes="${tldr_agent_home}/runtimes"
+runtime="${runtimes}/${actual_sha}"
+runtime_node="${runtime}/bin/node"
+runtime_stamp_name=.payload-sha256
+runtime_stamp="${runtime}/${runtime_stamp_name}"
+
+# The stamp is written inside the staged runtime before its rename, so only an
+# entry this dispatcher completed carries the verified sha256. Anything else
+# under runtimes/<sha256>/, including links, is replaced and never executed.
+runtime_is_trusted() {
+  [ -d "$runtimes" ] && [ ! -L "$runtimes" ] && [ -O "$runtimes" ] || return 1
+  [ -d "$runtime" ] && [ ! -L "$runtime" ] && [ -O "$runtime" ] || return 1
+  [ -f "$runtime_stamp" ] && [ ! -L "$runtime_stamp" ] || return 1
+  stamp=""
+  IFS= read -r stamp 2>/dev/null < "$runtime_stamp" || :
+  [ "$stamp" = "$actual_sha" ] && [ -x "$runtime_node" ]
+}
+
+# runtimes/ holds only this user's runtimes. A link there is removed (never its
+# target) and the directory is recreated private.
+prepare_runtimes() {
+  if [ -L "$runtimes" ]; then
+    printf 'tldr-agent runtime: event=runtime_cache_link_removed path=%s\n' \
+      "$runtimes" >&2
+    /bin/rm -f "$runtimes" || \
+      fail 70 RUNTIME_CACHE_UNAVAILABLE "cannot remove the link at ${runtimes}"
+  fi
+  /bin/mkdir -p -m 0700 "$runtimes" || \
+    fail 70 RUNTIME_CACHE_UNAVAILABLE "cannot create ${runtimes}"
+  [ -d "$runtimes" ] && [ ! -L "$runtimes" ] || \
+    fail 70 RUNTIME_CACHE_UNAVAILABLE "${runtimes} is not a directory"
+  [ -O "$runtimes" ] || \
+    fail 70 RUNTIME_CACHE_UNAVAILABLE "${runtimes} is not owned by the current user"
+  /bin/chmod 0700 "$runtimes" || \
+    fail 70 RUNTIME_CACHE_UNAVAILABLE "cannot restrict ${runtimes} to the current user"
+}
+
+stage=""
+discard_stage() {
+  [ -z "$stage" ] || /bin/rm -rf "$stage"
+}
+
+# Move an untrusted entry aside in one rename, so no caller sees it half
+# removed; rm then removes a link itself, never its target.
+discard_untrusted_runtime() {
+  [ -e "$runtime" ] || [ -L "$runtime" ] || return 0
+  printf 'tldr-agent runtime: event=runtime_cache_untrusted path=%s\n' \
+    "$runtime" >&2
+  untrusted="${runtimes}/.untrusted.$$"
+  /bin/rm -rf "$untrusted" || \
+    fail 70 RUNTIME_CACHE_UNAVAILABLE "cannot clear ${untrusted}"
+  # A concurrent caller may already have moved the same entry aside.
+  /bin/mv "$runtime" "$untrusted" 2>/dev/null || :
+  /bin/rm -rf "$untrusted" || \
+    fail 70 RUNTIME_CACHE_UNAVAILABLE "cannot remove the untrusted runtime moved to ${untrusted}"
+}
+
+# Extract beside the cache entry and rename only a complete, stamped runtime
+# into place, so an interrupted extraction is never found under
+# runtimes/<sha256>/.
+extract_runtime() {
+  prepare_runtimes
+  trap discard_stage EXIT
+  trap 'discard_stage; exit 130' HUP INT TERM
+  stage=$(/usr/bin/mktemp -d "${runtimes}/.extract.XXXXXX") || \
+    fail 70 RUNTIME_CACHE_UNAVAILABLE "cannot stage under ${runtimes}"
+  /usr/bin/tar -xzf "$archive" --strip-components=1 -C "$stage" || \
+    fail 69 RUNTIME_EXTRACT_FAILED "cannot extract ${relative_path}"
+  [ -x "${stage}/bin/node" ] || \
+    fail 69 RUNTIME_EXTRACT_FAILED "${relative_path} has no executable bin/node"
+  printf '%s\n' "$actual_sha" > "${stage}/${runtime_stamp_name}" || \
+    fail 70 RUNTIME_CACHE_UNAVAILABLE "cannot stamp the runtime staged in ${stage}"
+  /bin/chmod -R go-rwx "$stage" || \
+    fail 70 RUNTIME_CACHE_UNAVAILABLE "cannot restrict the runtime staged in ${stage} to the current user"
+  if ! runtime_is_trusted; then
+    discard_untrusted_runtime
+    /bin/mv "$stage" "$runtime" || \
+      fail 70 RUNTIME_CACHE_UNAVAILABLE "cannot rename into ${runtime}"
+    # If a concurrent first run renamed its runtime first, mv nested this
+    # stage inside that runtime instead of replacing it.
+    /bin/rm -rf "${runtime}/${stage##*/}" || \
+      fail 70 RUNTIME_CACHE_UNAVAILABLE "cannot remove ${runtime}/${stage##*/}"
+    printf 'tldr-agent runtime: event=runtime_extracted sha256=%s path=%s\n' \
+      "$actual_sha" "$runtime" >&2
+  fi
+  discard_stage
+  stage=""
+  trap - EXIT HUP INT TERM
+  runtime_is_trusted || \
+    fail 69 RUNTIME_EXTRACT_FAILED "${runtime} is incomplete after extraction"
+}
+
+runtime_is_trusted || extract_runtime
+if [ "$resolve_only" = 1 ]; then
+  printf 'node=%s\nentrypoint=%s\nsha256=%s\n' \
+    "$runtime_node" "${package_root}/${entrypoint}" "$actual_sha"
+  exit 0
+fi
+exec "$runtime_node" "${package_root}/${entrypoint}" "$@"

@@ -66,15 +66,19 @@ export function resolveLatestNvmNodeExecutable(homePath = homedir()) {
 }
 
 export function resolveNodeExecutable() {
+  // Lazy, in order: the daemon calls this synchronously before every child
+  // spawn, and the login-shell lookup loads the user's whole profile, so it
+  // runs only when the running Node itself is unusable.
   const candidates = [
-    process.execPath,
-    process.argv0 && process.argv0 !== "node" ? process.argv0 : null,
-    resolveExecutable("node"),
-  ]
-    .filter(Boolean)
-    .map((value) => (value.startsWith("/") ? value : resolve(value)));
+    () => process.execPath,
+    () => (process.argv0 && process.argv0 !== "node" ? process.argv0 : null),
+    () => resolveExecutable("node"),
+  ];
 
-  for (const candidate of candidates) {
+  for (const next of candidates) {
+    const value = next();
+    if (!value) continue;
+    const candidate = value.startsWith("/") ? value : resolve(value);
     if (usable(candidate)) return candidate;
   }
 
@@ -98,11 +102,11 @@ export function resolveServiceNodeExecutable() {
   return process.execPath;
 }
 
-// Minimum supported Node. node:sqlite landed in 22.5.0 behind
-// --experimental-sqlite and was unflagged in 22.13.0 (and 23.4.0), so 22.13.0
-// is the lowest version where the CLI runs without extra node flags.
-export const MIN_NODE_VERSION = "22.13.0";
-const MIN_NODE = { major: 22, minor: 13, patch: 0 };
+// Minimum supported Node: the runtime the release payload bundles
+// (release/starport-release.json node.version). The whole Node-floor set moves
+// as one unit; only the native distribution lane keeps its own floor.
+export const MIN_NODE_VERSION = "24.20.0";
+const MIN_NODE = { major: 24, minor: 20, patch: 0 };
 const UPGRADE_HINT = "Upgrade: nvm install 24 && nvm alias default 24";
 
 function parseNodeVersion(versionString) {
@@ -124,7 +128,7 @@ function belowMinimum(version) {
 
 /**
  * Assert that the current Node runtime satisfies the Halcyon contract:
- *   - Node version >= 22.13.0 (the first release with node:sqlite unflagged)
+ *   - Node version >= 24.20.0 (the bundled release runtime)
  *   - node:sqlite loads without error
  *
  * Throws an Error with a human-readable remediation message on failure.
@@ -145,7 +149,7 @@ export function assertNodeRuntimeContract({
   if (belowMinimum(parseNodeVersion(versionString))) {
     const err = new Error(
       `node_runtime_contract_failed: Node ${versionString} is below the minimum required version. ` +
-        `Helm requires Node >=${MIN_NODE_VERSION} — node:sqlite is only unflagged from ${MIN_NODE_VERSION}. ` +
+        `Helm requires Node >=${MIN_NODE_VERSION}, the bundled release runtime. ` +
         UPGRADE_HINT,
     );
     err.code = "node_runtime_contract_failed";

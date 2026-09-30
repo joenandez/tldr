@@ -8,6 +8,18 @@ function canonicalEmailRow(claim, providerThread) {
   const subject =
     typeof metadata.subject === "string" ? metadata.subject : null;
   delete metadata.subject;
+  if (
+    typeof message.sender_runtime === "string" &&
+    message.sender_runtime.length > 0
+  ) {
+    metadata.originator_runtime = message.sender_runtime;
+  }
+  if (
+    typeof message.sender_session_id === "string" &&
+    message.sender_session_id.length > 0
+  ) {
+    metadata.originator_session_id = message.sender_session_id;
+  }
   return {
     message_id: claim.message_id,
     thread_id: message.conversation_id,
@@ -25,6 +37,8 @@ function validClaim(claim) {
     typeof claim.delivery_id === "string" &&
     typeof claim.message_id === "string" &&
     typeof claim.token === "string" &&
+    typeof claim.reply_binding === "string" &&
+    claim.reply_binding.length > 0 &&
     typeof claim.message?.conversation_id === "string" &&
     typeof claim.message?.body === "string"
   );
@@ -34,6 +48,7 @@ export function createTightbeamEmailAdapter({ channel, send } = {}) {
   if (
     typeof channel?.claimEmailDelivery !== "function" ||
     typeof channel?.findProviderThreadByConversation !== "function" ||
+    typeof channel?.recordReplyBinding !== "function" ||
     typeof channel?.recordProviderAcceptance !== "function" ||
     typeof channel?.completeEmailDelivery !== "function" ||
     typeof send !== "function"
@@ -51,17 +66,32 @@ export function createTightbeamEmailAdapter({ channel, send } = {}) {
     if (claimed?.ok !== true) return claimed;
     const claim = claimed.claim;
     if (!validClaim(claim)) {
-      throw new TypeError("Tightbeam returned an invalid claimed delivery");
-    }
-    if (typeof claim.reply_binding === "string") {
-      if (typeof channel.recordReplyBinding !== "function") {
-        throw new TypeError(
-          "Tightbeam email channel cannot persist reply bindings",
-        );
+      // A structurally invalid claim must never sit until its lease expires:
+      // complete it as failed so Tightbeam can hand the delivery id back out
+      // to a caller that will not repeat the same dead work forever.
+      if (
+        typeof claim?.delivery_id === "string" &&
+        typeof claim?.token === "string"
+      ) {
+        await channel.completeEmailDelivery({
+          delivery_id: claim.delivery_id,
+          token: claim.token,
+          outcome: "failed",
+        });
+        return {
+          ok: false,
+          delivery_id: claim.delivery_id,
+          error: "invalid_claimed_delivery",
+          retryable: false,
+        };
       }
-      await channel.recordReplyBinding({ delivery: claim });
-      await afterReplyBindingRecorded?.({ claim });
+      throw Object.assign(
+        new TypeError("Tightbeam returned an invalid claimed delivery"),
+        { code: "invalid_claimed_delivery" },
+      );
     }
+    await channel.recordReplyBinding({ delivery: claim });
+    await afterReplyBindingRecorded?.({ claim });
     const accepted = await channel.findProviderAcceptanceByDelivery?.(
       claim.delivery_id,
     );

@@ -22,15 +22,17 @@ export function createTldrAgentInstallLifecycle({
   runtimes = ["claude", "codex"],
   manageHooks,
   initializeReadBoundary = null,
+  prepareLifecycleState = null,
   desiredState = null,
   verifyDaemon = null,
   releaseOwnership = null,
   cleanupOwnedState = null,
 } = {}) {
-  if (!launchd || typeof manageHooks !== "function") {
-    throw new TypeError("tldr; install lifecycle requires launchd and hooks");
+  if (!launchd) {
+    throw new TypeError("tldr; install lifecycle requires launchd");
   }
   async function hooks(action) {
+    if (typeof manageHooks !== "function") return [];
     const report = [];
     for (const runtime of runtimes) {
       // eslint-disable-next-line no-await-in-loop -- hook files are updated per runtime.
@@ -42,7 +44,6 @@ export function createTldrAgentInstallLifecycle({
     if (typeof desiredState?.set !== "function") return null;
     const state = await desiredState.set({
       mode: "live",
-      lockout: "none",
       reason,
     });
     if (state?.allowed_to_start !== true) {
@@ -62,7 +63,6 @@ export function createTldrAgentInstallLifecycle({
     if (typeof desiredState?.set !== "function") return null;
     const state = await desiredState.set({
       mode: "disabled",
-      lockout: "none",
       reason,
     });
     if (state?.allowed_to_start !== false) {
@@ -91,6 +91,20 @@ export function createTldrAgentInstallLifecycle({
       };
     }
     return { ok: true, action, daemon, cleanup };
+  }
+  async function quiesceDaemon(reason) {
+    const requestedStop = await launchd.unload();
+    const stopped =
+      typeof launchd.waitForUnloaded === "function"
+        ? await launchd.waitForUnloaded(requestedStop)
+        : requestedStop;
+    if (stopped?.loaded || stopped?.running || stopped?.previous_running) {
+      throw lifecycleError(
+        "DAEMON_QUIESCE_TIMEOUT",
+        `tldr; daemon did not quiesce before ${reason}`,
+      );
+    }
+    return stopped;
   }
   async function verifiedDaemon(startDaemon) {
     let primaryError = null;
@@ -140,6 +154,10 @@ export function createTldrAgentInstallLifecycle({
     async install() {
       const hookReport = await hooks("install");
       await ensureReadBoundary();
+      await prepareLifecycleState?.({
+        action: "install",
+        quiesce: () => quiesceDaemon("lifecycle migration"),
+      });
       const desired = await allowDaemonStart("tldr_agent_install");
       const daemon = await verifiedDaemon(() =>
         typeof launchd.converge === "function"
@@ -156,18 +174,9 @@ export function createTldrAgentInstallLifecycle({
     },
     async prepareUpdate() {
       const hookReport = await hooks("install");
-      const requestedStop = await launchd.unload();
-      const stopped =
-        typeof launchd.waitForUnloaded === "function"
-          ? await launchd.waitForUnloaded(requestedStop)
-          : requestedStop;
-      if (stopped?.loaded || stopped?.running || stopped?.previous_running) {
-        throw lifecycleError(
-          "DAEMON_QUIESCE_TIMEOUT",
-          "tldr; daemon did not quiesce before update",
-        );
-      }
-      return Object.freeze({ hookReport });
+      await quiesceDaemon("update");
+      const lifecycle = await prepareLifecycleState?.({ action: "update" });
+      return Object.freeze({ hookReport, lifecycle });
     },
     async activatePreparedUpdate(prepared) {
       if (!prepared || !Array.isArray(prepared.hookReport)) {

@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { lstat, mkdir, readFile } from "node:fs/promises";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { writeTextAtomic } from "./durable_file_io.mjs";
 
@@ -9,8 +10,26 @@ const execFileAsync = promisify(execFile);
 export const TIGHTBEAM_COMPATIBILITY = Object.freeze({
   minProtocol: "1.0",
   maxProtocol: "1",
-  requiredCapabilities: Object.freeze(["channels.v1"]),
+  requiredCapabilities: Object.freeze([
+    "channels.v1",
+    "channels.reply-binding.v1",
+    "listener.v1",
+  ]),
 });
+// This package's own Tightbeam launcher, libexec/tightbeam at the package
+// root (off every PATH; bin/ holds only the front door). TIGHTBEAM_BIN
+// overrides it; the retired standalone ~/.tightbeam/install copy is never a
+// default.
+export const PACKAGE_TIGHTBEAM_BIN = join(
+  dirname(dirname(dirname(fileURLToPath(import.meta.url)))),
+  "libexec",
+  "tightbeam",
+);
+
+export function defaultTightbeamCommand(env = process.env) {
+  return env.TIGHTBEAM_BIN || PACKAGE_TIGHTBEAM_BIN;
+}
+
 export const AUTHORITY = "tldr-email";
 export const APPLICATION = "tldr-email";
 export const WELCOME_APPLICATION = "tldr-welcome";
@@ -128,21 +147,35 @@ export function defaultIdentityStore(home) {
   });
 }
 
-export async function productionRun({ command, admin, credentials, args }) {
+// commandPrefix carries the Tightbeam entrypoint when command is the
+// already-verified runtime node rather than the libexec/tightbeam launcher.
+export async function productionRun({
+  command,
+  commandPrefix = [],
+  admin,
+  credentials,
+  args,
+}) {
   const commandArgs = ["--json"];
   if (admin) commandArgs.unshift("--admin");
   if (credentials) commandArgs.unshift("--app-id", credentials.app_id);
   commandArgs.push(...args);
   try {
-    const { stdout } = await execFileAsync(command, commandArgs, {
-      encoding: "utf8",
-      maxBuffer: 64 * 1024,
-      env: {
-        PATH: process.env.PATH,
-        TIGHTBEAM_STATE_ROOT: process.env.TIGHTBEAM_STATE_ROOT,
-        TIGHTBEAM_APP_SECRET: credentials?.app_secret,
+    const { stdout } = await execFileAsync(
+      command,
+      [...commandPrefix, ...commandArgs],
+      {
+        encoding: "utf8",
+        maxBuffer: 64 * 1024,
+        env: {
+          PATH: process.env.PATH,
+          HOME: process.env.HOME,
+          TLDR_AGENT_HOME: process.env.TLDR_AGENT_HOME,
+          TIGHTBEAM_STATE_ROOT: process.env.TIGHTBEAM_STATE_ROOT,
+          TIGHTBEAM_APP_SECRET: credentials?.app_secret,
+        },
       },
-    });
+    );
     return JSON.parse(stdout);
   } catch (error) {
     const output = `${error?.stderr ?? ""}\n${error?.stdout ?? ""}`;
@@ -185,11 +218,18 @@ export async function productionRun({ command, admin, credentials, args }) {
       (error?.errno && !error?.stdout)
     )
       return null;
+    // The CLI reports a daemon refusal only on stderr (`error <code>: ...`,
+    // exit 1). Keep that code so a caller can tell an expected refusal, such
+    // as the idle `claim_held` of delivery.claim, from a real failure (item 49).
+    const refusal = /^error ([a-z][a-z_]{0,63}): /mu.exec(
+      String(error?.stderr ?? ""),
+    );
     return {
       ok: false,
       data: null,
       error: {
         code: "TIGHTBEAM_OPERATION_FAILED",
+        ...(refusal ? { tightbeam_code: refusal[1] } : {}),
         message:
           "tldr; launched Tightbeam but it did not return a valid response.",
         retryable: false,

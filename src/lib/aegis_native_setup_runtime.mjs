@@ -12,6 +12,7 @@ import {
   validateReleaseManifest,
 } from "./aegis_native_distribution.mjs";
 import { PROTOCOL_VERSION } from "./aegis_protocol.mjs";
+import { FRONT_DOOR_COMMAND } from "./front_door_command.mjs";
 import { installVerifiedSourceRelease } from "./aegis_source_release_install.mjs";
 import { createTldrAgentSourceInstallLifecycle } from "./tldr_agent_source_lifecycle.mjs";
 import { tldrAgentSourceIdentity } from "./tldr_agent_runtime_identity.mjs";
@@ -78,7 +79,7 @@ function projectStatus(value) {
   if (value === "pending_verification") return result("pending_verification");
   if (value === "unconfigured") return result("unconfigured");
   if (value === "corrupt") {
-    return result("repair-required", "tldr-agent doctor --deep");
+    return result("repair-required", `${FRONT_DOOR_COMMAND} repair --json`);
   }
   return null;
 }
@@ -89,7 +90,7 @@ function projectError(error) {
       error?.message ?? "",
     )
     ? result("incompatible", "rerun the verified tldr; bootstrap")
-    : result("unavailable", "tldr-agent doctor --deep");
+    : result("unavailable", `${FRONT_DOOR_COMMAND} repair --json`);
 }
 
 function createStatusSafeAdapter({
@@ -108,7 +109,8 @@ function createStatusSafeAdapter({
     async status() {
       const observed = await read();
       return (
-        observed.projected ?? result("repair-required", "tldr-agent doctor")
+        observed.projected ??
+        result("repair-required", `${FRONT_DOOR_COMMAND} repair --json`)
       );
     },
   });
@@ -176,7 +178,9 @@ export function createProductionOwnerSetupService(dependencies = {}) {
     dependencies.inspectUninstallResidue ??
     (() =>
       inspectDefaultUninstallResidue({ nativeSetupApp: NATIVE_SETUP_APP }));
-  const launchOperation = async () => {
+  const launchOperation = async (
+    missingAppRemediation = "rerun the verified tldr; bootstrap",
+  ) => {
     try {
       await launch(NATIVE_SETUP_APP);
     } catch (error) {
@@ -188,7 +192,7 @@ export function createProductionOwnerSetupService(dependencies = {}) {
             code: "NATIVE_SETUP_NOT_INSTALLED",
             message: "tldr; is not installed.",
             retryable: false,
-            remediation: "rerun the verified tldr; bootstrap",
+            remediation: missingAppRemediation,
           },
         };
       }
@@ -227,7 +231,12 @@ export function createProductionOwnerSetupService(dependencies = {}) {
     });
   return Object.freeze({
     setup,
-    configure: launchAndRead,
+    configure: async () =>
+      (await launchOperation(`${FRONT_DOOR_COMMAND} setup`)) ?? {
+        ok: true,
+        data: { status: "app-opened" },
+        error: null,
+      },
     repair: launchAndRead,
     uninstall,
     status: () => adapter.status(),

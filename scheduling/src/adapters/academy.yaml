@@ -1,0 +1,74 @@
+name: academy
+version: 1
+
+command:
+  argv:
+    [
+      academy,
+      run,
+      "{{provider_config.academy_agent}}",
+      --,
+      -p,
+      --verbose,
+      --output-format,
+      stream-json,
+      "{{prompt}}",
+    ]
+  env: {}
+
+session_id:
+  capture:
+    strategy: stdout_parse
+    from: stdout
+    parse: jsonl
+    path: $.session_id
+
+variants:
+  claude:
+    command:
+      argv:
+        [
+          academy,
+          run,
+          "{{provider_config.academy_agent}}",
+          --,
+          -p,
+          --verbose,
+          --output-format,
+          stream-json,
+          "{{prompt}}",
+        ]
+      env: {}
+    session_id:
+      capture:
+        strategy: stdout_parse
+        from: stdout
+        parse: jsonl
+        path: $.session_id
+  codex:
+    command:
+      argv:
+        [
+          academy,
+          run,
+          "{{provider_config.academy_agent}}",
+          --agent,
+          codex,
+          --,
+          exec,
+          --json,
+          "{{prompt}}",
+        ]
+      env: {}
+    session_id:
+      capture:
+        strategy: stdout_parse
+        from: stdout
+        parse: jsonl
+        match: { type: thread.started }
+        path: $.thread_id
+
+resume:
+  command: "academy resume {{session_id}}"
+  cwd: "{{job.cwd}}"
+  caveats: ["runtime-specific"]

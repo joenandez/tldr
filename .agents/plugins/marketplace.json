@@ -1,0 +1,17 @@
+{
+  "name": "tldr",
+  "plugins": [
+    {
+      "name": "tldr",
+      "version": "0.1.0",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "install": "AVAILABLE",
+        "enable": "ON_INSTALL"
+      }
+    }
+  ]
+}
