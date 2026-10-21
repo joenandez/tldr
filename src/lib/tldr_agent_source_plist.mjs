@@ -1,8 +1,10 @@
-import { dirname, join } from "node:path";
+import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { renderTldrAgentProductionPlist } from "./tldr_agent_launchd_definition.mjs";
+import { defaultTightbeamInvocation } from "./tightbeam_channel_runtime.mjs";
 import {
+  assertStateRootsCreatable,
   canonicalStateRoot,
   helmHome as getHelmHome,
   tightbeamStateRootFor,
@@ -28,13 +30,20 @@ export function defaultTightbeamStateRoot() {
   });
 }
 
+// The TIGHTBEAM_BIN the daemon's children inherit: one launcher, or none in
+// the installed layout, where each child resolves the installed runtime's
+// Tightbeam entrypoint itself (defaultTightbeamInvocation).
+export function defaultDaemonTightbeamBin(env = process.env) {
+  const { command, commandPrefix } = defaultTightbeamInvocation(env);
+  return commandPrefix ? null : command;
+}
+
 export function productionPlist(
   schedulerScriptPath,
   {
     home = getHelmHome(),
     nodePath = process.execPath,
-    tightbeamBin = process.env.TIGHTBEAM_BIN ||
-      join(SOURCE_ROOT, "libexec", "tightbeam"),
+    tightbeamBin = defaultDaemonTightbeamBin(),
     tightbeamStateRoot = defaultTightbeamStateRoot(),
   } = {},
 ) {
@@ -45,5 +54,25 @@ export function productionPlist(
     nodePath,
     tightbeamBin,
     tightbeamStateRoot,
+  });
+}
+
+export function assertSourceLifecycleRootsCreatable({
+  operation,
+  home,
+  helmHome,
+  tightbeamStateRoot,
+}) {
+  // Refuse before touching launchd if the state roots cannot be created; a
+  // plist without writable state would leave users with a daemon that starts
+  // and immediately fails.
+  return assertStateRootsCreatable({
+    roots: {
+      agent: { path: home, source: "lifecycle" },
+      helm: { path: helmHome, source: "lifecycle" },
+      tightbeam: { path: tightbeamStateRoot, source: "lifecycle" },
+    },
+    guarded: ["agent"],
+    operation: `source_lifecycle_${operation}`,
   });
 }

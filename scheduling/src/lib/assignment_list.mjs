@@ -10,6 +10,7 @@
 // version this build implements, the whole call is an error naming that scope.
 // Returning the scopes that happened to parse would present a partial list as a
 // complete one, which is the failure mode a consumer cannot detect.
+// Callers may explicitly opt in to incomplete results with --all-scopes --partial.
 
 import { existsSync, readFileSync } from "node:fs";
 import { jobsPath, resolveScope } from "./store.mjs";
@@ -286,12 +287,14 @@ function scopeResolveFailure(entry, err) {
 export function listAssignmentsAcrossScopes({
   status = "",
   withTerminalRuns = false,
+  partial = false,
 } = {}) {
   const registered = listRegisteredScopes();
   const seen = new Set();
   const failures = [];
   const rows = [];
   const scopes = [];
+  let successfulScopes = 0;
 
   for (const entry of registered) {
     let scope;
@@ -318,7 +321,10 @@ export function listAssignmentsAcrossScopes({
       catalog.jobs.filter(isAssignment),
       status,
     );
-    if (assignments.length === 0) continue;
+    if (assignments.length === 0) {
+      successfulScopes += 1;
+      continue;
+    }
 
     const built = rowsForScope(scope, assignments, withTerminalRuns);
     if (!built.ok) {
@@ -336,10 +342,11 @@ export function listAssignmentsAcrossScopes({
       assignment_count: assignments.length,
     });
     rows.push(...built.rows);
+    successfulScopes += 1;
   }
 
-  if (failures.length > 0) {
-    failures.sort((a, b) => cmp(a.scope_id, b.scope_id));
+  failures.sort((a, b) => cmp(a.scope_id, b.scope_id));
+  if (failures.length > 0 && (!partial || successfulScopes === 0)) {
     return { ok: false, failures, scanned_scopes: seen.size };
   }
   rows.sort(
@@ -347,18 +354,25 @@ export function listAssignmentsAcrossScopes({
       cmp(a.scope_id, b.scope_id) || cmp(a.name, b.name) || cmp(a.id, b.id),
   );
   scopes.sort((a, b) => cmp(a.scope_id, b.scope_id));
-  return { ok: true, assignments: rows, scopes, scanned_scopes: seen.size };
+  return {
+    ok: true,
+    assignments: rows,
+    scopes,
+    scanned_scopes: seen.size,
+    ...(failures.length > 0 ? { failures, complete: false } : {}),
+  };
 }
 
 // One call over every registered scope's complete assignment histories. Unlike
 // the global list's optional terminal projection, this is deliberately a
 // runs-first read: launched and running work stays visible to the inbox.
-export function summarizeAssignmentRunsAcrossScopes() {
+export function summarizeAssignmentRunsAcrossScopes({ partial = false } = {}) {
   const registered = listRegisteredScopes();
   const seen = new Set();
   const failures = [];
   const runs = [];
   const scopes = [];
+  let successfulScopes = 0;
 
   for (const entry of registered) {
     let scope;
@@ -382,7 +396,10 @@ export function summarizeAssignmentRunsAcrossScopes() {
       continue;
     }
     const assignments = catalog.jobs.filter(isAssignment);
-    if (assignments.length === 0) continue;
+    if (assignments.length === 0) {
+      successfulScopes += 1;
+      continue;
+    }
 
     const built = runsForScope(scope, assignments);
     if (!built.ok) {
@@ -400,10 +417,11 @@ export function summarizeAssignmentRunsAcrossScopes() {
       assignment_count: assignments.length,
     });
     runs.push(...built.runs);
+    successfulScopes += 1;
   }
 
-  if (failures.length > 0) {
-    failures.sort((a, b) => cmp(a.scope_id, b.scope_id));
+  failures.sort((a, b) => cmp(a.scope_id, b.scope_id));
+  if (failures.length > 0 && (!partial || successfulScopes === 0)) {
     return { ok: false, failures, scanned_scopes: seen.size };
   }
   runs.sort(
@@ -414,5 +432,11 @@ export function summarizeAssignmentRunsAcrossScopes() {
       cmp(a.run_id, b.run_id),
   );
   scopes.sort((a, b) => cmp(a.scope_id, b.scope_id));
-  return { ok: true, runs, scopes, scanned_scopes: seen.size };
+  return {
+    ok: true,
+    runs,
+    scopes,
+    scanned_scopes: seen.size,
+    ...(failures.length > 0 ? { failures, complete: false } : {}),
+  };
 }

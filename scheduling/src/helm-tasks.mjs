@@ -72,6 +72,7 @@ import {
   publicEventsPath,
 } from "./lib/read_store.mjs";
 import {
+  academyProviderDefault,
   bulkDeleteByTag,
   bulkSetPausedByTag,
   cloneJob,
@@ -390,6 +391,7 @@ const HELP_CATALOG = {
     options: [
       "--cwd <path>",
       "--replace",
+      "--merge",
       "--timezone <iana-zone>",
       "--args-json <json-array>",
       "--memory <read+write|off>",
@@ -437,6 +439,11 @@ const HELP_CATALOG = {
       "Use --command for deterministic non-agent subprocesses. JSON jobs use process.command and process.args for command jobs.",
       "Everything after -- is passed as literal subprocess args. Use either -- or --args-json, not both.",
       "schedule validates, activates the service, writes the job, and returns activation.scope_registered, activation.service_running, activation.health, and activation.will_dispatch.",
+      "--replace redefines an existing job from exactly the flags given; omitted definition fields are dropped. Run history and an operator pause carry over, and the next run time is kept unless the schedule changed.",
+      "--merge upserts: it creates the job if missing, otherwise changes only the fields given and keeps the rest (conditions, env, metadata, schedule.misfire_grace_sec, ...). Run history and an operator pause carry over as with --replace. Prefer --merge for idempotent re-registration.",
+      "Command jobs return after a short startup window but stay running: history records the command's real exit (success, or failure with exit_code_N) when it ends.",
+      "Agent and provider jobs hand off once their session starts: history shows the run as started (last_status: started) until the session ends, then success, or failure with exit_code_N or signal_<SIG>.",
+      "A provider that decides not to start a session exits 0 after printing one stdout line {\"type\":\"helm.skip\",\"version\":1,\"reason\":\"<code>\",...}; the run is recorded as skipped with that reason and no fallback agent runs.",
     ],
   },
   create: {
@@ -1589,6 +1596,29 @@ function resolveInputObject(flags, scope, partial = false, trailingArgs = []) {
   );
 }
 
+// Only for new agent/prompt jobs: command (process) jobs run no provider.
+// Rewrites a missing provider, claude or codex; any other provider stays.
+function withAcademyProviderDefault(raw, scope) {
+  const hints = raw?.execution_hints;
+  if (!raw || raw.process) return raw;
+  if (hints?.provider_config?.academy_agent !== undefined) return raw;
+  // JSON null is an explicit "no provider", unlike an omitted key.
+  if (hints?.provider === null) return raw;
+  const academy = academyProviderDefault(scope.cwd, hints?.provider ?? null);
+  if (!academy) return raw;
+  return {
+    ...raw,
+    execution_hints: {
+      ...hints,
+      provider: academy.provider,
+      provider_config: {
+        ...academy.provider_config,
+        ...hints?.provider_config,
+      },
+    },
+  };
+}
+
 function selectedLogStream(flags) {
   if (flags.stdout && flags.stderr) {
     throw Object.assign(new Error("choose only one of --stdout or --stderr"), {
@@ -1733,6 +1763,16 @@ async function watchActivityStream(opts = {}) {
     // eslint-disable-next-line no-await-in-loop
     await sleep(Number(opts.pollMs || 100));
   }
+}
+
+// `tasks run` succeeds when the run did what was asked of it now: finished
+// with success, or started and was handed off (its final exit lands in
+// history later), or the provider deliberately skipped it (helm.skip).
+function runNowSucceeded(event) {
+  if (!event) return false;
+  if (event.status === "success") return true;
+  if (event.kind === "started" && event.status === "running") return true;
+  return event.kind === "skipped" && Boolean(event.payload?.provider_skip);
 }
 
 async function run() {
@@ -2433,18 +2473,22 @@ async function run() {
 
     const service_install = serviceInstall(schedulerScriptPath);
     const service = serviceRestart(schedulerScriptPath);
-    const sentinel_install = sentinelInstall(schedulerScriptPath);
-    const sentinel_stop = sentinelStop();
-    const sentinel = sentinelStart(schedulerScriptPath);
+    // The sentinel is launchd-only; the systemd unit's restart policy covers Linux.
+    const sentinelData =
+      process.platform === "darwin"
+        ? {
+            sentinel_install: sentinelInstall(schedulerScriptPath),
+            sentinel_stop: sentinelStop(),
+            sentinel: sentinelStart(schedulerScriptPath),
+          }
+        : {};
     output(
       cmd,
       true,
       withScope(scope, {
         service,
         service_install,
-        sentinel,
-        sentinel_install,
-        sentinel_stop,
+        ...sentinelData,
         restart_safety: {
           forced: Boolean(flags.force),
           ...restartSafety,
@@ -2726,7 +2770,10 @@ async function run() {
   }
 
   if (cmd === "create") {
-    const raw = resolveInputObject(flags, scope, false, trailingArgs);
+    const raw = withAcademyProviderDefault(
+      resolveInputObject(flags, scope, false, trailingArgs),
+      scope,
+    );
     let activation = null;
     if (flags.activate) {
       validateRawJobInput(cmd, raw, scope, pretty);
@@ -2817,8 +2864,18 @@ async function run() {
   }
 
   if (cmd === "schedule") {
-    const raw = resolveInputObject(flags, scope, false, trailingArgs);
-    validateRawJobInput(cmd, raw, scope, pretty);
+    const input = resolveInputObject(flags, scope, false, trailingArgs);
+    // --merge patches an existing job; its provider is not ours to default.
+    const raw = flags.merge ? input : withAcademyProviderDefault(input, scope);
+    // --merge input may be partial; scheduleJob validates the merged job.
+    if (flags.merge) {
+      if (!raw?.id) {
+        fail(cmd, "missing_flag", "--id is required", withScope(scope), pretty);
+        process.exit(2);
+      }
+    } else {
+      validateRawJobInput(cmd, raw, scope, pretty);
+    }
     let activation;
     try {
       activation = await ensureActivation(scope, schedulerScriptPath);
@@ -2846,6 +2903,7 @@ async function run() {
     try {
       result = await scheduleJob(scope, raw, {
         replace: Boolean(flags.replace),
+        merge: Boolean(flags.merge),
       });
     } catch (err) {
       fail(
@@ -3324,7 +3382,7 @@ async function run() {
       );
       process.exit(1);
     }
-    if (result.value.status !== "success") {
+    if (!runNowSucceeded(result.value)) {
       fail(
         cmd,
         "job_failed",

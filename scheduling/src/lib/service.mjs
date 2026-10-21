@@ -139,6 +139,14 @@ const FORWARDED_ENV_KEYS = [
   "HELM_CANONICAL_CHECKOUT",
 ];
 
+// Only an explicit SUBSPACE_HOME is baked. The home is chosen per job launch
+// (subspace_memory_provider.mjs); carrying the previous install's value
+// forward would pin a home whose app may be closed and whose token expired.
+function resolveSubspaceHome() {
+  const home = process.env.SUBSPACE_HOME;
+  return home ? { source: "env", home } : { source: "none", home: null };
+}
+
 function serviceEnvironment() {
   const nodePath = resolveServiceNodeExecutable();
   const claudePath = resolveExecutable("claude");
@@ -156,6 +164,8 @@ function serviceEnvironment() {
   for (const key of FORWARDED_ENV_KEYS) {
     if (process.env[key]) env[key] = process.env[key];
   }
+  const subspaceHome = resolveSubspaceHome().home;
+  if (subspaceHome) env.SUBSPACE_HOME = subspaceHome;
   return env;
 }
 
@@ -1281,11 +1291,18 @@ function systemdUninstall(schedulerScriptPath) {
 export function serviceInstall(schedulerScriptPath) {
   assertNodeRuntimeContract();
   const mode = detectServiceMode();
+  const subspaceHome = resolveSubspaceHome();
   let result;
   if (mode === "fake") result = fakeInstall(schedulerScriptPath);
   else if (mode === "launchd") result = launchdInstall(schedulerScriptPath);
   else if (mode === "systemd") result = systemdInstall(schedulerScriptPath);
   else throw new Error("service mode unsupported on this platform");
+  appendActivityEvent({
+    type: "service.subspace_home",
+    kind: "service",
+    source: "cli",
+    data: subspaceHome,
+  });
   appendActivityEvent({
     type: "service_installed",
     source: "cli",

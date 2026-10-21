@@ -86,6 +86,8 @@ export function runHelmTasksJsonChild({
       if (settled) return;
       settled = true;
       cleanup();
+      // Forward once so the child's JSON log lines reach this process's log (Linux job log).
+      if (result.stderr) process.stderr.write(result.stderr);
       resolveResult(result);
     };
 
@@ -172,6 +174,25 @@ export function runInboxPollChild({
     daemonInstanceId,
     signal,
     timeoutMs,
-    args: ["__tldr-agent-channel-poll"],
+    args: ["__tldr-agent-channel-poll", "--mode", "inbound"],
+  });
+}
+
+export function runOutboundDrainChild({
+  schedulerScriptPath,
+  scope,
+  daemonInstanceId,
+  signal,
+  timeoutMs,
+} = {}) {
+  return runHelmTasksJsonChild({
+    schedulerScriptPath,
+    scope,
+    daemonInstanceId,
+    signal,
+    timeoutMs,
+    args: ["__tldr-agent-channel-poll", "--mode", "outbound"],
+    // The runner reads its own deadline from env; merged over process.env.
+    env: { HELM_DAEMON_OUTBOUND_TIMEOUT_MS: String(timeoutMs) },
   });
 }

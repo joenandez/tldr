@@ -78,6 +78,21 @@ export function classifyScopeDueForDispatch(
     ? jobs.filter((job) => job?.state?.enabled !== false)
     : [];
   if (enabledJobs.length === 0) {
+    // A job disables itself when its last slot fires (a one-off, or past
+    // end_at) while that run may still be live. Once its PID dies the scope
+    // must still be dispatched so the reaper can close the run.
+    if (
+      classifyActiveRunReapNeed({ scope, readActiveRuns, pidAlive })
+        .dispatchNeeded
+    ) {
+      return withDispatchIndexStatus(
+        dispatchClassification(scope, "active_run_reap_needed", {
+          enabledJobCount: 0,
+          earliestNextRunAt: null,
+        }),
+        { dispatchIndexStatus, dispatchIndexReason },
+      );
+    }
     return withDispatchIndexStatus(
       idleClassification(scope, "no_enabled_jobs"),
       { dispatchIndexStatus, dispatchIndexReason },

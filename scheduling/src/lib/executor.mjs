@@ -31,6 +31,7 @@ import { writeAgentRunSession } from "./agent_run_session.mjs";
 import { completionDeadlineAt } from "./run_deadline.mjs";
 import { effectiveCompletionDelivery } from "./assignment_completion_delivery.mjs";
 import { sessionBoundaryLaunch } from "./run_session_outcome.mjs";
+import { exitBeforeSessionResult } from "./provider_skip_event.mjs";
 import {
   deriveMemoryAfterRun,
   resolveMemoryRequest,
@@ -612,6 +613,7 @@ export function launchAgentUntilStarted({
     command: requestedCommand,
     args: requestedArgs,
   });
+  const skipJobId = jobId || extraEnv?.HELM_JOB_ID || null;
   if (logPaths) {
     const started = Date.now();
     mkdirSync(dirname(logPaths.stdout), { recursive: true });
@@ -770,15 +772,14 @@ export function launchAgentUntilStarted({
     });
     child.on("close", (code, signal) => {
       if (!startSettled) {
-        finishStart({
-          status: "failure",
-          session_id: null,
-          signal_source: "process_exit_before_session",
-          error:
-            code === 0
-              ? `missing_agent_session_id: ${normalizedAgent} completed without a captured session_id`
-              : `exit_code_${code}`,
-        });
+        finishStart(
+          exitBeforeSessionResult({
+            agent: normalizedAgent,
+            code,
+            stdout: currentOutput().stdout,
+            jobId: skipJobId,
+          }),
+        );
       }
       finishTerminal({
         status: code === 0 ? "success" : "failure",
@@ -950,13 +951,12 @@ export function launchAgentUntilStarted({
     clearTimeout(timer);
     if (!startSettled) {
       finishStart({
-        status: "failure",
-        session_id: null,
-        signal_source: "process_exit_before_session",
-        error:
-          code === 0
-            ? `missing_agent_session_id: ${normalizedAgent} completed without a captured session_id`
-            : `exit_code_${code}`,
+        ...exitBeforeSessionResult({
+          agent: normalizedAgent,
+          code,
+          stdout: stdoutCapture.text(),
+          jobId: skipJobId,
+        }),
         stdout: stdoutCapture.text(),
         stderr: stderrCapture.text(),
       });
@@ -1456,6 +1456,7 @@ async function runPreparedAdapterUntilStartedWithFallback({
   const fallbackAgent = fallbackFor(primaryAgent, defaults);
   if (
     primary.status === "started" ||
+    primary.status === "skipped" ||
     defaults.fallback_policy === "never" ||
     !fallbackAgent ||
     fallbackAgent === primaryAgent ||
@@ -1471,9 +1472,11 @@ async function runPreparedAdapterUntilStartedWithFallback({
         primary,
         fallback: null,
         fallbackMode:
-          !prompt && primary.status !== "started"
-            ? "ineligible:no_prompt"
-            : null,
+          primary.status === "skipped"
+            ? "not_needed:provider_skip"
+            : !prompt && primary.status !== "started"
+              ? "ineligible:no_prompt"
+              : null,
       }),
     };
   }

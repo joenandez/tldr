@@ -9,6 +9,10 @@ const isAssignment = (job) =>
 export function handleAssignmentRuns(flags, positionals, pretty, resolveJob) {
   const cmd = "runs";
   const query = positionals[1];
+  if (flags.partial && !flags["all-scopes"]) {
+    fail(cmd, "invalid_flag", "--partial requires --all-scopes", {}, pretty);
+    process.exit(2);
+  }
   if (flags["all-scopes"]) {
     if (query) {
       fail(
@@ -20,7 +24,9 @@ export function handleAssignmentRuns(flags, positionals, pretty, resolveJob) {
       );
       process.exit(2);
     }
-    const result = summarizeAssignmentRunsAcrossScopes();
+    const result = summarizeAssignmentRunsAcrossScopes({
+      partial: Boolean(flags.partial),
+    });
     if (!result.ok) {
       output(
         cmd,
@@ -44,6 +50,9 @@ export function handleAssignmentRuns(flags, positionals, pretty, resolveJob) {
         runs: result.runs,
         scopes: result.scopes,
         scanned_scopes: result.scanned_scopes,
+        ...(result.complete === false
+          ? { failed_scopes: result.failures, complete: false }
+          : {}),
       },
       [],
       pretty,

@@ -190,6 +190,19 @@ export function createTightbeamEmailDeliveryChannel({
       : Object.freeze({ ok: true });
   }
 
+  async function releaseEmailDelivery({ delivery_id: deliveryId, token }) {
+    const identity = await readIdentity();
+    if (!identity) return Object.freeze({ ok: false, code: "not_configured" });
+    const released = await execute({
+      admin: false,
+      credentials: identity,
+      args: ["delivery", "release", deliveryId, "--token", token],
+    });
+    return commandFailure(released)
+      ? Object.freeze({ ok: false, code: "release_failed" })
+      : Object.freeze({ ok: true });
+  }
+
   async function recordProviderAcceptance({ delivery, provider }) {
     if (
       typeof delivery?.reply_binding !== "string" ||
@@ -298,6 +311,7 @@ export function createTightbeamEmailDeliveryChannel({
   return Object.freeze({
     claimEmailDelivery,
     completeEmailDelivery,
+    releaseEmailDelivery,
     recordReplyBinding,
     recordProviderAcceptance,
     recordInboundProviderAcceptance,

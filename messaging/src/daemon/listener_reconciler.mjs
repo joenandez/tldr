@@ -9,9 +9,12 @@ import { REPLY_BINDING_POLICY } from './reply_listener_policy.mjs';
 import { replyContinuityDiagnostic } from './reply_continuity_diagnostics.mjs';
 import { admitParkExpiryRetirement, admitProviderAdmissionTimeoutRetirement } from './endpoint_retirement.mjs';
 import { refreshSessionWatermark } from './ops/message_shared.mjs';
-import { runEndpointRetirementExecutor, runOwnerProcessReconciliation } from './retirement_executor.mjs';
+import { observeRetirementProcess, runEndpointRetirementExecutor, runOwnerProcessReconciliation } from './retirement_executor.mjs';
 import { endUnsupportedTachyonListeners, isTachyonArmedForGeneration } from './tachyon_arming.mjs';
 import { liveResumeChildFor } from './resumer.mjs';
+import { closedWorkNoticeSql, endpointHasWakingUnreadSql } from './lifecycle_transition.mjs';
+import { threadHostObserverFor } from './codex_thread_host.mjs';
+import { observeOwnerLiveness, readOwnerFence } from './owner_liveness.mjs';
 
 export const LISTENER_RECONCILE_TICK_MS = 1000;
 
@@ -114,6 +117,11 @@ function admissionCandidates(db) {
         AND d.admission_provider_session_id IS e.provider_session_id
         AND d.admission_owner_epoch = e.owner_epoch
         AND d.admission_owner_launch_token IS e.owner_launch_token
+        -- F33: a closed-work notice with nothing else waiting asks nothing of the
+        -- session, so its unread admission never starts a takeover. With real
+        -- unread work behind it the notice is the head of receive order and
+        -- the takeover proceeds as before.
+        AND (NOT ${closedWorkNoticeSql('d')} OR ${endpointHasWakingUnreadSql('d.endpoint_id')})
         AND NOT EXISTS (
           SELECT 1 FROM deliveries earlier
            WHERE earlier.endpoint_id = d.endpoint_id AND earlier.state != 'failed'
@@ -148,15 +156,58 @@ function armAdmissionRetry(context, delivery, timestamp) {
   return true;
 }
 
-function decideAvailabilityTakeover(db, delivery, timestamp) {
+// Takeover starts a second process on the session, so it needs positive proof
+// that the first one exited: a FRESH observation of the endpoint's recorded
+// owner (never the delivery's snapshot) must read `gone`. `alive`,
+// `unavailable`, and an absent/incomplete tuple leave the delivery
+// `delivered` for the existing paths (next tool call, stop, Tachyon) and for
+// the owner-exit reconciliation. The observed tuple rides in the conditional
+// update, so an owner that registered after the observation loses the CAS.
+// Returns { decided, liveness, outcome, reason }.
+function decideAvailabilityTakeover(db, delivery, timestamp, observeProcess, observeThreadHost) {
   if (db.prepare("SELECT 1 FROM resume_requests WHERE endpoint_id = ? AND message_id = ? AND reason = 'availability_takeover'")
-    .get(delivery.endpoint_id, delivery.message_id)) return false;
+    .get(delivery.endpoint_id, delivery.message_id)) return { decided: false, outcome: 'already_requested', liveness: null, reason: null };
+  const owner = readOwnerFence(db, delivery.endpoint_id);
+  const observation = observeOwnerLiveness(owner, observeProcess);
+  if (observation.liveness !== 'gone') {
+    return { decided: false, outcome: 'deferred', liveness: observation.liveness, reason: observation.reason ?? 'owner_not_gone', error: observation.error };
+  }
+  // F34: a Codex TUI's thread runs in a managed app-server that outlives the
+  // TUI. Its owner process being gone says nothing about the session: the
+  // app-server keeps running the turn, its hooks keep firing for the
+  // session, and Codex refuses a second writer. A takeover rotates the owner
+  // token, which would also stop the hosted turn's own hooks from receiving
+  // the message. So while a process hosts the thread, or that cannot be
+  // told, the delivery is left to the hosted session (tool boundary, Stop) and
+  // to the owner-exit path, which delivers through the app-server.
+  if (owner.runtime === 'codex') {
+    const host = hostOf(observeThreadHost, delivery.provider_session_id);
+    if (host.hosted !== false) {
+      return { decided: false, outcome: 'deferred', liveness: 'gone', reason: host.hosted === true ? 'thread_hosted_by_app_server' : 'thread_host_unknown' };
+    }
+  }
+  // F34 race: "not hosted" was true when it was read above, and an app-server
+  // may take the thread any moment after. Rotating the owner token then would
+  // fence out the hosted turn's own hooks, which is the one outcome a takeover
+  // must never cause. The lock is read once more immediately before the
+  // conditional update (nothing runs between the two but the update itself, in
+  // this one synchronous transaction); anything but a second "not hosted" is a
+  // race, and a race defers: the next pass, the owner-exit route, or the
+  // resumer's launch-time probe (which queues through a host) takes over.
+  if (owner.runtime === 'codex') {
+    const recheck = hostOf(observeThreadHost, delivery.provider_session_id);
+    if (recheck.hosted !== false) {
+      return { decided: false, outcome: 'deferred', liveness: 'gone', reason: recheck.hosted === true ? 'thread_host_appeared' : 'thread_host_unknown' };
+    }
+  }
   const token = randomBytes(32).toString('hex');
   const endpoint = db.prepare(
     `UPDATE endpoints
         SET state = 'takeover_pending', owner_epoch = owner_epoch + 1, owner_launch_token = ?, updated_at = ?
       WHERE id = ? AND state IN ('idle', 'busy') AND process_generation = ? AND provider_session_id IS ?
         AND owner_epoch = ? AND owner_launch_token IS ?
+        AND owner_process_pid IS ? AND owner_process_start_identity IS ? AND owner_process_group_id IS ?
+        AND owner_process_capture_source IS ? AND owner_process_generation IS ?
         AND EXISTS (
           SELECT 1 FROM deliveries
            WHERE id = ? AND read_at IS NULL AND admitted_at IS NULL AND takeover_decided_at IS NULL
@@ -165,10 +216,13 @@ function decideAvailabilityTakeover(db, delivery, timestamp) {
         )`,
   ).run(
     token, timestamp, delivery.endpoint_id, delivery.process_generation, delivery.provider_session_id,
-    delivery.owner_epoch, delivery.owner_launch_token, delivery.delivery_id,
+    delivery.owner_epoch, delivery.owner_launch_token,
+    owner.owner_process_pid, owner.owner_process_start_identity, owner.owner_process_group_id,
+    owner.owner_process_capture_source, owner.owner_process_generation,
+    delivery.delivery_id,
     delivery.process_generation, delivery.provider_session_id, delivery.owner_epoch, delivery.owner_launch_token,
   );
-  if (endpoint.changes !== 1) return false;
+  if (endpoint.changes !== 1) return { decided: false, outcome: 'deferred', liveness: 'gone', reason: 'owner_changed' };
   const decided = db.prepare(
     `UPDATE deliveries SET takeover_decided_at = ?, updated_at = ?
       WHERE id = ? AND read_at IS NULL AND admitted_at IS NULL AND takeover_decided_at IS NULL
@@ -178,7 +232,7 @@ function decideAvailabilityTakeover(db, delivery, timestamp) {
     timestamp, timestamp, delivery.delivery_id, delivery.process_generation, delivery.provider_session_id,
     delivery.owner_epoch, delivery.owner_launch_token,
   );
-  if (decided.changes !== 1) return false;
+  if (decided.changes !== 1) return { decided: false, outcome: 'deferred', liveness: 'gone', reason: 'delivery_changed' };
   db.prepare(
     `INSERT INTO resume_requests
       (id, endpoint_id, principal_id, session_id, conversation_id, message_id, reason, authority_reference, state, created_at, updated_at)
@@ -187,7 +241,15 @@ function decideAvailabilityTakeover(db, delivery, timestamp) {
     generateId('resume_request'), delivery.endpoint_id, delivery.principal_id, delivery.provider_session_id,
     delivery.conversation_id, delivery.message_id, delivery.authority_reference, timestamp, timestamp,
   );
-  return true;
+  return { decided: true, outcome: 'takeover', liveness: 'gone', reason: null };
+}
+
+function hostOf(observeThreadHost, sessionId) {
+  try {
+    return observeThreadHost({ sessionId });
+  } catch (error) {
+    return { hosted: null, reason: 'observation_error', error: error.message };
+  }
 }
 
 // Item 48: a delivery whose admission owner has not received it within 60 s
@@ -230,12 +292,59 @@ function logAvailabilityTakeoverDecided(context, delivery, nowMs) {
   });
 }
 
+// One `takeover.decision` per owner-liveness outcome: a takeover is info; a
+// defer is debug and logs once per distinct (liveness, reason) per delivery,
+// because a live owner defers every 1 s pass until it receives or exits.
+const loggedOwnerGuardDeferrals = new WeakMap();
+
+function logTakeoverDecision(context, delivery, decision) {
+  if (decision.outcome === 'already_requested') return;
+  const deferred = decision.outcome === 'deferred';
+  let logged = loggedOwnerGuardDeferrals.get(context);
+  if (!logged) {
+    logged = new Map();
+    loggedOwnerGuardDeferrals.set(context, logged);
+  }
+  const key = `${decision.liveness}:${decision.reason}`;
+  if (deferred) {
+    if (logged.get(delivery.delivery_id) === key) return;
+    logged.set(delivery.delivery_id, key);
+  } else {
+    logged.delete(delivery.delivery_id);
+  }
+  context.logger?.[deferred ? 'debug' : 'info']?.({
+    event: 'takeover.decision',
+    params: { delivery_id: delivery.delivery_id, endpoint_id: delivery.endpoint_id, message_id: delivery.message_id },
+    result: { liveness: decision.liveness, outcome: decision.outcome, ...(decision.reason ? { reason: decision.reason } : {}), ...(decision.error ? { error: decision.error } : {}) },
+    status: 'ok',
+  });
+}
+
 // Deliveries that left the candidate set (received, or decided) no longer
 // need their deferral remembered.
 function pruneAdmissionDeferrals(context, candidateIds) {
-  const logged = loggedAdmissionDeferrals.get(context);
-  if (!logged || logged.size === 0) return;
-  for (const deliveryId of logged.keys()) if (!candidateIds.has(deliveryId)) logged.delete(deliveryId);
+  for (const logged of [loggedAdmissionDeferrals.get(context), loggedOwnerGuardDeferrals.get(context)]) {
+    if (!logged || logged.size === 0) continue;
+    for (const deliveryId of logged.keys()) if (!candidateIds.has(deliveryId)) logged.delete(deliveryId);
+  }
+}
+
+function isBackgroundWaitOwned(listener) {
+  return Boolean(listener.background_wait_at)
+    && listener.endpoint_process_generation === listener.process_generation
+    && listener.owner_process_exited_at === null;
+}
+
+function logBackgroundWaitOwnerLoss(context, listener) {
+  context.logger?.info?.({
+    event: 'listener.background_wait_owner_lost',
+    params: { listener_id: listener.id, endpoint_id: listener.endpoint_id, process_generation: listener.process_generation },
+    result: {
+      endpoint_process_generation: listener.endpoint_process_generation,
+      owner_exited: listener.owner_process_exited_at !== null,
+    },
+    status: 'ended',
+  });
 }
 
 /**
@@ -243,7 +352,7 @@ function pruneAdmissionDeferrals(context, candidateIds) {
  * socketless. Runtime only changes rows whose durable deadline has elapsed
  * (or whose connection was reported by the event bus).
  */
-export function runListenerReconciliation(context, { now = new Date(), startup = false, disconnected = [] } = {}) {
+export function runListenerReconciliation(context, { now = new Date(), startup = false, disconnected = [], observeProcess = observeRetirementProcess, observeThreadHost = threadHostObserverFor(context) } = {}) {
   const timestamp = now.toISOString();
   const nowMs = now.getTime();
   const disconnectedKeys = new Set(disconnected.map(({ listenerId, listenerGeneration }) => `${listenerId}\u0000${listenerGeneration}`));
@@ -251,16 +360,22 @@ export function runListenerReconciliation(context, { now = new Date(), startup =
 
   withTransaction(context.db, () => {
     const listeners = context.db
-      .prepare(`SELECT l.*, rw.state AS reply_wait_state, e.tachyon_armed_process_generation
+      .prepare(`SELECT l.*, rw.state AS reply_wait_state, e.tachyon_armed_process_generation,
+                       e.process_generation AS endpoint_process_generation, e.owner_process_exited_at
                   FROM listeners l JOIN endpoints e ON e.id = l.endpoint_id
                   LEFT JOIN reply_waits rw ON rw.id = l.reply_wait_id
                  WHERE l.state IN ('parked', 'attached', 'waking') ORDER BY l.created_at ASC, l.id ASC`)
       .all();
     for (const listener of listeners) {
-      if (!isTachyonArmedForGeneration(listener, listener.process_generation)) {
-        summary.ended += endUnsupportedTachyonListeners(context.db, {
+      // A background-wait listener is never armed (headless sessions cannot
+      // be), so only its current, still-owned generation skips this sweep;
+      // deadline, busy-turn and owner-loss endings still bound it.
+      if (!isBackgroundWaitOwned(listener) && !isTachyonArmedForGeneration(listener, listener.process_generation)) {
+        const ended = endUnsupportedTachyonListeners(context.db, {
           endpointId: listener.endpoint_id, processGeneration: listener.process_generation, now: timestamp,
         });
+        summary.ended += ended;
+        if (ended > 0 && listener.background_wait_at) logBackgroundWaitOwnerLoss(context, listener);
         continue;
       }
       const connectionLost = startup || disconnectedKeys.has(`${listener.id}\u0000${listener.listener_generation}`);
@@ -325,10 +440,16 @@ export function runListenerReconciliation(context, { now = new Date(), startup =
         if (inFlight) {
           deferAvailabilityTakeover(context, delivery, inFlight, nowMs);
           summary.takeover_deferrals += 1;
-        } else if (decideAvailabilityTakeover(context.db, delivery, timestamp)) {
-          summary.takeovers += 1;
-          logAvailabilityTakeoverDecided(context, delivery, nowMs);
-          candidateIds.delete(delivery.delivery_id);
+        } else {
+          const decision = decideAvailabilityTakeover(context.db, delivery, timestamp, observeProcess, observeThreadHost);
+          logTakeoverDecision(context, delivery, decision);
+          if (decision.decided) {
+            summary.takeovers += 1;
+            logAvailabilityTakeoverDecided(context, delivery, nowMs);
+            candidateIds.delete(delivery.delivery_id);
+          } else if (decision.outcome === 'deferred') {
+            summary.takeover_deferrals += 1;
+          }
         }
       } else if (nowMs >= openedAt + 30_000 && !delivery.retry_armed_at) {
         if (armAdmissionRetry(context, delivery, timestamp)) summary.retries += 1;

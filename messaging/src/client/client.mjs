@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import net from 'node:net';
 import path from 'node:path';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 import {
   CHANNEL_REPLY_PUBLISH_OPERATION,
@@ -27,17 +27,20 @@ function socketPathFor(stateRoot) {
 }
 
 /**
- * Writes a fresh single-use admin bootstrap nonce at the documented fixed
- * path <state-root>/admin/bootstrap.nonce (the architecture contract §4,
- * the state ownership contract "State root layout"). This is a filesystem
- * operation, not a protocol call: it is the client's proof that it has
- * OS-level write access to the 0700 admin/ directory. Does not import
- * src/daemon/ — the fixed path is duplicated here deliberately to respect
+ * Writes a fresh single-use admin bootstrap nonce into its own file,
+ * <state-root>/admin/nonce-<sha256 hex of the nonce>, so concurrent admin
+ * clients cannot overwrite or consume each other's proof (ac-jfv.4). The
+ * daemon still accepts the older fixed path admin/bootstrap.nonce (the
+ * architecture contract §4, the state ownership contract "State root
+ * layout"). This is a filesystem operation, not a protocol call: it is the
+ * client's proof that it has OS-level write access to the 0700 admin/
+ * directory. Does not import src/daemon/ — the file name rule is
+ * duplicated from src/daemon/auth.mjs adminNonceFile deliberately to respect
  * the client/daemon import boundary (the architecture contract §5).
  */
 export function writeAdminNonce(stateRoot) {
-  const noncePath = path.join(stateRoot, 'admin', 'bootstrap.nonce');
   const nonce = randomBytes(32).toString('hex');
+  const noncePath = path.join(stateRoot, 'admin', `nonce-${createHash('sha256').update(nonce).digest('hex')}`);
   fs.writeFileSync(noncePath, nonce, { mode: 0o600 });
   fs.chmodSync(noncePath, 0o600);
   return nonce;
@@ -293,6 +296,16 @@ class TightbeamClient {
   /** `inbox.subscribe` — resolves with `{ subscribed, principal_id }`; events arrive via on('event'). */
   subscribe(payload) {
     return this.request('inbox.subscribe', payload);
+  }
+
+  /** `host.subscribe` — resolves with `{ subscribed }`; `host.wake_requested` events arrive via on('event'). */
+  hostSubscribe() {
+    return this.request('host.subscribe', {});
+  }
+
+  /** `host.wake.result` — payload `{ wake_id, outcome, detail? }`; resolves with `{ recorded }`. */
+  hostWakeResult(payload) {
+    return this.request('host.wake.result', payload);
   }
 
   /** `message.read` — resolves with the message; marks it read. */

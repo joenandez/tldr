@@ -19,9 +19,27 @@ _TIGHTBEAM_FRONT_DOOR=tldr-agents
 _NEWLINE='
 '
 
+# TIGHTBEAM_PLUTIL is a test seam; macOS keeps /usr/bin/plutil. Without it
+# (Linux, WSL) one node process reads the dotted path as plutil's raw output does.
 payload_field() {
-  [ -x /usr/bin/plutil ] || return 0
-  printf '%s' "$1" | /usr/bin/plutil -extract "$2" raw -o - - 2>/dev/null || true
+  _plutil=${TIGHTBEAM_PLUTIL:-/usr/bin/plutil}
+  if [ -x "${_plutil}" ]; then
+    printf '%s' "$1" | "${_plutil}" -extract "$2" raw -o - - 2>/dev/null || true
+  else
+    printf '%s' "$1" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{let v=JSON.parse(s);for(const k of process.argv[1].split("."))v=v?.[k];if(["string","number","boolean"].includes(typeof v))process.stdout.write(String(v))}catch{}})' "$2" 2>/dev/null || true
+  fi
+}
+
+# Codex never fires PostToolUse for a background terminal, so this hook records
+# each Codex parent Bash call in pending-bg for the Stop hold, as one empty file
+# made in shell: no Node starts for it. "turn_id" is a key only Codex sends: a
+# Claude call pays one string match and nothing more.
+codex_parent_bash() {
+  case "${payload}" in
+    *'"agent_id"'*) return 1 ;;
+    *'"turn_id"'*) [ "$(payload_field "${payload}" tool_name)" = Bash ] ;;
+    *) return 1 ;;
+  esac
 }
 
 # The physical directory of $1, or nothing. A subshell, so it runs only on
@@ -130,6 +148,11 @@ main() {
   if [ -n "${action_id}" ] && [ -d "${dir}" ]; then
     (umask 077; printf '%s\n' "${action_id}" > "${action}.$$") && /bin/mv -f "${action}.$$" "${action}" || /bin/rm -f "${action}.$$"
   fi
+  # The item name comes from the payload, so it gets the session id's guard.
+  case "${action_id}" in
+    */*|*..*|.*|"") ;;
+    *) codex_parent_bash && track_bash=1 ;;
+  esac
 
   # The CLI is the package's own launcher. Every installed hook command
   # names it, and the front door sets it before running this script; with
@@ -191,7 +214,20 @@ main() {
   return 0
 }
 
+# `true`, not `:`: a failed redirection on a special builtin exits sh.
+track_codex_bash() {
+  [ -n "${track_bash:-}" ] || return 0
+  umask 077
+  { /bin/mkdir -p "${dir}/pending-bg" && true > "${dir}/pending-bg/bash-${action_id}"; } 2>/dev/null ||
+    printf 'tightbeam: could not create background item bash-%s\n' "${action_id}" >&2
+}
+
 # Drain errors still never fail a tool boundary. A deadline refusal is the
 # deliberate exception: exit 2 is the runtime's block contract.
+track_bash=""
 main "$@"
-exit $?
+status=$?
+# Tracked only once the call is allowed: a blocked call never runs, so no
+# PostToolUse would ever clear its item.
+[ "${status}" -ne 0 ] || track_codex_bash
+exit "${status}"

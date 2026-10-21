@@ -13,6 +13,8 @@ export function createEventBus() {
   // it proves only that one fenced listener is attached to one connection.
   const listenerConnections = new Map();
   const disconnectedListeners = new Map();
+  // Session hosts (session_hosts.v1): one live connection set per host app id.
+  const hostConnectionsByApp = new Map();
 
   const listenerKey = (listenerId, listenerGeneration) => `${listenerId}\u0000${listenerGeneration}`;
 
@@ -26,8 +28,41 @@ export function createEventBus() {
       subscribers.add(connection);
     },
 
+    subscribeHost(appId, connection) {
+      let connections = hostConnectionsByApp.get(appId);
+      if (!connections) {
+        connections = new Set();
+        hostConnectionsByApp.set(appId, connections);
+      }
+      connections.add(connection);
+    },
+
+    /** Drops every host connection of `appId` (its credential was replaced). */
+    unsubscribeHost(appId) {
+      hostConnectionsByApp.delete(appId);
+    },
+
+    hasHost(appId) {
+      return (hostConnectionsByApp.get(appId)?.size ?? 0) > 0;
+    },
+
+    /** Pushes to every connection subscribed as host `appId`; returns the delivered count. */
+    publishHost(appId, eventName, payload, logger) {
+      let delivered = 0;
+      for (const connection of hostConnectionsByApp.get(appId) ?? []) {
+        try {
+          connection.pushEvent(eventName, payload);
+          delivered += 1;
+        } catch (err) {
+          logger?.warn?.({ event: 'host_event_push_failed', app_id: appId, event_name: eventName, message: err.message });
+        }
+      }
+      return delivered;
+    },
+
     unsubscribeConnection(connection) {
       for (const subscribers of subscribersByPrincipal.values()) subscribers.delete(connection);
+      for (const connections of hostConnectionsByApp.values()) connections.delete(connection);
       for (const [key, attached] of listenerConnections) {
         if (attached === connection) {
           listenerConnections.delete(key);

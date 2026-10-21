@@ -27,9 +27,17 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tldr-agents\" messaging hook stop",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tldr-agents\" messaging hook stop --handoff",
+            "timeout": 60,
+            "_tightbeam": "tightbeam-managed:runtime-hooks-v3"
+          },
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tldr-agents\" messaging hook wake-listen",
+            "async": true,
+            "asyncRewake": true,
             "timeout": 14460,
-            "_tightbeam": "tightbeam-managed:runtime-hooks-v2"
+            "_tightbeam": "tightbeam-managed:runtime-hooks-v3"
           }
         ]
       }

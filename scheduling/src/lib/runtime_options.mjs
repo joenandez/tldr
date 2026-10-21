@@ -25,7 +25,17 @@ export const RUNTIME_OPTION_FIELDS = Object.freeze([
   "permission_mode",
 ]);
 
-export const ASSIGNMENTS_CONTRACT_VERSION = "1.1";
+export const ASSIGNMENTS_CONTRACT_VERSION = "1.2";
+export const ASSIGNMENTS_CAPABILITIES = Object.freeze([
+  "assignments.list.all-scopes",
+  "assignments.runs.all-scopes",
+  "assignments.all-scopes.partial",
+  "assignments.skill.read",
+  "assignments.run-contract.v1",
+  "assignments.completion-delivery",
+  "assignments.logs.json",
+  "tasks.events.daemon",
+]);
 
 export const RUNTIME_OPTION_FLAGS = Object.freeze({
   model: "model",
@@ -153,7 +163,11 @@ export function runtimeOptionCapabilities() {
     const right = `${b.provider} ${b.runtime || ""}`;
     return left < right ? -1 : left > right ? 1 : 0;
   });
-  return { contract_version: ASSIGNMENTS_CONTRACT_VERSION, providers: entries };
+  return {
+    contract_version: ASSIGNMENTS_CONTRACT_VERSION,
+    providers: entries,
+    capabilities: ASSIGNMENTS_CAPABILITIES,
+  };
 }
 
 // Reads the three flags. `null` (the string) clears a stored value, matching the

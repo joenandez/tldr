@@ -10,6 +10,8 @@
 //     pending-inject.jsonl retired compatibility artifact; never a body
 //     inject-quarantine.jsonl retired compatibility artifact
 //     endpoint.json        the session's registered identity (a cache)
+//     pending-bg/          one empty file per open Codex background item:
+//                          bash-<tool_use_id>, agent-<agent_id>
 //
 // Ported from helm/hooks/helm-prefetch-session-inbox.sh:29-33, whose
 // per-session directory under ~/.helm/sessions/<id>/ carried the former
@@ -52,5 +54,6 @@ export function sessionPaths(stateRoot, sessionId) {
     action: path.join(dir, 'current-action-id'),
     endpoint: path.join(dir, 'endpoint.json'),
     recovery: path.join(dir, 'recovery-context.json'),
+    pendingBg: path.join(dir, 'pending-bg'),
   };
 }

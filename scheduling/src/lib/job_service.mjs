@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
-import { isAbsolute, join, resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
 import {
   parseCron,
   parseEvery,
@@ -11,6 +11,10 @@ import { appendActivityEvent } from "./activity_stream.mjs";
 import { bypassesNetworkPrecondition } from "./network_precondition_policy.mjs";
 import { isSafeJobId } from "./job_id.mjs";
 import { normalizeJobRuntimeFields } from "./job_runtime_fields.mjs";
+import {
+  carryRuntimeState,
+  mergeJobDefinition,
+} from "./job_reregistration.mjs";
 
 function resolveSource(opts) {
   return opts?.source || "cli";
@@ -31,6 +35,48 @@ const VALID_PROVIDERS = new Set([
   "hermes",
 ]);
 const VALID_ACADEMY_RUNTIMES = new Set(["claude", "codex"]);
+
+// An agent that creates a job from inside its Academy home would otherwise get
+// plain `claude -p` or `codex`: its hooks and session registration never load.
+// `requested` is the provider the caller named (undefined/null for none). Only
+// none, claude and codex are rewritten; the requested runtime wins over
+// agent.yaml. Returns the provider fields to merge in, or null when env, cwd or
+// provider say leave the job alone.
+export function academyProviderDefault(
+  cwd,
+  requested = null,
+  env = process.env,
+) {
+  if (requested !== null && requested !== "claude" && requested !== "codex")
+    return null;
+  const agent = env.ACADEMY_AGENT_NAME;
+  const dir = env.ACADEMY_AGENT_DIR;
+  if (!agent || !dir) return null;
+  let realCwd;
+  try {
+    realCwd = realpathSync(cwd);
+    const rel = relative(realpathSync(dir), realCwd);
+    if (rel.startsWith("..") || isAbsolute(rel)) return null;
+  } catch {
+    return null;
+  }
+  let yaml = "";
+  try {
+    yaml = readFileSync(join(dir, "agent.yaml"), "utf8");
+  } catch {
+    // no agent.yaml: claude is the default runtime
+  }
+  const runtime =
+    requested ??
+    (/^runtime:\s*["']?codex["']?\s*(#.*)?$/m.test(yaml) ? "codex" : "claude");
+  process.stderr.write(
+    `${JSON.stringify({ ts: new Date().toISOString(), level: "info", event: "academy_provider_defaulted", params: { agent, runtime, cwd: realCwd, from: requested ?? "none" } })}\n`,
+  );
+  return {
+    provider: "academy",
+    provider_config: { academy_agent: agent, academy_runtime: runtime },
+  };
+}
 function nowDate() {
   return process.env.HELM_NOW ? new Date(process.env.HELM_NOW) : new Date();
 }
@@ -816,48 +862,63 @@ export async function createJob(scope, input, opts = {}) {
 }
 
 export async function scheduleJob(scope, input, opts = {}) {
-  const job = ensureMutatedJob(scope, input);
+  // Merge mode validates against the merged definition, which needs the
+  // existing job; plain schedule/replace validates the input up front.
+  const job = opts.merge ? null : ensureMutatedJob(scope, input);
+  const jobId = job ? job.id : input?.id;
   const owner = scopeOwner("schedule");
   const source = resolveSource(opts);
   let emitType = null;
   let before = null;
+  let written = job;
   const result = await mutateJobs(scope, owner, async (jobs) => {
-    const idx = jobs.findIndex((entry) => entry.id === job.id);
+    const idx = jobs.findIndex((entry) => entry.id === jobId);
     if (idx >= 0) {
-      if (!opts.replace) {
+      if (!opts.replace && !opts.merge) {
         throw Object.assign(
-          new Error(`job '${job.id}' already exists (use --replace)`),
+          new Error(`job '${jobId}' already exists (use --replace or --merge)`),
           { code: "duplicate_id", exitCode: 2 },
         );
       }
-      before = decorateJob(jobs[idx]);
-      job.meta.created_at = jobs[idx].meta.created_at;
-      job.meta.updated_at = nowIso();
-      jobs[idx] = job;
+      const existing = jobs[idx];
+      before = decorateJob(existing);
+      const next = opts.merge
+        ? ensureMutatedJob(scope, mergeJobDefinition(existing, input))
+        : job;
+      carryRuntimeState(existing, next, input, { merge: Boolean(opts.merge) });
+      next.meta.created_at = existing.meta.created_at;
+      next.meta.updated_at = nowIso();
+      jobs[idx] = next;
+      written = next;
       emitType = "job_updated";
-      return { action: "updated", job: decorateJob(job) };
+      return {
+        action: "updated",
+        mode: opts.merge ? "merge" : "replace",
+        job: decorateJob(next),
+      };
     }
-    jobs.push(job);
+    written = job || ensureMutatedJob(scope, input);
+    jobs.push(written);
     emitType = "job_created";
-    return { action: "created", job: decorateJob(job) };
+    return { action: "created", job: decorateJob(written) };
   });
   if (result.ok && emitType === "job_created") {
     appendActivityEvent({
       type: "job_created",
       scope_id: scope.scope_id,
       cwd: scope.cwd,
-      job_id: job.id,
+      job_id: written.id,
       source,
-      data: { job: decorateJob(job) },
+      data: { job: decorateJob(written) },
     });
   } else if (result.ok && emitType === "job_updated") {
     appendActivityEvent({
       type: "job_updated",
       scope_id: scope.scope_id,
       cwd: scope.cwd,
-      job_id: job.id,
+      job_id: written.id,
       source,
-      data: { before, after: decorateJob(job) },
+      data: { before, after: decorateJob(written) },
     });
   }
   return result;

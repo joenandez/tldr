@@ -8,6 +8,7 @@
 #   tldr-agents messaging <args...>   -> tightbeam <args...>
 #   tldr-agents tasks <args...>       -> helm-tasks <args...>
 #   tldr-agents assignments <args...> -> helm-assignments <args...>
+#   tldr-agents drafts <args...>      -> email-drafts <args...>
 #
 # The component launchers live in <package root>/libexec, not bin/: Claude
 # Code adds each enabled plugin's bin/ to its Bash PATH, so bin/ holds only
@@ -66,24 +67,25 @@ usage_error() {
 registry() {
   /bin/cat <<'REGISTRY'
 area	lifecycle	tldr-agent	registry	Set up, check, configure, repair, or remove tldr; (the setup skill).
-verb	lifecycle	setup	registry	Install tldr; and continue onboarding.
+verb	lifecycle	setup	registry	Connect email in the signed tldr; app; messaging and tasks work without it.
 usage	lifecycle	setup	setup [--json] [--force-downgrade]
-verb	lifecycle	status	registry	Check installation and messaging readiness.
+verb	lifecycle	status	registry	Show messaging, scheduled tasks, and email status.
 usage	lifecycle	status	status [--json]
-verb	lifecycle	configure	registry	Open the installed app to change owner or replace the API key.
+verb	lifecycle	configure	registry	Open the app to change owner or replace the API key, or disconnect email.
 usage	lifecycle	configure	configure [--json]
-verb	lifecycle	repair	registry	Repair the installation and messaging setup.
+verb	lifecycle	repair	registry	Repair messaging, scheduled tasks, or email; each names its own fix.
 usage	lifecycle	repair	repair [--json] [--force-downgrade]
-verb	lifecycle	uninstall	registry	Open the app for uninstall confirmation.
+verb	lifecycle	uninstall	registry	Open the app to confirm removing tldr; from this Mac.
 usage	lifecycle	uninstall	uninstall [--json]
 verb	lifecycle	version	registry	Print the active public or local development version.
 usage	lifecycle	version	version [--json]
 area	messaging	tightbeam	registry	Messages between agent sessions and with the user (Tightbeam; the messaging skill).
 verb	messaging	agent send	component	Send a message when no response or action is expected.
-usage	messaging	agent send	agent send --to agent:<ref> --subject <text> --reason <text> (--body <text> | --body-file <path>) [--no-reply]
-usage	messaging	agent send	agent send --to user --subject <text> --reason <text> (--body <text> | --body-file <path>) [--channel <selector>|all] [--no-reply]
+usage	messaging	agent send	agent send --to session:<id>|agent:<runtime>:<cwd>|new:<runtime>:<cwd> --subject <text> --reason <text> (--body <text> | --body-file <path>) [--no-reply]
+usage	messaging	agent send	agent send --to user --subject <text> --reason <text> (--body <text> | --body-file <path>) [--channel <selector>|all] [--no-reply] [--wait-delivery <duration>]
+usage	messaging	agent send	agent send --thread <handle> (--body <text> | --body-file <path>)
 verb	messaging	agent request	component	Open tracked work with another agent or yourself.
-usage	messaging	agent request	agent request --to self|agent:<ref> --subject <text> --reason <text> (--body <text> | --body-file <path>) --completion-mode <message_committed|delivery_confirmed> [--notify user] [--channel <selector>]
+usage	messaging	agent request	agent request --to self|session:<id>|agent:<runtime>:<cwd>|new:<runtime>:<cwd> --subject <text> --reason <text> (--body <text> | --body-file <path>) --completion-mode <message_committed|delivery_confirmed> [--notify user] [--channel <selector>]
 verb	messaging	agent reply	component	Reply to a received message, including a user message.
 usage	messaging	agent reply	agent reply --message <message_id> (--body <text> | --body-file <path>) [--channel <selector>] [--no-reply] [--wait-delivery <duration>]
 verb	messaging	agent receive	component	Receive the exact body of one notified message.
@@ -93,19 +95,29 @@ usage	messaging	agent ack	agent ack --work <work_id> (--body <text> | --body-fil
 verb	messaging	agent update	component	Report progress on tracked work.
 usage	messaging	agent update	agent update --work <work_id> (--body <text> | --body-file <path>)
 verb	messaging	agent delegate	component	Offer tracked work to another agent.
-usage	messaging	agent delegate	agent delegate --work <work_id> --to agent:<ref> (--body <text> | --body-file <path>)
+usage	messaging	agent delegate	agent delegate --work <work_id> --to session:<id>|agent:<runtime>:<cwd>|new:<runtime>:<cwd> (--body <text> | --body-file <path>)
 verb	messaging	agent accept	component	Accept delegated work.
 usage	messaging	agent accept	agent accept --work <delegation_id> (--body <text> | --body-file <path>)
 verb	messaging	agent decline	component	Decline delegated work.
 usage	messaging	agent decline	agent decline --work <delegation_id> (--body <text> | --body-file <path>)
 verb	messaging	agent complete	component	Finish tracked work with its result.
 usage	messaging	agent complete	agent complete --work <work_id> (--body <text> | --body-file <path>) [--notify user] [--wait-delivery <duration>]
-verb	messaging	agent cancel	component	Cancel tracked work.
+verb	messaging	agent cancel	component	Cancel work you requested or hold; downstream holders are told.
 usage	messaging	agent cancel	agent cancel --work <work_id> --reason <text>
 verb	messaging	agent inbox	component	List received messages.
 usage	messaging	agent inbox	agent inbox [--unread]
-verb	messaging	agent status	component	Show tracked work or outbound delivery status.
+verb	messaging	agent status	component	Show work state, holder, who it waits on, and delivery step, or outbound delivery status.
 usage	messaging	agent status	agent status (--work <work_id>|--message <message_id>) [--wait-delivery <duration>]
+verb	messaging	agent sessions	component	List live or resumable agent sessions, this folder first.
+usage	messaging	agent sessions	agent sessions [--here | --cwd <path>] [--runtime <runtime>] [--state <busy|idle|stopped|ended|unknown>] [--all]
+verb	messaging	agent threads	component	List the threads you started or take part in, and who each is waiting on.
+usage	messaging	agent threads	agent threads [--all] [--waiting-on me|them]
+verb	messaging	agent thread	component	Show one thread's messages and work events, read-only.
+usage	messaging	agent thread	agent thread --thread <handle> [--limit <n>] [--since <time>]
+verb	messaging	recovery retry	component	Retry stranded work on an explicitly selected endpoint.
+usage	messaging	recovery retry	recovery retry --root <obligation_id> --generation <n> --target-endpoint <id> --target-process-generation <n> --key <k>
+verb	messaging	recovery switch	component	Switch work to an explicitly selected endpoint.
+usage	messaging	recovery switch	recovery switch --root <obligation_id> --generation <n> --target-endpoint <id> --target-process-generation <n> --key <k>
 verb	messaging	doctor	registry	Check setup and connection; every failure names its own fix.
 usage	messaging	doctor	doctor
 verb	messaging	logs	registry	Print the end of the Tightbeam daemon log.
@@ -113,8 +125,10 @@ usage	messaging	logs	logs [--lines <n>]
 verb	messaging	bootstrap	registry	Set up or restart Tightbeam; safe to re-run.
 usage	messaging	bootstrap	bootstrap [--app-name <name>] [--authority <name>] [--force]
 verb	messaging	hook	registry	Run one session hook with its payload on stdin; the plugin's hooks call this.
-usage	messaging	hook	hook session-start|user-prompt-submit|stop [--runtime <id>]
+usage	messaging	hook	hook session-start|user-prompt-submit|stop|wake-listen [--runtime <id>]
+usage	messaging	hook	hook stop --handoff [--runtime <id>]
 usage	messaging	hook	hook pre-tool-use|post-tool-use
+usage	messaging	hook	hook subagent-start|subagent-stop [--runtime <id>]
 area	tasks	helm-tasks	component	Scheduled jobs, the scheduler daemon, history, and logs (Helm; the tasks skill).
 verb	tasks	schedule	component	Create runnable scheduled work and activate the workspace runtime.
 verb	tasks	create	component	Create a stored job and register its scope into the dispatch rotation.
@@ -145,7 +159,7 @@ area	assignments	helm-assignments	registry	Skill-backed recurring agent work (He
 verb	assignments	create	registry	Register a new skill-backed assignment.
 usage	assignments	create	create --name <name> [--description <text>] (--in <dur>|--at <iso>|--cron <expr>|--every <dur>) --provider <provider> --permission-mode <mode> --completion-delivery <activity|notify|conversation> [--skill <path>] [--model <model>] [--reasoning-effort <effort>] [--cwd <path>] [--activate] [--pretty]
 verb	assignments	list	registry	List assignments.
-usage	assignments	list	list [--status active|disabled|archived|all] [--all-scopes [--with-terminal-runs]] [--cwd <path>] [--pretty]
+usage	assignments	list	list [--status active|disabled|archived|all] [--all-scopes [--with-terminal-runs] [--partial]] [--cwd <path>] [--pretty]
 verb	assignments	show	registry	Show full detail for one assignment.
 usage	assignments	show	show <id-or-name> [--cwd <path>] [--pretty]
 verb	assignments	path	registry	Print the backing-skill path.
@@ -163,13 +177,24 @@ usage	assignments	unarchive	unarchive <id-or-name> [--pretty]
 verb	assignments	run	registry	Trigger an immediate direct run.
 usage	assignments	run	run <id-or-name> [--pretty]
 verb	assignments	runs	registry	List run history for an assignment.
-usage	assignments	runs	runs <id-or-name> [--pretty]
+usage	assignments	runs	runs [<id-or-name> | --all-scopes [--partial]] [--pretty]
 verb	assignments	completion	registry	Show the completion record for one run.
 usage	assignments	completion	completion <run-id> [--pretty]
 verb	assignments	runtime-options	registry	List accepted runtime options per provider.
 usage	assignments	runtime-options	runtime-options [--pretty]
 verb	assignments	logs	registry	Print the logs of one run.
-usage	assignments	logs	logs <run-id>
+usage	assignments	logs	logs <run-id> [--json]
+area	drafts	email-drafts	registry	Email requests kept for review until email is connected; nothing sends without confirm.
+verb	drafts	create	registry	Keep a blocked email request as a private, expiring draft.
+usage	drafts	create	create --kind send --subject <text> --body-file <path>|- [--session <ref>]
+usage	drafts	create	create --kind notification --body-file <path>|- [--session <ref>]
+verb	drafts	list	registry	List pending drafts with their recipient, content, or summary.
+usage	drafts	list	list
+verb	drafts	confirm	registry	Send or schedule one reviewed draft, at most once.
+usage	drafts	confirm	confirm --id <draft-id>
+usage	drafts	confirm	confirm --id <draft-id> --job-file <path>|- [--cwd <path>]
+verb	drafts	discard	registry	Close a draft without sending or scheduling anything.
+usage	drafts	discard	discard --id <draft-id>
 REGISTRY
 }
 
@@ -352,7 +377,7 @@ dispatch_help() { # <mode> <area> [words...]
 area_for() { # <word>; prints the area an invocation word selects
   case "$1" in
     setup|status|configure|repair|uninstall|version) printf 'lifecycle\n' ;;
-    messaging|tasks|assignments) printf '%s\n' "$1" ;;
+    messaging|tasks|assignments|drafts) printf '%s\n' "$1" ;;
     *) return 1 ;;
   esac
 }
@@ -362,7 +387,7 @@ area_for() { # <word>; prints the area an invocation word selects
 if [ "$#" -ge 3 ] && [ "$1" = messaging ] && [ "$2" = hook ]; then
   event=$3
   case "$event" in
-    session-start|user-prompt-submit|stop|pre-tool-use|post-tool-use)
+    session-start|user-prompt-submit|stop|wake-listen|pre-tool-use|post-tool-use|subagent-start|subagent-stop)
       if mode=$(help_after 3 "$@"); then dispatch_help "$mode" messaging hook; fi
       shift 3
       case "$event" in

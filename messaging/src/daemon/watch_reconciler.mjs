@@ -29,13 +29,16 @@
 
 import { TightbeamError } from '../protocol/envelope.mjs';
 import { withTransaction } from './db.mjs';
-import { createParentResultDelivery, pushLiveDeliveryEvents } from './ops/message_shared.mjs';
+import { createParentResultDelivery, newestLineageEndpointId, pushLiveDeliveryEvents } from './ops/message_shared.mjs';
 
 // A memory bound on one SELECT, mirroring the resumer's candidate bound: it
 // caps how many rows a single pass materialises and nothing is withheld from
 // execution by it — every candidate returned is decided in this pass, and a
 // pass behind the bound simply continues on the next tick.
 export const WATCH_SCAN_LIMIT = 1000;
+
+/** Typed route of the expiry wake to the offerer; it re-delivers the original offer message. */
+export const OFFER_EXPIRED_ROUTE_REASON = 'handoff.acceptance.expired';
 
 /**
  * Indexes every committed handoff.offer audit row ONCE: delegation id →
@@ -118,14 +121,16 @@ function decideExpiredWatch(context, { watchId, delegationId, now, offerIndex })
     // is gone or closed (ifParentExists).
     const delegation = db.prepare('SELECT id, conversation_id, accountable_principal_id, parent_id FROM obligations WHERE id = ?').get(delegationId);
     const parent = db.prepare('SELECT custodian_endpoint_id FROM obligations WHERE id = ?').get(delegation.parent_id);
+    // A replaced parent custodian is reached through its newest replacement.
+    const parentEndpointId = newestLineageEndpointId(db, parent?.custodian_endpoint_id);
     const offerMessageId = offerIndex.get(delegationId);
     if (offerMessageId === undefined) throw missingOfferAuditError(delegationId);
     const { liveDeliveries } = createParentResultDelivery(db, {
       conversationId: delegation.conversation_id,
       messageId: offerMessageId,
       senderPrincipalId: delegation.accountable_principal_id,
-      parentEndpointId: parent?.custodian_endpoint_id,
-      routeReason: 'handoff.acceptance.expired',
+      parentEndpointId,
+      routeReason: OFFER_EXPIRED_ROUTE_REASON,
       sourceObligationId: delegationId,
       eventBus: context.eventBus,
       stateRoot: context.stateRoot,
@@ -135,7 +140,7 @@ function decideExpiredWatch(context, { watchId, delegationId, now, offerIndex })
 
     // Exactly-once evidence: the watch references the single delivery row
     // that reports its expiry (NULL when no routable parent remains).
-    const parentDeliveryId = db.prepare('SELECT id FROM deliveries WHERE message_id = ? AND endpoint_id = ?').get(offerMessageId, parent?.custodian_endpoint_id)?.id ?? null;
+    const parentDeliveryId = db.prepare('SELECT id FROM deliveries WHERE message_id = ? AND endpoint_id = ?').get(offerMessageId, parentEndpointId)?.id ?? null;
     db.prepare('UPDATE handoff_watches SET parent_delivery_id = ? WHERE id = ?').run(parentDeliveryId, watchId);
 
     context.logger?.info({

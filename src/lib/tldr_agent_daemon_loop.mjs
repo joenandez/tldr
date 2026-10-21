@@ -7,10 +7,14 @@ import {
 } from "./tldr_agent_diagnostics.mjs";
 import {
   DEFAULT_TLDR_AGENT_CHILD_GRACE_MS,
+  DEFAULT_TLDR_AGENT_OUTBOUND_TIMEOUT_MS,
   DEFAULT_TLDR_AGENT_PHASE_TIMEOUT_MS,
 } from "./tldr_agent_daemon_phase_timeouts.mjs";
 import { resolveDaemonCommandScope } from "./tldr_agent_daemon_scope.mjs";
-import { runDaemonMailSequence } from "./daemon_mail_child_phases.mjs";
+import {
+  runDaemonMailSequence,
+  runDaemonOutboundSequence,
+} from "./daemon_mail_child_phases.mjs";
 import { createInboxPollScheduler } from "./daemon_inbox_poll_scheduler.mjs";
 import { helmHome } from "./store.mjs";
 
@@ -148,7 +152,13 @@ export async function runTldrAgentDaemonLoop({
   scope = resolveDaemonCommandScope({ cwd: home, tldrAgentHome: home }),
   homeExists = existsSync,
   runMailSequence = runDaemonMailSequence,
+  runOutboundSequence = runDaemonOutboundSequence,
   maintainDiagnostics = maintainTldrAgentDiagnostics,
+  waitFn = wait,
+  outboundTimeoutMs = Number(
+    process.env.HELM_DAEMON_OUTBOUND_TIMEOUT_MS ||
+      DEFAULT_TLDR_AGENT_OUTBOUND_TIMEOUT_MS,
+  ),
   phaseTimeoutMs = Number(
     process.env.HELM_DAEMON_PHASE_TIMEOUT_MS ||
       DEFAULT_TLDR_AGENT_PHASE_TIMEOUT_MS,
@@ -164,34 +174,104 @@ export async function runTldrAgentDaemonLoop({
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   let lastResults = [];
-  try {
+  const runPhase = (name, fn, timeoutMs) =>
+    runTldrAgentDaemonPhase({ name, fn, timeoutMs });
+  const sleepInterval = () => waitFn(Math.max(1, Number(intervalSec)) * 1000);
+  // Each lane waits only on its own run so a hung inbound poll never delays outbound sends.
+  const inboundLane = async () => {
+    try {
+      do {
+        // eslint-disable-next-line no-await-in-loop -- one ordered mail lifecycle owns each inbound tick.
+        const sequence = await runMailSequence({
+          runPhase,
+          scopes: [scope],
+          schedulerScriptPath,
+          daemonInstanceId,
+          phaseTimeoutMs,
+          defaultEmailConfigPath,
+          readEmailConfig,
+          inboxPollScheduler,
+          emitInboxPollSchedulerSkip,
+          appendActivityEvent,
+          nowMs: Date.now,
+        });
+        lastResults = sequence.phaseResults;
+        try {
+          maintainDiagnostics({ home });
+        } catch {
+          // Diagnostics are best effort and must never block mail delivery.
+        }
+        if (!once && !stopped) {
+          // eslint-disable-next-line no-await-in-loop -- the next tick starts only after the configured cadence.
+          await sleepInterval();
+        }
+      } while (!once && !stopped && homeExists(home));
+    } catch (error) {
+      stopped = true; // do not leave the outbound lane running headless
+      throw error;
+    }
+  };
+  const outboundLane = async () => {
     do {
-      // eslint-disable-next-line no-await-in-loop -- one ordered mail lifecycle owns each daemon tick.
-      const sequence = await runMailSequence({
-        runPhase: (name, fn, timeoutMs) =>
-          runTldrAgentDaemonPhase({ name, fn, timeoutMs }),
-        scopes: [scope],
-        schedulerScriptPath,
-        daemonInstanceId,
-        phaseTimeoutMs,
-        defaultEmailConfigPath,
-        readEmailConfig,
-        inboxPollScheduler,
-        emitInboxPollSchedulerSkip,
-        appendActivityEvent,
-        nowMs: Date.now,
-      });
-      lastResults = sequence.phaseResults;
       try {
-        maintainDiagnostics({ home });
-      } catch {
-        // Diagnostics are best effort and must never block mail delivery.
+        // eslint-disable-next-line no-await-in-loop -- one ordered outbound drain per outbound tick.
+        const outbound = await runOutboundSequence({
+          runPhase,
+          scopes: [scope],
+          schedulerScriptPath,
+          daemonInstanceId,
+          defaultEmailConfigPath,
+          readEmailConfig,
+          inboxPollScheduler,
+          appendActivityEvent,
+          nowMs: Date.now,
+          outboundTimeoutMs,
+        });
+        // --once reports both lanes, so a failed drain fails the run.
+        if (once)
+          lastResults = [...lastResults, ...(outbound?.phaseResults ?? [])];
+      } catch (error) {
+        // An outbound failure must never take the daemon down; the next tick retries.
+        process.stderr.write(
+          `helm daemon outbound sequence failed: ${error?.message || error}\n`,
+        );
+        try {
+          appendActivityEvent({
+            event_type: "daemon_outbound_tick_failed",
+            daemon_instance_id: daemonInstanceId,
+            metadata: { error: error?.message || String(error) },
+          });
+        } catch {
+          // Logging is best effort.
+        }
+        if (once) {
+          lastResults = [
+            ...lastResults,
+            {
+              ok: false,
+              phase: "outbound_drain",
+              error: error?.message || String(error),
+            },
+          ];
+        }
       }
       if (!once && !stopped) {
         // eslint-disable-next-line no-await-in-loop -- the next tick starts only after the configured cadence.
-        await wait(Math.max(1, Number(intervalSec)) * 1000);
+        await sleepInterval();
       }
     } while (!once && !stopped && homeExists(home));
+  };
+  try {
+    if (once) {
+      // Both lanes write one shared admin nonce file, so a --once run keeps them apart.
+      try {
+        await inboundLane();
+      } finally {
+        await outboundLane();
+      }
+    } else {
+      await Promise.all([inboundLane(), outboundLane()]);
+    }
   } finally {
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);

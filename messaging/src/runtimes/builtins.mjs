@@ -42,7 +42,9 @@ export const BUILTIN_RUNTIMES = Object.freeze({
       transcriptHints: Object.freeze(['/.claude/', '/claude/projects/']),
     }),
     hooksInstall: Object.freeze({ settingsPath: '.claude/settings.json', format: 'claude-json' }),
-    capabilities: Object.freeze({ stdoutInjection: true, blockExitCodes: Object.freeze([2]) }),
+    // An async-rewake Stop listener wakes the idle session without holding
+    // Claude Code's input queue, so background-task notifications still land.
+    capabilities: Object.freeze({ stdoutInjection: true, blockExitCodes: Object.freeze([2]), idleWake: 'background-hook' }),
   }),
   codex: Object.freeze({
     id: 'codex',
@@ -54,13 +56,21 @@ export const BUILTIN_RUNTIMES = Object.freeze({
     // stdin"; the spawn vector carries it as the last argument.
     resumeArgsTemplate: Object.freeze(['exec', '--json', 'resume', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '{sessionId}', '-']),
     spawnArgsTemplate: Object.freeze(['--ask-for-approval', 'never', 'exec', '--json', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '{prompt}']),
+    // F34: a thread the managed app-server hosts (its TUI exited or died; the
+    // app-server keeps the writer lock) cannot be resumed by a second `codex
+    // exec`. `codex queue` hands the brief to that app-server instead, which
+    // runs it as the next turn of the same session once the current turn
+    // ends. Codex only: a builtin-data field, never read from a manifest.
+    hostedQueueArgsTemplate: Object.freeze(['queue', '--thread', '{sessionId}', '--message', '{prompt}']),
     identity: Object.freeze({
       sessionEnvVars: Object.freeze(['CODEX_THREAD_ID']),
       envMarkers: Object.freeze(['CODEX_THREAD_ID']),
       transcriptHints: Object.freeze(['/.codex/', '/codex/sessions/']),
     }),
     hooksInstall: Object.freeze({ settingsPath: '.codex/hooks.json', format: 'claude-json' }),
-    capabilities: Object.freeze({ stdoutInjection: true, blockExitCodes: Object.freeze([2]) }),
+    // Codex async hooks cannot wake an idle session, so the blocking Stop
+    // park is its only idle wake.
+    capabilities: Object.freeze({ stdoutInjection: true, blockExitCodes: Object.freeze([2]), idleWake: 'stop-hold' }),
   }),
 });
 

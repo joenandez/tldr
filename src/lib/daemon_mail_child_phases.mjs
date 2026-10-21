@@ -1,10 +1,14 @@
 import {
+  tldrAgentOutboundTimeout,
   tldrAgentParentPhaseTimeout,
   tldrAgentPhaseTimeout,
   runSequentialTldrAgentMailPhases,
 } from "./tldr_agent_daemon_phase_timeouts.mjs";
 import { writeTldrAgentDaemonPollHealth } from "./tldr_agent_daemon_health.mjs";
-import { runInboxPollChildPhase } from "./daemon_inbox_poll_phase.mjs";
+import {
+  runInboxPollChildPhase,
+  runOutboundDrainChildPhase,
+} from "./daemon_inbox_poll_phase.mjs";
 
 export { runInboxPollChildPhase } from "./daemon_inbox_poll_phase.mjs";
 
@@ -71,5 +75,55 @@ export async function runDaemonMailSequence({
     phaseResults,
     phaseTimeouts: { inbox_poll: parentTimeout },
     health,
+  };
+}
+
+// The outbound lane: one drain child on its own timeout. It writes no poll
+// health, so an outbound result never stamps last_successful_poll_at.
+export async function runDaemonOutboundSequence({
+  runPhase,
+  scopes,
+  schedulerScriptPath,
+  daemonInstanceId,
+  outboundTimeoutMs,
+  defaultEmailConfigPath,
+  readEmailConfig,
+  inboxPollScheduler,
+  appendActivityEvent,
+  nowMs,
+  runOutboundDrain,
+  pollOnly,
+  readTldrAgentPollConfig,
+}) {
+  const childTimeout = tldrAgentOutboundTimeout({ outboundTimeoutMs });
+  const parentTimeout = tldrAgentParentPhaseTimeout("outbound_drain", {
+    phaseTimeoutMs: childTimeout,
+  });
+  const startedMs = nowMs();
+  const phaseResults = [
+    await runPhase(
+      "outbound_drain",
+      ({ signal }) =>
+        runOutboundDrainChildPhase({
+          scopes,
+          schedulerScriptPath,
+          daemonInstanceId,
+          signal,
+          childTimeoutMs: childTimeout,
+          defaultEmailConfigPath,
+          readEmailConfig,
+          inboxPollScheduler,
+          appendActivityEvent,
+          runOutboundDrain,
+          pollOnly,
+          readTldrAgentPollConfig,
+        }),
+      parentTimeout,
+    ),
+  ];
+  return {
+    durationMs: Math.max(0, nowMs() - startedMs),
+    phaseResults,
+    phaseTimeouts: { outbound_drain: parentTimeout },
   };
 }

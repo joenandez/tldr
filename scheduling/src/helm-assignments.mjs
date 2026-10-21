@@ -7,10 +7,13 @@
 import { randomBytes } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
   existsSync,
   mkdirSync,
+  openSync,
   readFileSync,
+  readSync,
   readdirSync,
   renameSync,
   rmSync,
@@ -26,6 +29,7 @@ import {
   normalizeJob,
   validateJob,
   setNextIfMissing,
+  academyProviderDefault,
 } from "./lib/job_service.mjs";
 import { buildScheduleFromFlags } from "./lib/schedule_flags.mjs";
 import {
@@ -355,9 +359,20 @@ async function handleCreate(flags, pretty) {
 
   // ── Pre-validate job record (validates provider, schedule, etc.) ─────────
   // Validate BEFORE materializing anything so failures write nothing to disk.
-  const provider = typeof flags.provider === "string" ? flags.provider : null;
+  const callerProvider =
+    typeof flags.provider === "string" ? flags.provider : null;
+  const academyDefault =
+    flags["academy-agent"] === undefined
+      ? academyProviderDefault(scope.cwd, callerProvider)
+      : null;
+  const provider = academyDefault?.provider ?? callerProvider;
   const executionHints = { provider, session_required: true, managed: true };
-  const providerConfig = academyProviderConfigFromFlags(flags);
+  const providerConfig = academyDefault
+    ? {
+        ...academyDefault.provider_config,
+        ...academyProviderConfigFromFlags(flags),
+      }
+    : academyProviderConfigFromFlags(flags);
   if (providerConfig) executionHints.provider_config = providerConfig;
   const runtime = runtimeOptionsOrFail(
     cmd,
@@ -525,8 +540,16 @@ function handleList(flags, pretty) {
   const status = flags.status || "";
   const withTerminalRuns = Boolean(flags["with-terminal-runs"]);
   if (flags["all-scopes"]) {
-    handleGlobalList(cmd, { status, withTerminalRuns }, pretty);
+    handleGlobalList(
+      cmd,
+      { status, withTerminalRuns, partial: Boolean(flags.partial) },
+      pretty,
+    );
     return;
+  }
+  if (flags.partial) {
+    fail(cmd, "invalid_flag", "--partial requires --all-scopes", {}, pretty);
+    process.exit(2);
   }
   if (withTerminalRuns) {
     fail(
@@ -553,8 +576,12 @@ function handleList(flags, pretty) {
 // A scope whose catalog — or, with --with-terminal-runs, whose run history —
 // cannot be read fails the whole call, naming that scope, rather than
 // publishing the scopes that happened to parse as a complete list.
-function handleGlobalList(cmd, { status, withTerminalRuns }, pretty) {
-  const result = listAssignmentsAcrossScopes({ status, withTerminalRuns });
+function handleGlobalList(cmd, { status, withTerminalRuns, partial }, pretty) {
+  const result = listAssignmentsAcrossScopes({
+    status,
+    withTerminalRuns,
+    partial,
+  });
   if (!result.ok) {
     output(
       cmd,
@@ -578,6 +605,9 @@ function handleGlobalList(cmd, { status, withTerminalRuns }, pretty) {
       assignments: result.assignments,
       scopes: result.scopes,
       scanned_scopes: result.scanned_scopes,
+      ...(result.complete === false
+        ? { failed_scopes: result.failures, complete: false }
+        : {}),
     },
     [],
     pretty,
@@ -771,17 +801,40 @@ function handleLogs(flags, positionals, pretty) {
     process.exit(1);
   }
 
+  let stdoutTail = "";
+  if (flags.json && logPaths?.stdout && existsSync(logPaths.stdout)) {
+    try {
+      const size = statSync(logPaths.stdout).size;
+      const length = Math.min(size, 65536);
+      const buffer = Buffer.alloc(length);
+      const fd = openSync(logPaths.stdout, "r");
+      try {
+        const read = readSync(fd, buffer, 0, length, size - length);
+        stdoutTail = buffer.subarray(0, read).toString("utf8");
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      /* best-effort, as for plain output */
+    }
+  }
+
   // Output the log paths in the envelope; also stream stdout content if present.
   output(
     cmd,
     true,
-    { run_id: runId, job_id: foundJobId, log_paths: logPaths },
+    {
+      run_id: runId,
+      job_id: foundJobId,
+      log_paths: logPaths,
+      ...(flags.json ? { stdout_tail: stdoutTail } : {}),
+    },
     [],
     pretty,
   );
 
   // Stream stdout log to stdout after the envelope (best-effort)
-  if (logPaths?.stdout && existsSync(logPaths.stdout)) {
+  if (!flags.json && logPaths?.stdout && existsSync(logPaths.stdout)) {
     try {
       process.stdout.write(readFileSync(logPaths.stdout, "utf8"));
     } catch {
@@ -1398,7 +1451,7 @@ async function run() {
         "  list       List assignments (--status active|disabled|archived|all;\n" +
         "             --all-scopes lists across every registered scope;\n" +
         "             --all-scopes --with-terminal-runs adds each row's finished runs\n" +
-        "             with immutable source_scope_id and source_cwd)\n" +
+        "             with immutable source_scope_id and source_cwd; --partial returns readable scopes)\n" +
         "  show       Show full detail for one assignment\n" +
         "  path       Print the backing-skill path\n" +
         "  skill      Read the backing-skill UTF-8 content as JSON\n" +
@@ -1409,10 +1462,10 @@ async function run() {
         "  archive    Stop schedule; retain skill + history\n" +
         "  unarchive  Re-arm a previously archived assignment\n" +
         "  run        Trigger an immediate direct run\n" +
-        "  runs       List run history for an assignment\n" +
+        "  runs       List run history for an assignment (--all-scopes [--partial])\n" +
         "  completion Show the completion record for a specific run-id\n" +
         "  runtime-options  Accepted runtime options per provider\n" +
-        "  logs       Output logs for a specific run-id\n\n" +
+        "  logs       Output logs for a specific run-id (--json returns stdout_tail)\n\n" +
         `Run ${ASSIGNMENTS_COMMAND} <verb> --help for verb-specific options.\n`,
     );
     return;

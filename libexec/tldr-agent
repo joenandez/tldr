@@ -12,7 +12,14 @@ fi
 plugin_root=$(CDPATH= cd -- "$(dirname -- "$script_path")/.." && pwd -P)
 TLDR_AGENT_PLUGIN_ROOT=$plugin_root
 export TLDR_AGENT_PLUGIN_ROOT
+tldr_is_linux() { [ "$(uname -s)" = "Linux" ]; }
 tldr_version() {
+  if tldr_is_linux; then
+    # No plutil on Linux; node is required there anyway.
+    node -p 'const m = process.argv[1]; const fs = require("fs"); const j = (f) => JSON.parse(fs.readFileSync(f, "utf8")); (fs.existsSync(m) && j(m).localVersion) || j(process.argv[2]).version' \
+      "${plugin_root}/LOCAL-SNAPSHOT-MANIFEST.json" "${plugin_root}/package.json" 2>/dev/null
+    return
+  fi
   local_manifest="${plugin_root}/LOCAL-SNAPSHOT-MANIFEST.json"
   if [ -f "$local_manifest" ]; then
     if version=$(/usr/bin/plutil -extract localVersion raw -o - "$local_manifest" 2>/dev/null); then
@@ -40,6 +47,7 @@ tldr_default_operation() {
   if [ "${TLDR_AGENT_ASSUME_GUI_SESSION:-}" = "0" ]; then printf 'status'; return; fi
   if [ "${TLDR_AGENT_ASSUME_GUI_SESSION:-}" = "1" ]; then printf 'configure'; return; fi
   if [ -n "${CI:-}" ]; then printf 'status'; return; fi
+  if tldr_is_linux; then printf 'status'; return; fi
   if [ "$(/bin/launchctl managername 2>/dev/null || true)" = "Aqua" ]; then
     printf 'configure'
   else
@@ -47,6 +55,12 @@ tldr_default_operation() {
   fi
 }
 operation=${1:-$(tldr_default_operation)}
+# Linux has no signed app: a short Node setup replaces the bootstrap, which
+# never runs there. The Node entry refuses operations Linux does not support.
+if tldr_is_linux; then
+  if [ "$#" -gt 0 ]; then shift; fi
+  exec "${plugin_root}/libexec/component-dispatch" tldr-linux-setup "$operation" "$@"
+fi
 # Opening the installed app and reading help do not require an active runtime.
 case "$operation" in
   configure|--help|-h|help)

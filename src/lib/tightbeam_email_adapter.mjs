@@ -127,15 +127,42 @@ export function createTightbeamEmailAdapter({ channel, send } = {}) {
       });
     } catch (error) {
       if (error?.ambiguous === true) throw error;
-      await channel.completeEmailDelivery({
+      const errorCode = error?.code || "provider_rejected";
+      if (error?.retryable === false) {
+        await channel.completeEmailDelivery({
+          delivery_id: claim.delivery_id,
+          token: claim.token,
+          outcome: "failed",
+        });
+        return { ok: false, delivery_id: claim.delivery_id, error: errorCode };
+      }
+      // Tightbeam re-offers a released delivery after its own backoff.
+      const released = await channel.releaseEmailDelivery({
         delivery_id: claim.delivery_id,
         token: claim.token,
-        outcome: "failed",
       });
+      if (released?.ok !== true) {
+        process.stderr.write(
+          `${JSON.stringify({
+            ts: new Date().toISOString(),
+            level: "warn",
+            event: "tightbeam_email_release_failed",
+            params: { delivery_id: claim.delivery_id, send_error: errorCode },
+            status: "release_failed",
+          })}\n`,
+        );
+        return {
+          ok: false,
+          delivery_id: claim.delivery_id,
+          error: released?.code || "release_failed",
+        };
+      }
       return {
         ok: false,
         delivery_id: claim.delivery_id,
-        error: error?.code || "provider_rejected",
+        error: errorCode,
+        retryable: true,
+        released: true,
       };
     }
     if (

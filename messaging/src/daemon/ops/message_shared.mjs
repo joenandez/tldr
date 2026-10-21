@@ -14,6 +14,7 @@ import { isSafeSessionId, sessionPaths } from '../../protocol/session_paths.mjs'
 import { isUniqueConstraintError } from './authority_scope.mjs';
 import { REPLY_BINDING_POLICY } from '../reply_listener_policy.mjs';
 import { activeListenerForEndpoint, createPendingPresentation } from './listener_operations.mjs';
+import { requestHostWakesForDeliveries } from '../session_host.mjs';
 
 /**
  * Deep, key-sorted JSON serialization so two payloads with the same
@@ -145,7 +146,21 @@ export function resolveOrCreateDirectConversation(db, { appId, principalA, princ
  * given (endpoint, message) pair, so at most one resume-request-creation
  * attempt can ever occur for it.
  */
-export function maybeCreateResumeRequest(db, { endpoint, conversationId, messageId, reason }) {
+export function maybeCreateResumeRequest(db, { endpoint, conversationId, messageId, reason, logger = null }) {
+  // A superseded endpoint was declared unresumable when its replacement was
+  // admitted: relaunching it would fail again and admit a second replacement.
+  const successor = db
+    .prepare('SELECT replacement_endpoint_id FROM resume_requests WHERE endpoint_id = ? AND replacement_endpoint_id IS NOT NULL LIMIT 1')
+    .get(endpoint.id);
+  if (successor) {
+    logger?.info?.({
+      event: 'resume.superseded_endpoint_skipped',
+      params: { message_id: messageId, endpoint_id: endpoint.id, successor_endpoint_id: successor.replacement_endpoint_id },
+      result: { resume_request: 'none' },
+      status: 'ok',
+    });
+    return null;
+  }
   const existing = db
     .prepare("SELECT id FROM resume_requests WHERE endpoint_id = ? AND message_id = ? AND state IN ('pending', 'claimed')")
     .get(endpoint.id, messageId);
@@ -397,10 +412,12 @@ function isStaleResumeTarget(endpoint, { nowMs, staleAfterMs, anchorAt = null })
  *   exact         the caller already narrowed routing to one endpoint (a
  *                 child result to its parent custodian, an inbound target).
  *                 Custody is the proof of relevance, so age is not checked.
- *   targeted      an `open` names the endpoint that takes custody. Every open
- *                 endpoint of the principal keeps its row (F19: each window
- *                 of a shared principal holds its own copy), but only the
- *                 target may be resumed; siblings are never woken.
+ *   targeted      an `open` names the endpoint that takes custody. Only the
+ *                 target gets a row and only it may be resumed: a sibling
+ *                 window's copy was another session's work, and an exited
+ *                 sibling holding it was resumed in the target's place
+ *                 (2026-10-06). Unlike `bound`, the target is woken
+ *                 whatever its age (the anchor is the commit itself).
  *   bound         the message answers a message or work this principal
  *                 opened from `binding.endpoint_id` (reply, requester return
  *                 route). Only that endpoint gets a row. It is
@@ -433,11 +450,10 @@ export function selectRecipientEndpoints({ endpoints, routes, binding = null, no
     if (!bound) {
       mode = 'bound_closed';
     } else {
-      // `targeted` keeps the principal-wide rows (F19: every window of a
-      // shared principal keeps its own copy) and restricts only the wake;
-      // `bound` restricts both.
-      mode = binding.rows === 'principal' ? 'targeted' : 'bound';
-      if (mode === 'bound') rowEndpoints = [bound];
+      // Both restrict the row and the wake to the bound endpoint; the mode
+      // only names why it is bound (an open's target vs. a return route).
+      mode = binding.mode === 'targeted' ? 'targeted' : 'bound';
+      rowEndpoints = [bound];
       resumeScope = [bound];
       for (const endpoint of endpoints) {
         if (endpoint.id !== bound.id) decisions.push({ endpoint_id: endpoint.id, route: routes.get(endpoint.id), decision: 'not_bound' });
@@ -518,6 +534,188 @@ function logResumeSelection(logger, { messageId, principalId, binding, endpoints
 }
 
 /**
+ * Every endpoint the sending endpoint replaced, transitively, across all
+ * applications (routing must stay exact even where visibility is scoped). A
+ * predecessor was declared unresumable when its replacement was admitted, so
+ * it is never a recipient of its own lineage's messages: a row there would be
+ * unclearable and its resume request would relaunch the dead session.
+ */
+function lineagePredecessorIds(db, senderEndpointId) {
+  if (senderEndpointId === null) return new Set();
+  const rows = db
+    .prepare(
+      `WITH RECURSIVE lineage(id) AS (
+         SELECT ?
+         UNION
+         SELECT rr.endpoint_id FROM resume_requests rr JOIN lineage l ON rr.replacement_endpoint_id = l.id
+       )
+       SELECT id FROM lineage WHERE id != ?`,
+    )
+    .all(senderEndpointId, senderEndpointId);
+  return new Set(rows.map((row) => row.id));
+}
+
+/**
+ * The endpoint a message naming `endpointId` must reach: the endpoint itself
+ * until a replacement supersedes it, then its newest lineage replacement
+ * (plan §2.2: the replacement adopts the predecessor's threads). Transitive,
+ * so A -> A' -> A'' resolves to A''. A replacement is always minted on its
+ * predecessor's principal and application, so the walk follows only those.
+ * A closed newest replacement is returned as is: the lineage ended there,
+ * and callers apply their closed-endpoint semantics rather than fall back
+ * to a superseded predecessor.
+ */
+export function newestLineageEndpointId(db, endpointId) {
+  if (typeof endpointId !== 'string') return endpointId ?? null;
+  const newest = db
+    .prepare(
+      `WITH RECURSIVE successors(id) AS (
+         SELECT rr.replacement_endpoint_id FROM resume_requests rr
+          WHERE rr.endpoint_id = ? AND rr.replacement_endpoint_id IS NOT NULL
+         UNION
+         SELECT rr.replacement_endpoint_id FROM resume_requests rr JOIN successors s ON rr.endpoint_id = s.id WHERE rr.replacement_endpoint_id IS NOT NULL
+       )
+       SELECT e.id FROM successors s
+         JOIN endpoints e ON e.id = s.id
+         JOIN endpoints origin ON origin.id = ?
+        WHERE e.principal_id = origin.principal_id AND e.created_by_app_id IS origin.created_by_app_id
+        ORDER BY e.created_at DESC, e.id DESC LIMIT 1`,
+    )
+    .get(endpointId, endpointId);
+  return newest?.id ?? endpointId;
+}
+
+/**
+ * The endpoints that may see and answer an exact delegation offer, or null
+ * when the offer names no exact recipient (a legacy or principal-addressed
+ * offer keeps principal semantics). The exact route is the one the offer's
+ * own effect audit recorded at commit (`route.routed_endpoint_id`, already
+ * moved to the newest lineage replacement then); the answerers are that
+ * endpoint and every later lineage successor, so a session that replaced the
+ * recipient inherits the offer and a same-principal sibling does not.
+ * @returns {string[]|null}
+ */
+export function offerRecipientEndpointIds(db, delegationId) {
+  if (typeof delegationId !== 'string') return null;
+  const offer = db
+    .prepare(
+      `SELECT me.effect_payload
+         FROM obligations o
+         JOIN message_effects me ON me.obligation_id = o.parent_id AND me.effect = 'handoff.offer'
+        WHERE o.id = ? AND json_extract(me.effect_payload, '$.created.delegation_id') = o.id
+        LIMIT 1`,
+    )
+    .get(delegationId);
+  let routed = null;
+  try {
+    routed = JSON.parse(offer?.effect_payload ?? 'null')?.route?.routed_endpoint_id ?? null;
+  } catch {
+    routed = null;
+  }
+  if (typeof routed !== 'string') {
+    // Fail closed (re-check 6 N2): an exact offer on this delegation's parent
+    // whose audit cannot be linked to the delegation it created has an
+    // unknown recipient, so nobody may answer it. Only an offer with no exact
+    // route at all keeps principal semantics.
+    const unlinkedExact = db
+      .prepare(
+        `SELECT 1 FROM obligations o
+           JOIN message_effects me ON me.obligation_id = o.parent_id AND me.effect = 'handoff.offer'
+          WHERE o.id = ? AND json_extract(me.effect_payload, '$.created.delegation_id') IS NULL
+            AND json_extract(me.effect_payload, '$.route.routed_endpoint_id') IS NOT NULL
+          LIMIT 1`,
+      )
+      .get(delegationId);
+    return unlinkedExact ? [] : null;
+  }
+  const successors = db
+    .prepare(
+      `WITH RECURSIVE successors(id) AS (
+         SELECT rr.replacement_endpoint_id FROM resume_requests rr
+          WHERE rr.endpoint_id = ? AND rr.replacement_endpoint_id IS NOT NULL
+         UNION
+         SELECT rr.replacement_endpoint_id FROM resume_requests rr JOIN successors s ON rr.endpoint_id = s.id WHERE rr.replacement_endpoint_id IS NOT NULL
+       )
+       SELECT id FROM successors`,
+    )
+    .all(routed)
+    .map((row) => row.id);
+  return [routed, ...successors];
+}
+
+/**
+ * The id of the live delivery that made good a failed delivery on a
+ * superseded endpoint, or null. Admission fails the predecessor's duplicate
+ * row of a message a lineage replacement already holds, so that failure is
+ * not the sender's: the message arrived. A failure no replacement made good
+ * stays a failure.
+ */
+export function replacementDeliveryFor(db, { messageId, endpointId, state }) {
+  if (state !== 'failed' || typeof endpointId !== 'string') return null;
+  return db
+    .prepare(
+      `WITH RECURSIVE successors(id) AS (
+         SELECT rr.replacement_endpoint_id FROM resume_requests rr
+          WHERE rr.endpoint_id = ? AND rr.replacement_endpoint_id IS NOT NULL
+         UNION
+         SELECT rr.replacement_endpoint_id FROM resume_requests rr JOIN successors s ON rr.endpoint_id = s.id WHERE rr.replacement_endpoint_id IS NOT NULL
+       )
+       SELECT d.id FROM deliveries d JOIN successors s ON s.id = d.endpoint_id
+        WHERE d.message_id = ? AND d.state != 'failed'
+        ORDER BY d.created_at DESC, d.id DESC LIMIT 1`,
+    )
+    .get(endpointId, messageId)?.id ?? null;
+}
+
+/**
+ * Sessions of one runtime in one cwd share a principal, so a same-folder
+ * sibling is a different endpoint of the sender's own principal. It is a
+ * recipient only when routed exactly: the caller's exact endpoint, or the
+ * one endpoint this message is bound to (an open's target, the replied-to or
+ * requesting session). Never the sender's own endpoint or one it replaced
+ * (lineagePredecessorIds), and never by principal fan-out. A bound route needs a known sending endpoint to tell a
+ * sibling from the sender itself.
+ */
+function isExactSenderSibling(endpoint, { senderEndpointId, senderPredecessorIds, recipientEndpointId, binding }) {
+  if (endpoint.id === senderEndpointId || senderPredecessorIds.has(endpoint.id)) return false;
+  if (recipientEndpointId !== null) return endpoint.id === recipientEndpointId;
+  return senderEndpointId !== null && binding?.endpoint_id === endpoint.id;
+}
+
+function logSenderSiblingRoute(logger, { messageId, senderPrincipalId, recipientEndpoints, recipientEndpointId, participantEndpoints, senderPredecessorIds }) {
+  const excludedPredecessorIds = participantEndpoints.filter((endpoint) => senderPredecessorIds.has(endpoint.id)).map((endpoint) => endpoint.id);
+  if (excludedPredecessorIds.length > 0) {
+    logger?.info?.({
+      event: 'delivery_sender_predecessor_excluded',
+      params: { message_id: messageId, endpoint_ids: excludedPredecessorIds },
+      result: { route: 'none', reason: 'sender_lineage_predecessor' },
+      status: 'ok',
+    });
+  }
+  const siblingIds = recipientEndpoints.filter((endpoint) => endpoint.principal_id === senderPrincipalId).map((endpoint) => endpoint.id);
+  if (siblingIds.length === 0) return;
+  logger?.info?.({
+    event: 'delivery_sender_sibling_route',
+    params: { message_id: messageId, endpoint_ids: siblingIds },
+    result: { route: recipientEndpointId !== null ? 'exact' : 'bound' },
+    status: 'ok',
+  });
+}
+
+// Superseded endpoints other than the sender's own predecessors (logged by
+// logSenderSiblingRoute) — one line per message, never per endpoint.
+function logSupersededExcluded(logger, { messageId, participantEndpoints, senderPredecessorIds }) {
+  const excludedIds = participantEndpoints.filter((endpoint) => endpoint.superseded && !senderPredecessorIds.has(endpoint.id)).map((endpoint) => endpoint.id);
+  if (excludedIds.length === 0) return;
+  logger?.info?.({
+    event: 'delivery_superseded_excluded',
+    params: { message_id: messageId, endpoint_ids: excludedIds },
+    result: { route: 'none', reason: 'superseded_by_replacement' },
+    status: 'ok',
+  });
+}
+
+/**
  * Creates the durable delivery rows for the conversation participants other
  * than the sender (docs/state-ownership.md §6; the plan's «Agent-to-agent
  * message flow» step 4: canonical message + per-endpoint delivery record
@@ -544,24 +742,38 @@ function logResumeSelection(logger, { messageId, principalId, binding, endpoints
  *
  * `routeReasonPrincipalId` narrows a typed route to one participant: every
  * recipient still gets a delivery row, but only that principal's endpoints
- * carry the reason/source pair.
+ * carry the reason/source pair; `routeReasonEndpointIds` types the rows of
+ * those exact endpoints instead (a cancel notice reaches one holder session,
+ * never its principal's other endpoints). `typedRouteIsClosedWorkNotice` marks
+ * the typed rows as such a notice: they are delivered unread, never presented
+ * to a parked listener. `everyCopyIsClosedWorkNotice` says the same of every
+ * row this call writes, typed or not: a requester's cancel asks nothing of
+ * any recipient (proof F40).
  */
-export function createDeliveriesForRecipients(db, { conversationId, messageId, senderPrincipalId, recipientEndpointId = null, routeReason = null, sourceObligationId = null, routeReasonPrincipalId = null, endpointBindings = null, resumeStaleAfterMs = DEFAULT_RESUME_STALE_AFTER_MS, stateRoot, logger }) {
-  const recipientEndpoints = db
+export function createDeliveriesForRecipients(db, { conversationId, messageId, senderPrincipalId, senderEndpointId = null, recipientEndpointId = null, routeReason = null, sourceObligationId = null, routeReasonPrincipalId = null, routeReasonEndpointIds = null, typedRouteIsClosedWorkNotice = false, everyCopyIsClosedWorkNotice = false, endpointBindings = null, resumeStaleAfterMs = DEFAULT_RESUME_STALE_AFTER_MS, stateRoot, logger }) {
+  const participantEndpoints = db
     .prepare(
       `SELECT e.id AS id, e.state AS state, e.principal_id AS principal_id,
               e.provider_session_id AS session_id, e.process_generation AS process_generation,
               e.launch_mode AS launch_mode, e.authority_reference AS authority_reference,
-              e.created_at AS created_at, e.updated_at AS updated_at
+              e.created_at AS created_at, e.updated_at AS updated_at,
+              EXISTS (SELECT 1 FROM resume_requests rr WHERE rr.endpoint_id = e.id AND rr.replacement_endpoint_id IS NOT NULL) AS superseded
          FROM endpoints e
          JOIN conversation_participants cp ON cp.principal_id = e.principal_id
         WHERE cp.conversation_id = ?
-          AND cp.principal_id != ?
           AND (? IS NULL OR e.id = ?)
           AND e.state != 'closed'
         ORDER BY e.principal_id, e.created_at, e.id`,
     )
-    .all(conversationId, senderPrincipalId, recipientEndpointId, recipientEndpointId);
+    .all(conversationId, recipientEndpointId, recipientEndpointId);
+  const senderPredecessorIds = lineagePredecessorIds(db, senderEndpointId);
+  // A superseded endpoint was declared unresumable: a row there could never
+  // be cleared and a wake there is lost. Its live lineage replacement is a
+  // participant endpoint of the same principal and stands in its place.
+  const recipientEndpoints = participantEndpoints.filter((endpoint) => !endpoint.superseded && (endpoint.principal_id !== senderPrincipalId
+    || isExactSenderSibling(endpoint, { senderEndpointId, senderPredecessorIds, recipientEndpointId, binding: endpointBindings?.get(senderPrincipalId) })));
+  logSenderSiblingRoute(logger, { messageId, senderPrincipalId, recipientEndpoints, recipientEndpointId, participantEndpoints, senderPredecessorIds });
+  logSupersededExcluded(logger, { messageId, participantEndpoints, senderPredecessorIds });
 
   const listeners = new Map();
   const routes = new Map();
@@ -614,15 +826,22 @@ export function createDeliveriesForRecipients(db, { conversationId, messageId, s
     const listener = listeners.get(endpoint.id);
 
     const deliveryId = generateId('delivery');
-    const typed = routeReason !== null && endpoint.principal_id === routeReasonPrincipalId;
+    const typed = routeReason !== null && (endpoint.principal_id === routeReasonPrincipalId || Boolean(routeReasonEndpointIds?.has(endpoint.id)));
     insert.run(deliveryId, messageId, endpoint.id, typed ? routeReason : null, typed ? sourceObligationId : null, now, now);
-    liveDeliveries.push({ principal_id: endpoint.principal_id, endpoint_id: endpoint.id, message_id: messageId });
-    if (route === 'stage_presentation') {
+    liveDeliveries.push({ principal_id: endpoint.principal_id, endpoint_id: endpoint.id, message_id: messageId, delivery_id: deliveryId });
+    if ((everyCopyIsClosedWorkNotice || (typed && typedRouteIsClosedWorkNotice)) && (route === 'stage_presentation' || RESUME_REASON_BY_ROUTE[route])) {
+      // F24: a notice about work that is already closed asks nothing of the
+      // session. Unread at Stop it does not hold the Stop (session.stop skips
+      // it); arriving while the Stop is parked it must not wake it, and a
+      // stopped holder is not launched just to read it (ux F10: delivered
+      // whenever the holder next runs). It waits, unread, for the next run.
+      logger?.info?.({ event: 'closed_work_notice_not_presented', params: { message_id: messageId, endpoint_id: endpoint.id, route_reason: typed ? routeReason : null, route }, result: { route: 'enqueue_only' }, status: 'ok' });
+    } else if (route === 'stage_presentation') {
       presentations.push(createPendingPresentation(db, { listener, messageId, deliveryId }));
       db.prepare("UPDATE listeners SET state = 'waking', updated_at = ? WHERE id = ? AND listener_generation = ? AND state IN ('parked', 'attached')")
         .run(now, listener.id, listener.listener_generation);
     } else if (RESUME_REASON_BY_ROUTE[route] && resumeEndpointIds.has(endpoint.id)) {
-      maybeCreateResumeRequest(db, { endpoint, conversationId, messageId, reason: RESUME_REASON_BY_ROUTE[route] });
+      maybeCreateResumeRequest(db, { endpoint, conversationId, messageId, reason: RESUME_REASON_BY_ROUTE[route], logger });
     }
     // 'enqueue_only', or a resume route that selection declined: the pending
     // delivery row is the whole outcome. It stays unread until exact receipt
@@ -634,6 +853,49 @@ export function createDeliveriesForRecipients(db, { conversationId, messageId, s
     refreshSessionWatermark({ stateRoot, sessionId: endpoint.session_id, deliveryId, logger });
   }
   return { liveDeliveries, presentations };
+}
+
+/**
+ * Typed notice rows of an already-committed canonical message (plan §2.3
+ * chain notices): one row per named endpoint, exact by endpoint so a
+ * same-folder counterpart on the sender's own principal is never skipped,
+ * and never the sending endpoint itself; a replaced endpoint resolves to its
+ * newest lineage replacement first. An endpoint that already holds a
+ * row of this message (its ordinary copy) keeps that one row. A notice wakes
+ * nobody: no resume request and no listener presentation; the session reads
+ * it at its next tool boundary. Runs inside the caller's transaction.
+ */
+export function createNoticeDeliveries(db, { conversationId, messageId, endpointIds, senderEndpointId = null, routeReason, sourceObligationId, effectType, stateRoot, logger }) {
+  const candidate = db.prepare(
+    `SELECT e.id, e.principal_id, e.provider_session_id AS session_id
+       FROM endpoints e
+       JOIN conversation_participants cp ON cp.principal_id = e.principal_id AND cp.conversation_id = ?
+      WHERE e.id = ? AND e.state != 'closed'
+        AND NOT EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = ? AND d.endpoint_id = e.id)`,
+  );
+  const insert = db.prepare(
+    "INSERT INTO deliveries (id, message_id, endpoint_id, state, route_reason, source_obligation_id, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)",
+  );
+  const now = new Date().toISOString();
+  const liveDeliveries = [];
+  // A replaced target is told through its newest replacement; the predecessor
+  // could never clear the notice.
+  for (const endpointId of new Set(endpointIds.map((id) => newestLineageEndpointId(db, id)))) {
+    if (!endpointId || endpointId === senderEndpointId) continue;
+    const endpoint = candidate.get(conversationId, endpointId, messageId);
+    if (!endpoint) continue;
+    const deliveryId = generateId('delivery');
+    insert.run(deliveryId, messageId, endpoint.id, routeReason, sourceObligationId, now, now);
+    liveDeliveries.push({ principal_id: endpoint.principal_id, endpoint_id: endpoint.id, message_id: messageId });
+    refreshSessionWatermark({ stateRoot, sessionId: endpoint.session_id, deliveryId, logger });
+  }
+  logger?.info?.({
+    event: 'chain_notice_fanout',
+    params: { message_id: messageId, effect: effectType, route_reason: routeReason, source_obligation_id: sourceObligationId, candidate_count: new Set(endpointIds).size },
+    result: { recipient_count: liveDeliveries.length },
+    status: 'ok',
+  });
+  return { liveDeliveries };
 }
 
 /**
@@ -730,7 +992,9 @@ export function createDeliveriesForChannelRoutes(db, {
  * receive a wake — pass ifParentExists and get an empty routing instead of a
  * throw.
  */
-export function createParentResultDelivery(db, { conversationId, messageId, senderPrincipalId, parentEndpointId, routeReason = null, sourceObligationId = null, stateRoot, logger, ifParentExists = false }) {
+export function createParentResultDelivery(db, { conversationId, messageId, senderPrincipalId, senderEndpointId = null, parentEndpointId, routeReason = null, sourceObligationId = null, stateRoot, logger, ifParentExists = false }) {
+  // The parent may be a same-folder sibling of the sender (one principal);
+  // only the sending endpoint itself is never its own parent route.
   const routable = db
     .prepare(
       `SELECT e.id, e.principal_id AS principal_id
@@ -738,10 +1002,10 @@ export function createParentResultDelivery(db, { conversationId, messageId, send
          JOIN conversation_participants AS cp ON cp.principal_id = e.principal_id
         WHERE e.id = ?
           AND cp.conversation_id = ?
-          AND e.principal_id != ?
+          AND e.id IS NOT ?
           AND e.state != 'closed'`,
     )
-    .get(parentEndpointId ?? null, conversationId, senderPrincipalId);
+    .get(parentEndpointId ?? null, conversationId, senderEndpointId);
   if (!routable) {
     if (ifParentExists) return { liveDeliveries: [] };
     throw new TightbeamError('obligation_conflict', 'the immediate parent endpoint is no longer routable for this child result');
@@ -750,6 +1014,7 @@ export function createParentResultDelivery(db, { conversationId, messageId, send
     conversationId,
     messageId,
     senderPrincipalId,
+    senderEndpointId,
     recipientEndpointId: parentEndpointId,
     routeReason,
     sourceObligationId,
@@ -774,6 +1039,7 @@ export function createParentResultDelivery(db, { conversationId, messageId, send
  */
 export function pushLiveDeliveryEvents(context, { conversationId, liveDeliveries }) {
   if (!context.eventBus || !liveDeliveries) return;
+  requestHostWakesForDeliveries(context, liveDeliveries);
   for (const delivery of liveDeliveries) {
     context.eventBus.publish(
       delivery.principal_id,
@@ -845,6 +1111,19 @@ export function validateIdempotencyKey(idempotencyKey) {
   if (typeof idempotencyKey !== 'string' || idempotencyKey.length === 0) {
     throw new TightbeamError('malformed_request', 'idempotency_key is required and must be a non-empty string', { field: 'idempotency_key' });
   }
+}
+
+// Receipt is oldest-first by delivery time, then delivery id. This is the one
+// definition of that order: message.receive's admission gate, the refusal that
+// names the older message, the opened-admission pick, and inbox.list's listing
+// all use it, so the inbox's first unread item is always the one receive admits.
+export function receiveOrderBy(alias = 'd') {
+  return `${alias}.created_at ASC, ${alias}.id ASC`;
+}
+
+/** SQL predicate: delivery `earlier` is received before delivery `later`. */
+export function receivedBeforeSql(earlier, later) {
+  return `(${earlier}.created_at < ${later}.created_at OR (${earlier}.created_at = ${later}.created_at AND ${earlier}.id < ${later}.id))`;
 }
 
 // 256 KiB cap on a message body, UTF-8 byte length (F1: an oversized

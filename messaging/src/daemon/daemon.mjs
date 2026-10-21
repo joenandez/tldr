@@ -191,4 +191,20 @@ export function attachProcessLifecycle(daemon) {
   };
   process.once('SIGINT', () => shutdown('SIGINT'));
   process.once('SIGTERM', () => shutdown('SIGTERM'));
+
+  // Test-only lifetime bound; inert unless TIGHTBEAM_EXIT_WITH_PID is set.
+  const ownerPid = Number(process.env.TIGHTBEAM_EXIT_WITH_PID);
+  if (Number.isInteger(ownerPid) && ownerPid > 0) {
+    const probe = setInterval(() => {
+      try {
+        process.kill(ownerPid, 0);
+      } catch (err) {
+        if (err.code !== 'ESRCH') return; // EPERM: owner is alive
+        clearInterval(probe);
+        daemon.logger.info({ event: 'daemon_owner_pid_gone', params: { pid: ownerPid } });
+        shutdown('OWNER_PID_GONE');
+      }
+    }, 2000);
+    probe.unref();
+  }
 }

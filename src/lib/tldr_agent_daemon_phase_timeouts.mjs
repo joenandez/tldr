@@ -2,6 +2,8 @@
 // polls inbound mail. Its child must outlive the bounded outbound exchange.
 export const DEFAULT_TLDR_AGENT_PHASE_TIMEOUT_MS = 35_000;
 export const DEFAULT_TLDR_AGENT_CHILD_GRACE_MS = 5000;
+// The outbound drain runs on its own lane, so a slow inbound read cannot eat its budget.
+export const DEFAULT_TLDR_AGENT_OUTBOUND_TIMEOUT_MS = 120_000;
 // Tightbeam owns reply obligations and dispatch. The tldr; daemon retains only
 // the provider-to-channel bridge poll.
 export const TLDR_AGENT_MAIL_PHASE_SEQUENCE = Object.freeze(["inbox_poll"]);
@@ -16,6 +18,16 @@ export function tldrAgentPhaseTimeout(
   { phaseTimeoutMs = DEFAULT_TLDR_AGENT_PHASE_TIMEOUT_MS } = {},
 ) {
   return numericTimeout(phaseTimeoutMs, DEFAULT_TLDR_AGENT_PHASE_TIMEOUT_MS);
+}
+
+export function tldrAgentOutboundTimeout({
+  outboundTimeoutMs,
+  env = process.env,
+} = {}) {
+  return numericTimeout(
+    outboundTimeoutMs ?? env.HELM_DAEMON_OUTBOUND_TIMEOUT_MS,
+    DEFAULT_TLDR_AGENT_OUTBOUND_TIMEOUT_MS,
+  );
 }
 
 export function tldrAgentParentPhaseTimeout(

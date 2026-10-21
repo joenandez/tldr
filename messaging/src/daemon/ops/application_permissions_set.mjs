@@ -7,7 +7,7 @@
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
 
-// Verbatim from docs/security-model.md "Permission catalog".
+// The names in docs/security-model.md "Permission catalog" (host_sessions is the one row with no plan phrase).
 const KNOWN_PERMISSIONS = new Set([
   'register_endpoints',
   'send_as_principal',
@@ -18,6 +18,7 @@ const KNOWN_PERMISSIONS = new Set([
   'publish_inbound_messages',
   'claim_resume_requests',
   'read_health',
+  'host_sessions',
 ]);
 
 function validateGrant(grant, index) {

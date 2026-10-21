@@ -78,6 +78,11 @@ function projectStatus(value) {
   if (value === "ready") return result("ready");
   if (value === "pending_verification") return result("pending_verification");
   if (value === "unconfigured") return result("unconfigured");
+  // Policy is unconfigured but protected email files remain: only the app's
+  // Retry finishes it, so it is never projected as repair.
+  if (value === "disconnect_incomplete") {
+    return result("disconnect_incomplete");
+  }
   if (value === "corrupt") {
     return result("repair-required", `${FRONT_DOOR_COMMAND} repair --json`);
   }

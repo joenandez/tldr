@@ -9,14 +9,26 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
+import {
+  EMAIL_DISCONNECT_OPERATIONS,
+  runEmailDisconnectOperation,
+} from "./lib/email_disconnect_entry.mjs";
+import {
+  PRODUCT_UNINSTALL,
+  runProductUninstallOperation,
+} from "./lib/product_uninstall_entry.mjs";
 import { createProductionStarportRuntime } from "./lib/starport_runtime.mjs";
 
+// The disconnect and product-uninstall operations are for the signed app
+// only; the agent-facing bootstrap front door does not admit them.
 const OPERATIONS = new Set([
   "setup",
   "status",
   "configure",
   "repair",
   "uninstall",
+  ...EMAIL_DISCONNECT_OPERATIONS,
+  PRODUCT_UNINSTALL,
 ]);
 
 function runAppLauncher(operation) {
@@ -101,11 +113,17 @@ export async function dispatchStarportOperation(
   {
     createRuntime = createProductionStarportRuntime,
     openApp = () => JSON.parse(runAppLauncher("configure")),
+    emailDisconnect = runEmailDisconnectOperation,
+    productUninstall = runProductUninstallOperation,
   } = {},
 ) {
   if (!OPERATIONS.has(operation)) return unsupported();
   try {
     if (operation === "configure") return await openApp();
+    if (operation === PRODUCT_UNINSTALL) return await productUninstall();
+    if (EMAIL_DISCONNECT_OPERATIONS.has(operation)) {
+      return await emailDisconnect(operation);
+    }
     const runtime = await createRuntime();
     if (typeof runtime?.[operation] !== "function") return unsupported();
     return await runtime[operation]();

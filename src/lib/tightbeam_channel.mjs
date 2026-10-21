@@ -7,35 +7,31 @@ import {
   ENDPOINT_SESSION,
   PRINCIPAL_REF,
   TIGHTBEAM_COMPATIBILITY,
-  WELCOME_APPLICATION,
-  WELCOME_ENDPOINT_SESSION,
   commandFailure,
   debugIdentity,
   defaultIdentityStore,
-  defaultTightbeamCommand,
   expectedPreflightArgs,
   identityInvalid,
   launcherUnavailable,
   productionRun,
+  tightbeamInvocation,
   unavailable,
 } from "./tightbeam_channel_runtime.mjs";
-import {
-  createTightbeamWelcomeDispatcher,
-  createTightbeamWelcomeIdentityManager,
-} from "./tightbeam_welcome_dispatch.mjs";
 import { helmHome } from "./store.mjs";
 
 export function createTightbeamChannel({
   run = productionRun,
   loadIdentity,
   saveIdentity,
-  command = defaultTightbeamCommand(),
+  command,
+  commandPrefix,
   home = resolve(helmHome()),
 } = {}) {
   const store = defaultIdentityStore(home);
   const readIdentity = loadIdentity ?? (() => store.load());
   const persistIdentity = saveIdentity ?? ((identity) => store.save(identity));
-  const execute = (options) => run({ command, ...options });
+  const invocation = tightbeamInvocation({ command, commandPrefix });
+  const execute = (options) => run({ ...invocation, ...options });
 
   async function acquireApplicationCredential(application, identityKind) {
     let result = await execute({
@@ -210,30 +206,105 @@ export function createTightbeamChannel({
       : Object.freeze({ ok: true });
   }
 
-  const ensureWelcomeIdentity = createTightbeamWelcomeIdentityManager({
-    readIdentity,
-    persistIdentity,
-    execute,
-    commandFailure,
-    unavailable,
-    identityInvalid,
-    debugIdentity,
-    acquireApplicationCredential,
-    application: WELCOME_APPLICATION,
-    authority: AUTHORITY,
-  });
+  // Messaging health: doctor is read-only by construction and needs no
+  // credentials; only its verdict leaves this adapter.
+  async function doctor() {
+    const result = await execute({
+      admin: false,
+      credentials: null,
+      args: ["doctor"],
+    });
+    return Object.freeze({ ok: result?.ok === true });
+  }
 
-  const dispatchWelcome = createTightbeamWelcomeDispatcher({
-    registerEmailChannel,
-    ensureWelcomeIdentity,
-    readIdentity,
-    execute,
-    commandFailure,
-    unavailable,
-    authority: AUTHORITY,
-    principalRef: PRINCIPAL_REF,
-    welcomeEndpointSession: WELCOME_ENDPOINT_SESSION,
-  });
+  // Active routes only (retired routes disappear from the list). Without a
+  // stored bridge identity no route can exist, so nothing is launched.
+  async function listEmailRoutes() {
+    let identity;
+    try {
+      identity = await readIdentity();
+    } catch {
+      return Object.freeze({ ok: false });
+    }
+    if (!identity) return Object.freeze({ ok: true, routes: [] });
+    const listed = await execute({
+      admin: false,
+      credentials: identity,
+      args: ["channel", "route", "list"],
+    });
+    if (commandFailure(listed) || !Array.isArray(listed.result?.routes)) {
+      return Object.freeze({ ok: false });
+    }
+    return Object.freeze({ ok: true, routes: listed.result.routes });
+  }
+
+  // Runs one owner command per active email route. Null when the routes
+  // cannot be listed; no route (or no identity) runs nothing.
+  async function onEmailRoutes(routeArgs) {
+    const listed = await listEmailRoutes();
+    if (!listed.ok) return null;
+    const routeIds = listed.routes
+      .filter((route) => route?.selector === "email")
+      .map((route) => route.route_id);
+    if (routeIds.length === 0) return [];
+    const identity = await readIdentity();
+    return Promise.all(
+      routeIds.map((routeId) =>
+        execute({
+          admin: false,
+          credentials: identity,
+          args: ["channel", "route", ...routeArgs(routeId)],
+        }),
+      ),
+    );
+  }
+
+  // Read-only disconnect impact: this bridge's pending and claimed email
+  // deliveries across its active email routes.
+  async function emailRouteImpact() {
+    const impacts = await onEmailRoutes((routeId) => ["impact", routeId]);
+    if (impacts === null || impacts.some(commandFailure)) {
+      return Object.freeze({ ok: false });
+    }
+    return Object.freeze({
+      ok: true,
+      pending_deliveries: impacts.reduce(
+        (sum, impact) => sum + impact.result.pending_deliveries,
+        0,
+      ),
+      claimed_deliveries: impacts.reduce(
+        (sum, impact) => sum + impact.result.claimed_deliveries,
+        0,
+      ),
+    });
+  }
+
+  // Tightbeam checks and retires each route atomically, so a refusal leaves
+  // that route active. No active email route left means an earlier retire
+  // already won.
+  async function retireEmailRoute() {
+    const retirements = await onEmailRoutes((routeId) => [
+      "retire",
+      routeId,
+      "--require-no-active-deliveries",
+    ]);
+    if (retirements === null) {
+      return Object.freeze({ ok: false, code: "route_list_unavailable" });
+    }
+    if (
+      retirements.some(
+        (retired) =>
+          retired?.error?.tightbeam_code === "route_has_active_deliveries" ||
+          retired?.error?.code === "route_has_active_deliveries",
+      )
+    ) {
+      return Object.freeze({ ok: false, code: "route_has_active_deliveries" });
+    }
+    if (retirements.some(commandFailure)) {
+      return Object.freeze({ ok: false, code: "route_retire_failed" });
+    }
+    return Object.freeze({ ok: true, state: "retired" });
+  }
 
   const delivery = createTightbeamEmailDeliveryChannel({
     execute,
@@ -255,7 +326,10 @@ export function createTightbeamChannel({
   return Object.freeze({
     preflight,
     registerEmailChannel,
-    dispatchWelcome,
+    doctor,
+    listEmailRoutes,
+    emailRouteImpact,
+    retireEmailRoute,
     publishInboundEmail,
     ...delivery,
   });
@@ -267,6 +341,4 @@ export const _internals = Object.freeze({
   ENDPOINT_SESSION,
   PRINCIPAL_REF,
   TIGHTBEAM_COMPATIBILITY,
-  WELCOME_APPLICATION,
-  WELCOME_ENDPOINT_SESSION,
 });

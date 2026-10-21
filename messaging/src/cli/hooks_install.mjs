@@ -51,7 +51,7 @@ import { randomBytes } from 'node:crypto';
 // resolves through a registry instance, never a local table. Admission
 // itself lives in the leaf so registration and startup load enforce the
 // same contract; the installer re-exports it as defense in depth.
-import { admitHookContract, createRuntimeRegistry, HOOK_ADMISSION_ERROR_CODES } from '../runtimes/registry.mjs';
+import { admitHookContract, createRuntimeRegistry, DEFAULT_IDLE_WAKE, HOOK_ADMISSION_ERROR_CODES, IDLE_WAKE_MODES } from '../runtimes/registry.mjs';
 import { REPLY_BINDING_POLICY } from '../protocol/reply_listener_policy.mjs';
 import { unifiedPackageFrontDoorPath, unifiedPackageTightbeamPath } from './package_context.mjs';
 
@@ -59,10 +59,17 @@ export { admitHookContract, HOOK_ADMISSION_ERROR_CODES };
 
 export const TIGHTBEAM_MARKER = 'tightbeam-managed:runtime-hooks-v2';
 
+// The Stop gate + wake listener pair of an idleWake 'background-hook' runtime
+// is a new hook-contract generation, so only those two hooks carry v3. Every
+// other entry — and therefore every byte Codex (a stop-hold runtime) reads —
+// stays on v2: Codex keys hook trust by position and hash, so a marker bump
+// there would silently de-trust every user's approved Tightbeam hooks.
+export const BACKGROUND_WAKE_MARKER = 'tightbeam-managed:runtime-hooks-v3';
+
 // Every marker generation this installer recognises as its own. A future
 // generation appends here so an old install is cleanly replaced (and
 // removed) instead of being left behind as a duplicate.
-export const TIGHTBEAM_MARKERS = [TIGHTBEAM_MARKER, 'tightbeam-managed:runtime-hooks-v1'];
+export const TIGHTBEAM_MARKERS = [TIGHTBEAM_MARKER, BACKGROUND_WAKE_MARKER, 'tightbeam-managed:runtime-hooks-v1'];
 
 /**
  * Deprecated shim, kept only because doctor_checks.mjs (mid-repair by
@@ -90,9 +97,31 @@ function namedError(code, message) {
 // re-invokes the CLI is a pass-through; the two tool-boundary events must
 // stay shell so no Node process starts at every tool call.
 export const HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'Stop', 'PreToolUse', 'PostToolUse'];
+// Codex only: subagent lifetimes for the Stop hold's pending-bg record.
+// APPENDED, so the five entries users already trusted keep their positions.
+export const CODEX_HOOK_EVENTS = [...HOOK_EVENTS, 'SubagentStart', 'SubagentStop'];
 const STOP_TIMEOUT_SECONDS = Math.ceil(REPLY_BINDING_POLICY.maxParkMs / 1000) + 60;
+// The background-hook gate only decides block/park/allow and hands off; it
+// is synchronous, so a long timeout would hold the host's input queue again.
+const STOP_GATE_TIMEOUT_SECONDS = 60;
 
-const DIRECT_VERBS = { SessionStart: 'session-start', UserPromptSubmit: 'user-prompt-submit', Stop: 'stop' };
+// How a waiting message reaches an idle session (runtime record
+// capabilities.idleWake; modes and default are the registry's). Records that
+// declare nothing hold the Stop hook.
+
+function requireIdleWake(idleWake) {
+  if (IDLE_WAKE_MODES.includes(idleWake)) return idleWake;
+  throw namedError(
+    'unsupported_idle_wake',
+    `capabilities.idleWake "${idleWake}" has no hook install shape (supported: ${IDLE_WAKE_MODES.join(', ')})`,
+  );
+}
+
+function recordIdleWake(record) {
+  return requireIdleWake(record.capabilities?.idleWake ?? DEFAULT_IDLE_WAKE);
+}
+
+const DIRECT_VERBS = { SessionStart: 'session-start', UserPromptSubmit: 'user-prompt-submit', Stop: 'stop', SubagentStart: 'subagent-start', SubagentStop: 'subagent-stop' };
 const SCRIPT_FILES = { PreToolUse: 'pre-tool-use', PostToolUse: 'post-tool-use' };
 
 function repoRoot() {
@@ -180,19 +209,48 @@ export function hookCommandFor(event, {
   // (`tldr-agents messaging hook <event>`), as the plugin's hooks.json does.
   // It runs the same hook verb, and for the two tool-boundary events the same
   // shell gates, so the watermark fast path still starts no Node process.
+  if (DIRECT_VERBS[event]) return directHookCommand(DIRECT_VERBS[event], { packageRoot, runtimeBinding });
   const { cli, frontDoor } = unifiedHookLaunchers(packageRoot);
-  const binding = runtimeBinding === undefined ? '' : ` --runtime ${shellQuote(runtimeBinding)}`;
   const runtimeEnvironment = runtimeBinding === undefined ? '' : `TIGHTBEAM_RUNTIME=${shellQuote(runtimeBinding)} `;
-  if (DIRECT_VERBS[event]) return `${shellQuote(frontDoor)} messaging hook ${DIRECT_VERBS[event]}${binding}`;
   // The binding reaches the shell as data, preserving its watermark fast
   // path. Only the script's slow path starts the package CLI with --runtime.
   return `TIGHTBEAM_CLI=${shellQuote(cli)} ${runtimeEnvironment}${shellQuote(frontDoor)} messaging hook ${SCRIPT_FILES[event]}`;
 }
 
+// A front-door `messaging hook <verb>` command line; manifest runtimes get
+// the same `--runtime <id>` binding on every direct verb.
+function directHookCommand(verb, { packageRoot = path.resolve(repoRoot(), '..'), runtimeBinding } = {}) {
+  const { frontDoor } = unifiedHookLaunchers(packageRoot);
+  const binding = runtimeBinding === undefined ? '' : ` --runtime ${shellQuote(runtimeBinding)}`;
+  return `${shellQuote(frontDoor)} messaging hook ${verb}${binding}`;
+}
+
+// background-hook: a synchronous gate (`stop --handoff`) decides and returns
+// at once, and an async-rewake listener (`wake-listen`) holds the park, so
+// the host's input queue (task notifications, queued prompts) is never held
+// behind a parked Stop hook.
+function backgroundWakeStopHooks(options) {
+  return [
+    { type: 'command', command: directHookCommand('stop --handoff', options), timeout: STOP_GATE_TIMEOUT_SECONDS, _tightbeam: BACKGROUND_WAKE_MARKER },
+    {
+      type: 'command',
+      command: directHookCommand('wake-listen', options),
+      async: true,
+      asyncRewake: true,
+      timeout: STOP_TIMEOUT_SECONDS,
+      _tightbeam: BACKGROUND_WAKE_MARKER,
+    },
+  ];
+}
+
 // Claude Code's canonical hooks structure, which Codex 0.148.0 reads
 // unchanged from ~/.codex/hooks.json:
 //   { "hooks": { "<Event>": [ { "hooks": [ { "type": "command", ... } ] } ] } }
-export function buildHookGroup(event, options) {
+// Only Stop varies by `options.idleWake`; stop-hold keeps its exact
+// historical bytes (key order included), which Codex trust depends on.
+export function buildHookGroup(event, options = {}) {
+  const idleWake = event === 'Stop' ? requireIdleWake(options.idleWake ?? DEFAULT_IDLE_WAKE) : null;
+  if (idleWake === 'background-hook') return { hooks: backgroundWakeStopHooks(options) };
   const hook = { type: 'command', command: hookCommandFor(event, options), _tightbeam: TIGHTBEAM_MARKER };
   if (event === 'Stop') hook.timeout = STOP_TIMEOUT_SECONDS;
   return { hooks: [hook] };
@@ -241,7 +299,7 @@ export function shiftedCodexTrustKeys(file, settingsValue, { recognizedCommands 
   const hooks = settingsValue?.hooks;
   const keys = [];
   if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return keys;
-  for (const event of HOOK_EVENTS) {
+  for (const event of CODEX_HOOK_EVENTS) {
     const groups = Array.isArray(hooks[event]) ? hooks[event] : [];
     const removedAt = groups.findIndex((group) => isTightbeamGroup(group, recognizedCommands));
     if (removedAt < 0 || removedAt === groups.length - 1) continue;
@@ -299,7 +357,7 @@ export function planChanges(settings, action, options = {}) {
   const isOwnedHook = (hook) => isTightbeamHook(hook, options.recognizedCommands);
   const isOwnedGroup = (group) => isTightbeamGroup(group, options.recognizedCommands);
 
-  for (const event of HOOK_EVENTS) {
+  for (const event of options.events ?? HOOK_EVENTS) {
     const existing = Array.isArray(next.hooks[event]) ? next.hooks[event] : [];
 
     if (action === 'install') {
@@ -311,7 +369,7 @@ export function planChanges(settings, action, options = {}) {
           : -1;
         if (compatibleIndex >= 0) {
           next.hooks[event] = existing.map((group, index) =>
-            index === compatibleIndex ? { ...group, hooks: [...group.hooks, desired.hooks[0]] } : group,
+            index === compatibleIndex ? { ...group, hooks: [...group.hooks, ...desired.hooks] } : group,
           );
           changes.push({ event, op: 'add', command: desired.hooks[0].command });
           continue;
@@ -339,8 +397,12 @@ export function planChanges(settings, action, options = {}) {
         })
         .filter((group) => !Array.isArray(group.hooks) || group.hooks.length > 0);
       next.hooks[event] = merged;
-      const previous = ours.flatMap((group) => group.hooks).find(isOwnedHook)?.command;
-      const unchanged = ours.length === 1 && previous === desired.hooks[0].command;
+      // Compare every owned command, not just the first: a Stop pair whose
+      // gate is current but whose listener is missing still needs a refresh.
+      const previousCommands = ours.flatMap((group) => group.hooks).filter(isOwnedHook).map((hook) => hook.command);
+      const previous = previousCommands[0];
+      const unchanged = ours.length === 1
+        && previousCommands.join('\n') === desired.hooks.map((hook) => hook.command).join('\n');
       changes.push(
         unchanged
           ? { event, op: 'noop', command: desired.hooks[0].command }
@@ -429,21 +491,26 @@ export function bootstrapHooks({ action, runtime = null, dryRun = false, home = 
         throw namedError('settings_path_collision', `runtime "${record.id}" declares settings path ${file}, which runtime "${other.id}" already owns`);
       }
     }
-    targets.push({ id: record.id, record, file });
+    // Resolved here, before any write, so a mode the installer cannot shape
+    // refuses the whole invocation like any other admission failure.
+    targets.push({ id: record.id, record, file, idleWake: recordIdleWake(record) });
   }
 
   const report = [];
-  for (const { id, record, file } of targets) {
+  for (const { id, record, file, idleWake } of targets) {
     const options = {
       packageRoot,
       runtimeBinding: record !== null && record.origin !== 'builtin' ? id : undefined,
       composeCodexLifecycle: id === 'codex',
+      events: id === 'codex' ? CODEX_HOOK_EVENTS : HOOK_EVENTS,
       recognizedCommands,
+      idleWake,
     };
     const settings = readSettings(file);
     const { next, changes } = planChanges(settings, action, options);
     const contents = serialize(next);
     const entry = { runtime: id, file, settings_existed: settings.exists, changes };
+    if (idleWake !== undefined) entry.idle_wake = idleWake;
     if (action === 'uninstall' && id === 'codex') {
       // Codex trust records live in config.toml keyed by index; that
       // machinery is a special case BY ID and belongs to no other runtime,

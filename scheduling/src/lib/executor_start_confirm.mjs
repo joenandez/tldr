@@ -287,6 +287,22 @@ export async function runPreparedAdapterUntilStarted({
           runId: prepared.run_id || null,
           jobId: job.id || null,
         });
+  if (result.status === "skipped") {
+    // An intentional provider skip never meant to start a session, so there is
+    // no missing identity to record.
+    return {
+      ...result,
+      session_id: null,
+      resume_command: null,
+      resume_cwd: null,
+      resume_confidence: null,
+      resume_candidates: [],
+      session_identity_status: "not_applicable",
+      session_identity_source: null,
+      injected_via: prepared.injected_via,
+      strategy: prepared.strategy,
+    };
+  }
   if (result.status !== "started") {
     const missing = recordAdapterIdentityEvidence({
       adapter,

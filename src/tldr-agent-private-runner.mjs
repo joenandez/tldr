@@ -17,6 +17,13 @@ const CHANNEL_POLL_VERB = "__tldr-agent-channel-poll";
 // claimable delivery (bounded) instead of stopping after the first one.
 export const MAX_OUTBOUND_DELIVERIES_PER_POLL = 10;
 
+// Worst-case time one claimed send needs (the 25 s Aegis outbound socket
+// timeout plus the Tightbeam CLI calls); the drain claims again only when at
+// least this much of the outbound deadline remains.
+export const OUTBOUND_SEND_BUDGET_MS = 40000;
+const DEFAULT_OUTBOUND_TIMEOUT_MS = 120000;
+const MODES = new Set(["outbound", "inbound"]);
+
 // With the inbound result, the failed tick keeps both sides' counts and causes
 // (the same { inbound, outbound } details an inbound failure reports).
 export function reportOutboundFailure(outbound, inbound = undefined) {
@@ -43,14 +50,32 @@ export function pollTickDeadlineMs({
   );
 }
 
+// The outbound child runs on its own daemon lane with its own timeout.
+function outboundTickDeadlineMs({
+  env = process.env,
+  startedAtMs = performance.timeOrigin,
+} = {}) {
+  if (env.HELM_DAEMON !== "1") return null;
+  const timeoutMs = Number(env.HELM_DAEMON_OUTBOUND_TIMEOUT_MS);
+  return (
+    startedAtMs + (timeoutMs > 0 ? timeoutMs : DEFAULT_OUTBOUND_TIMEOUT_MS)
+  );
+}
+
 function outboundErrorCode(rawCode) {
   return rawCode === "invalid_claimed_delivery"
     ? "tightbeam_invalid_claimed_delivery"
     : "tightbeam_delivery_failed";
 }
 
-async function drainOutboundDeliveries({ adapter, onReplyBindingRecorded }) {
+async function drainOutboundDeliveries({
+  adapter,
+  onReplyBindingRecorded,
+  deadlineMs = null,
+}) {
   const counts = { attempted: 0, delivered: 0, failed: 0 };
+  let released = 0;
+  let stoppedForDeadline = false;
   let lastFailure = null;
   let thrown = null;
   for (
@@ -58,6 +83,13 @@ async function drainOutboundDeliveries({ adapter, onReplyBindingRecorded }) {
     attempt < MAX_OUTBOUND_DELIVERIES_PER_POLL;
     attempt += 1
   ) {
+    if (
+      deadlineMs !== null &&
+      deadlineMs - Date.now() < OUTBOUND_SEND_BUDGET_MS
+    ) {
+      stoppedForDeadline = true;
+      break;
+    }
     let outcome;
     try {
       // eslint-disable-next-line no-await-in-loop
@@ -71,6 +103,8 @@ async function drainOutboundDeliveries({ adapter, onReplyBindingRecorded }) {
     if (outcome?.ok !== true && outcome?.code === "claim_unavailable") break;
     counts.attempted += 1;
     if (outcome?.ok === true) counts.delivered += 1;
+    // Released to Tightbeam for its backoff retry: not a failure.
+    else if (outcome?.released === true) released += 1;
     else {
       counts.failed += 1;
       lastFailure = outcome;
@@ -79,7 +113,15 @@ async function drainOutboundDeliveries({ adapter, onReplyBindingRecorded }) {
       if (outcome?.code === "claim_failed") break;
     }
   }
-  return { counts, lastFailure, thrown };
+  return {
+    counts: {
+      ...counts,
+      ...(released ? { released } : {}),
+      ...(stoppedForDeadline ? { stopped_for_deadline: true } : {}),
+    },
+    lastFailure,
+    thrown,
+  };
 }
 
 function withScope(scope, data = {}) {
@@ -120,8 +162,23 @@ export async function loadPollDependencies() {
 export async function pollChannel({
   scope,
   dependencies = null,
-  deadlineMs = pollTickDeadlineMs(),
+  mode = undefined,
+  deadlineMs = undefined,
 }) {
+  if (mode !== undefined && !MODES.has(mode)) {
+    throw Object.assign(new Error(`Unknown channel poll mode: ${mode}`), {
+      code: "invalid_mode",
+      details: { remediation: "Use --mode outbound or --mode inbound." },
+    });
+  }
+  const doOutbound = mode !== "inbound";
+  const doInbound = mode !== "outbound";
+  const tickDeadlineMs =
+    deadlineMs === undefined
+      ? mode === "outbound"
+        ? outboundTickDeadlineMs()
+        : pollTickDeadlineMs()
+      : deadlineMs;
   await (
     dependencies?.assertPrivateRuntimeEnabled || assertPrivateRuntimeEnabled
   )();
@@ -141,48 +198,66 @@ export async function pollChannel({
     );
   }
   let replyBindingDigest = null;
+  const withBinding = (outbound) => ({
+    ...outbound,
+    ...(replyBindingDigest
+      ? { reply_binding_digest: `sha256:${replyBindingDigest}` }
+      : {}),
+  });
   const adapter = loaded.createAdapter({ channel, send: loaded.send });
   // Outbound draining is caught in full: a claim that cannot be sent must
   // never stop the inbound poll from running on this tick.
-  const { counts, lastFailure, thrown } = await drainOutboundDeliveries({
-    adapter,
-    onReplyBindingRecorded: ({ claim }) => {
-      // The poll receipt proves that a delivery claim produced an opaque
-      // binding without exporting the bearer token outside the adapter.
-      replyBindingDigest = createHash("sha256")
-        .update(claim.reply_binding)
-        .digest("hex");
-    },
-  });
-  const inbound = await loaded.pollInbox({
-    scope,
-    dispatch: true,
-    deadlineMs,
-    tightbeamInbound: {
-      findThreadBinding: channel.findThreadBinding,
-      publishInboundEmail: channel.publishInboundEmail,
-    },
-  });
-  const outbound = thrown
-    ? {
-        ok: false,
-        error: outboundErrorCode(thrown.code),
-        ...counts,
-      }
-    : lastFailure
+  const drained = doOutbound
+    ? await drainOutboundDeliveries({
+        adapter,
+        deadlineMs: tickDeadlineMs,
+        onReplyBindingRecorded: ({ claim }) => {
+          // The poll receipt proves that a delivery claim produced an opaque
+          // binding without exporting the bearer token outside the adapter.
+          replyBindingDigest = createHash("sha256")
+            .update(claim.reply_binding)
+            .digest("hex");
+        },
+      })
+    : null;
+  const inbound = doInbound
+    ? await loaded.pollInbox({
+        scope,
+        dispatch: true,
+        deadlineMs: tickDeadlineMs,
+        tightbeamInbound: {
+          findThreadBinding: channel.findThreadBinding,
+          publishInboundEmail: channel.publishInboundEmail,
+        },
+      })
+    : undefined;
+  const { counts, lastFailure, thrown } = drained || {};
+  const outbound = !drained
+    ? undefined
+    : thrown
       ? {
           ok: false,
-          error: outboundErrorCode(lastFailure.error),
-          delivery_id: lastFailure.delivery_id,
-          ...(lastFailure.code === "claim_failed"
-            ? {
-                cause: "claim_failed",
-                tightbeam_code: lastFailure.tightbeam_code ?? null,
-              }
-            : {}),
+          error: outboundErrorCode(thrown.code),
           ...counts,
         }
-      : { ok: true, ...counts };
+      : lastFailure
+        ? {
+            ok: false,
+            error: outboundErrorCode(lastFailure.error),
+            delivery_id: lastFailure.delivery_id,
+            ...(lastFailure.code === "claim_failed"
+              ? {
+                  cause: "claim_failed",
+                  tightbeam_code: lastFailure.tightbeam_code ?? null,
+                }
+              : {}),
+            ...counts,
+          }
+        : { ok: true, ...counts };
+  if (!doInbound) {
+    reportOutboundFailure(outbound);
+    return withScope(scope, { outbound: withBinding(outbound) });
+  }
   reportOutboundFailure(outbound, inbound);
   if (!inbound?.ok) {
     throw Object.assign(
@@ -197,12 +272,7 @@ export async function pollChannel({
   }
   return withScope(scope, {
     inbound,
-    outbound: {
-      ...outbound,
-      ...(replyBindingDigest
-        ? { reply_binding_digest: `sha256:${replyBindingDigest}` }
-        : {}),
-    },
+    ...(outbound ? { outbound: withBinding(outbound) } : {}),
   });
 }
 
@@ -225,7 +295,13 @@ export async function runPrivateRunner(argv = process.argv.slice(2)) {
     return 2;
   }
   try {
-    output(command, true, await pollChannel({ scope }), [], pretty);
+    output(
+      command,
+      true,
+      await pollChannel({ scope, mode: flags.mode }),
+      [],
+      pretty,
+    );
     return 0;
   } catch (error) {
     fail(

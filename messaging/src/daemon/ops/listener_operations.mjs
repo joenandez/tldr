@@ -12,6 +12,7 @@ import { replyContinuityDiagnostic } from '../reply_continuity_diagnostics.mjs';
 import { admitParkExpiryRetirement } from '../endpoint_retirement.mjs';
 import { openOldestUnreadAdmission } from './delivery_admission.mjs';
 import { refreshSessionWatermark } from './message_shared.mjs';
+import { notificationContext } from './notification_context.mjs';
 
 const FENCE_FIELDS = ['endpoint_id', 'process_generation', 'listener_id', 'listener_generation'];
 const REQUEST_FIELDS = Object.freeze({
@@ -70,7 +71,10 @@ function isUnexpired(listener, nowMs) {
 }
 
 function presentationPayload(row) {
-  return { presentation_id: row.id, message_id: row.message_id, delivery_id: row.target_delivery_id, has_external_origin: Boolean(row.has_external_origin) };
+  return {
+    presentation_id: row.id, message_id: row.message_id, delivery_id: row.target_delivery_id, has_external_origin: Boolean(row.has_external_origin),
+    ...row.context,
+  };
 }
 
 function pendingPresentations(db, listener) {
@@ -83,7 +87,8 @@ function pendingPresentations(db, listener) {
         WHERE p.listener_id = ? AND p.listener_generation = ? AND p.state = 'pending'
         ORDER BY p.created_at ASC, p.id ASC`,
     )
-    .all(listener.id, listener.listener_generation);
+    .all(listener.id, listener.listener_generation)
+    .map((row) => ({ ...row, context: notificationContext(db, row.message_id, { deliveryId: row.target_delivery_id }) }));
 }
 
 function requireAttachedConnection(context, listener, connection) {
@@ -184,7 +189,7 @@ export function createPendingPresentation(db, { listener, messageId, deliveryId,
      VALUES (?, ?, ?, ?, ?, 'pending', ?, NULL, NULL, ?, ?, NULL, NULL, NULL, ?, ?)`,
   ).run(id, listener.id, listener.listener_generation, messageId, deliveryId, deadline, replyWaitId, now, now, now);
   const message = db.prepare("SELECT origin = 'inbound' AND origin_channel_route_id IS NOT NULL AS has_external_origin FROM messages WHERE id = ?").get(messageId);
-  return { id, listener_id: listener.id, listener_generation: listener.listener_generation, message_id: messageId, target_delivery_id: deliveryId, reply_wait_id: replyWaitId, has_external_origin: Boolean(message?.has_external_origin) };
+  return { id, listener_id: listener.id, listener_generation: listener.listener_generation, message_id: messageId, target_delivery_id: deliveryId, reply_wait_id: replyWaitId, has_external_origin: Boolean(message?.has_external_origin), context: notificationContext(db, messageId, { deliveryId }) };
 }
 
 export function publishPresentation(context, presentation) {

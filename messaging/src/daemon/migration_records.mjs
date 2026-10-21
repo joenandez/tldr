@@ -172,6 +172,9 @@ export const TABLE_COLUMNS = Object.freeze({
     // current generation — the proof that permits a headless resume of an
     // interactive session. It travels with the owner tuple it describes.
     'owner_process_exited_at',
+    // Schema 26 records the session host a session was spawned under.
+    'host_name',
+    'host_ref',
   ],
   channel_routes: [
     'id',
@@ -398,6 +401,7 @@ export const TABLE_COLUMNS = Object.freeze({
     'created_at',
     'updated_at',
     'ended_at',
+    'background_wait_at',
   ],
   endpoint_retirements: [
     'id',

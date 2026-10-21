@@ -27,6 +27,10 @@ export function renderActivityMessage(event) {
       return `run identity registered job=${event.job_id || "unknown"} run=${event.run_id || "unknown"}`;
     case "job_run_terminal":
       return `run terminal job=${event.job_id || "unknown"} run=${event.run_id || "unknown"} status=${event.status || "unknown"} reason=${event.reason || "unknown"}`;
+    case "job_run_session_finished":
+      return `run session finished job=${event.job_id || "unknown"} run=${event.run_id || "unknown"} status=${event.status || "unknown"}${event.error ? ` error=${event.error}` : ""}`;
+    case "job_run_handed_off":
+      return `run handed off job=${event.job_id || "unknown"} run=${event.run_id || "unknown"}${event.pid ? ` pid=${event.pid}` : ""} awaiting exit`;
     case "job_run_completed_success":
       return `run completed job=${event.job_id || "unknown"} status=success duration=${durationSummary(event.duration_ms) || "unknown"}`;
     case "job_run_completed_failure":

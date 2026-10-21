@@ -2,7 +2,7 @@ import { closeSync, mkdirSync, openSync, unlinkSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { writeTextAtomic } from "./durable_file_io.mjs";
-import { defaultTightbeamCommand } from "./tightbeam_channel_runtime.mjs";
+import { tightbeamInvocation } from "./tightbeam_channel_runtime.mjs";
 import { runWithClosedStdin } from "./starport_process.mjs";
 import { renderTldrAgentWelcomeEmail } from "./transports/email/templates.mjs";
 export const WELCOME_IDEMPOTENCY_KEY = "tldr-agent-welcome:v1";
@@ -38,6 +38,15 @@ function sessionEnvironment(context) {
       ? { CLAUDE_CODE_SESSION_ID: sessionId }
       : null;
 }
+function codedSocketConnectError(error) {
+  const code = error?.code;
+  const message = String(error?.message ?? "");
+  return (
+    (code === "ECONNREFUSED" || code === "ENOENT") &&
+    new RegExp(`\\bconnect ${code}\\b`, "u").test(message)
+  );
+}
+
 function welcomeData(result) {
   const value = result?.result ?? result?.data ?? result;
   if (!value || typeof value !== "object") return {};
@@ -76,7 +85,8 @@ async function productionSessionRun({
     const output = String(error?.stdout ?? "").trim();
     if (output) {
       try {
-        return JSON.parse(output);
+        const parsed = JSON.parse(output);
+        if (!codedSocketConnectError(parsed?.error)) return parsed;
       } catch {
         // The launch completed but did not return an interpretable result.
       }
@@ -108,13 +118,15 @@ async function productionSessionRun({
   }
 }
 export function createSessionWelcomeDispatcher({
-  command = defaultTightbeamCommand(),
+  command,
+  commandPrefix,
   stateRoot = process.env.TIGHTBEAM_STATE_ROOT,
   context,
   run = productionSessionRun,
   evidence = null,
 } = {}) {
   const identityEnvironment = sessionEnvironment(context);
+  const invocation = tightbeamInvocation({ command, commandPrefix });
   return async ({ subject, body } = {}) => {
     if (!identityEnvironment) {
       return {
@@ -144,8 +156,9 @@ export function createSessionWelcomeDispatcher({
       };
     }
     const result = await run({
-      command,
+      command: invocation.command,
       args: [
+        ...(invocation.commandPrefix ?? []),
         "--json",
         "agent",
         "send",

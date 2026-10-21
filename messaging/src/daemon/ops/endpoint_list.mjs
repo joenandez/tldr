@@ -15,9 +15,10 @@
 // omitted unless asked for, because a closed session never returns.
 
 import { TightbeamError } from '../../protocol/envelope.mjs';
+import { isTachyonArmedForGeneration } from '../tachyon_arming.mjs';
 import { expandStoredRuntimeIds, runtimeContract } from './resume_shared.mjs';
 
-const FIELDS = new Set(['provider_session_id', 'runtime', 'created_after', 'created_before', 'include_closed', 'limit']);
+const FIELDS = new Set(['endpoint_id', 'provider_session_id', 'provider_session_id_prefix', 'authority_reference', 'runtime', 'created_after', 'created_before', 'active_after', 'order_by', 'include_closed', 'limit']);
 export const ENDPOINT_LIST_DEFAULT_LIMIT = 100;
 export const ENDPOINT_LIST_MAX_LIMIT = 1000;
 
@@ -54,11 +55,18 @@ function parsePayload(payload) {
   if (!Number.isInteger(limit) || limit < 1 || limit > ENDPOINT_LIST_MAX_LIMIT) {
     malformed('limit', `limit must be an integer from 1 to ${ENDPOINT_LIST_MAX_LIMIT}`);
   }
+  const orderBy = payload.order_by ?? 'created_at';
+  if (orderBy !== 'created_at' && orderBy !== 'updated_at') malformed('order_by', 'order_by must be created_at or updated_at when present');
   return {
+    endpointId: optionalString(payload, 'endpoint_id'),
     providerSessionId: optionalString(payload, 'provider_session_id'),
+    providerSessionIdPrefix: optionalString(payload, 'provider_session_id_prefix'),
+    authorityReference: optionalString(payload, 'authority_reference'),
     runtime: optionalString(payload, 'runtime'),
     createdAfter: optionalTimestamp(payload, 'created_after'),
     createdBefore: optionalTimestamp(payload, 'created_before'),
+    activeAfter: optionalTimestamp(payload, 'active_after'),
+    orderBy,
     includeClosed,
     limit,
   };
@@ -75,6 +83,9 @@ function projection(row) {
     launch_mode: row.launch_mode ?? null,
     authority_reference: row.authority_reference ?? null,
     owner_process_pid: row.owner_process_pid ?? null,
+    owner_process_exited_at: row.owner_process_exited_at ?? null,
+    tachyon_armed: isTachyonArmedForGeneration(row, row.process_generation),
+    superseded_by_endpoint_id: row.superseded_by_endpoint_id ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
     closed_at: row.closed_at ?? null,
@@ -93,6 +104,20 @@ export const endpointListOp = {
 
     const where = ['created_by_app_id = ?', `authority_name IN (${authorities.map(() => '?').join(', ')})`];
     const params = [connection.appId, ...authorities];
+    // The exact id and the literal prefix are bounded reads a caller can use
+    // to prove a fact without depending on the capped, newest-first list.
+    if (filters.endpointId !== null) {
+      where.push('id = ?');
+      params.push(filters.endpointId);
+    }
+    if (filters.providerSessionIdPrefix !== null) {
+      where.push('substr(provider_session_id, 1, ?) = ?');
+      params.push(filters.providerSessionIdPrefix.length, filters.providerSessionIdPrefix);
+    }
+    if (filters.authorityReference !== null) {
+      where.push('authority_reference = ?');
+      params.push(filters.authorityReference);
+    }
     if (filters.providerSessionId !== null) {
       where.push('provider_session_id = ?');
       params.push(filters.providerSessionId);
@@ -112,16 +137,27 @@ export const endpointListOp = {
       where.push('created_at <= ?');
       params.push(filters.createdBefore);
     }
+    if (filters.activeAfter !== null) {
+      // Recently changed, or live now: a recorded owner with no observed exit.
+      where.push("(updated_at >= ? OR (owner_process_pid IS NOT NULL AND owner_process_exited_at IS NULL AND state NOT IN ('dead', 'closed')))");
+      params.push(filters.activeAfter);
+    }
     if (!filters.includeClosed) where.push("state != 'closed'");
 
     // One extra row answers "was the result cut off" without a COUNT.
     const rows = context.db
       .prepare(
         `SELECT id, principal_id, authority_name, runtime, provider_session_id, state, launch_mode,
-                authority_reference, owner_process_pid, created_at, updated_at, closed_at
+                authority_reference, owner_process_pid, owner_process_exited_at, process_generation,
+                tachyon_armed_process_generation, created_at, updated_at, closed_at,
+                (SELECT original.replacement_endpoint_id FROM resume_requests original
+                  WHERE original.endpoint_id = endpoints.id
+                    AND original.state = 'failed' AND original.recovery_mode = 'exact_resume'
+                    AND original.replacement_endpoint_id IS NOT NULL
+                  LIMIT 1) AS superseded_by_endpoint_id
            FROM endpoints
           WHERE ${where.join(' AND ')}
-          ORDER BY created_at DESC, id DESC
+          ORDER BY ${filters.orderBy} DESC, id DESC
           LIMIT ?`,
       )
       .all(...params, filters.limit + 1);

@@ -29,6 +29,10 @@ function actionFromType(type) {
       return "identity_registered";
     case "job_run_terminal":
       return "terminal";
+    case "job_run_handed_off":
+      return "handed_off";
+    case "job_run_session_finished":
+      return "session_finished";
     case "job_run_completed_success":
     case "job_run_completed_failure":
     case "job_run_completed_timeout":

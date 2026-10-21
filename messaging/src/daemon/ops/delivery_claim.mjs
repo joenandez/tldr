@@ -16,6 +16,7 @@ import { advanceReplyWaitForDelivery, markStagedDeliveryFailedAttention } from '
 const DELIVERY_PROJECTION_SQL = `SELECT d.id AS id, d.message_id AS message_id, d.endpoint_id AS endpoint_id, e.created_by_app_id AS owner_app_id,
                     m.conversation_id AS conversation_id, conv.metadata AS conversation_metadata, m.sender_principal_id AS sender_principal_id,
                     m.body AS body, m.metadata AS metadata, m.created_at AS created_at, m.origin AS origin,
+                    d.route_reason AS route_reason,
                     m.in_reply_to_message_id AS in_reply_to_message_id,
                     sender.display_name AS sender_display_name, origin_route.selector AS origin_channel_selector,
                     effect.effect_payload AS effect_payload, route.app_id AS route_app_id,
@@ -225,6 +226,9 @@ export const deliveryClaimOp = {
         lease_expires_at: claim.leaseExpiresAt,
         message,
       };
+      if (delivery.route_reason !== null) {
+        result.route_reason = delivery.route_reason;
+      }
       if (acceptReplyBinding === true && delivery.reply_binding_id && delivery.route_app_id === connection.appId) {
         result.reply_binding = issueReplyBindingToken(context.db, { bindingId: delivery.reply_binding_id, now });
       }

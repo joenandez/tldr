@@ -44,13 +44,16 @@ the installed tldr; app in a macOS desktop session. In a headless session,
 it reports read-only status.
 
 Commands:
-  configure  Open the installed app to change owner or replace the API key.
-  setup      Install tldr; and continue onboarding. Refuses to replace a
-             newer release or another product line unless
+  configure  Open the app to change owner or replace the API key, or
+             disconnect email.
+  setup      Connect email in the signed tldr; app, installing it if
+             needed; messaging and tasks work without it. Refuses to
+             replace a newer release or another product line unless
              --force-downgrade is given.
-  status     Check installation and messaging readiness.
-  repair     Repair the installation and messaging setup.
-  uninstall  Open the app for uninstall confirmation.
+  status     Show messaging, scheduled tasks, and email status.
+  repair     Repair messaging, scheduled tasks, or email; each names its
+             own fix.
+  uninstall  Open the app to confirm removing tldr; from this Mac.
   version    Print the active public or local development version.
 
 Options:
@@ -60,7 +63,7 @@ Options:
   -h, --help Show this help without opening the app or installing anything.
 
 Opening the app does not install or repair tldr; and does not require
-healthy messaging. If the app is missing, run: ${front_door} setup
+healthy messaging. To install it and connect email, run: ${front_door} setup
 HELP
 }
 
@@ -213,17 +216,10 @@ if [ -x "$runtime_node" ] && [ -f "$entrypoint" ] && \
   fi
 fi
 
-case "$operation" in
-  setup|repair) ;;
-  *)
-    printf '%s\n' '{"ok":true,"data":{"state":"setup-required","next_action":"setup"},"error":null}'
-    exit 0
-    ;;
-esac
-
 # Legacy guard (assertStateRootsCreatable in src/lib/store.mjs): setup and
 # repair create the state roots, so they refuse while a root at its default
-# location is missing and its legacy root is still a real directory.
+# location is missing and its legacy root is still a real directory. Cold
+# status then skips its probe, whose runtime cache would create a new root.
 legacy_root_pending() {
   [ "$1" = "$2" ] && [ ! -e "$1" ] && [ -d "$3" ] && [ ! -L "$3" ]
 }
@@ -237,6 +233,53 @@ fi
 if legacy_root_pending "${TIGHTBEAM_STATE_ROOT:-${state_root_parent}/tightbeam}" "${state_root_parent}/tightbeam" "${HOME}/.tightbeam"; then
   pending_roots="${pending_roots} tightbeam"
 fi
+
+# Cold status is observational: the read-only capability probe runs on the
+# package's verified runtime (libexec/component-dispatch), never on install/,
+# and activates nothing. If the runtime cannot be verified, the static reply
+# stands.
+probe_cold_status() {
+  dispatcher="${package_root}/libexec/component-dispatch"
+  [ -f "$dispatcher" ] || return 0
+  probe_status=0
+  probe_output=$(/bin/sh "$dispatcher" tldr-capabilities) || probe_status=$?
+  if [ "$probe_status" -eq 0 ] && [ -n "$probe_output" ]; then
+    printf '%s\n' "$probe_output"
+    exit 0
+  fi
+  printf '{"ts":"%s","level":"warn","event":"cold_capability_probe_failed","status":"static_reply","params":{"exit_code":%d}}\n' \
+    "$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" "$probe_status" >&2
+}
+
+# Explicit uninstall activates like setup and repair: only the installed
+# runtime can open the signed app, which owns the uninstall confirmation, so
+# a never-connected install could not otherwise be removed.
+#
+# With no install and no messaging or task state there is nothing to remove,
+# and activating would install the product only to uninstall it. Legacy roots
+# awaiting migration still count as state (refused below).
+if [ "$operation" = "uninstall" ] && [ -z "$pending_roots" ] && \
+   [ ! -e "$install_root" ] && [ ! -e "${state_root_parent}/helm" ] && \
+   [ ! -e "${TIGHTBEAM_STATE_ROOT:-${state_root_parent}/tightbeam}" ]; then
+  printf '{"ts":"%s","level":"info","event":"bootstrap_uninstall_nothing_installed","status":"uninstalled","params":{"operation":"bootstrap_uninstall"}}\n' \
+    "$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" >&2
+  printf '%s\n' '{"ok":true,"data":{"state":"uninstalled","components":[],"next_action":"remove-plugin","remediation":"Claude Code: claude plugin uninstall tldr@tldr\nCodex: codex plugin remove tldr@tldr"},"error":null}'
+  exit 0
+fi
+case "$operation" in
+  setup|repair|uninstall)
+    printf '{"ts":"%s","level":"info","event":"bootstrap_activation_admitted","status":"cold","params":{"operation":"bootstrap_%s"}}\n' \
+      "$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" "$operation" >&2
+    ;;
+  *)
+    if [ "$operation" = "status" ] && [ -z "$pending_roots" ]; then
+      probe_cold_status
+    fi
+    printf '%s\n' '{"ok":true,"data":{"state":"setup-required","next_action":"setup"},"error":null}'
+    exit 0
+    ;;
+esac
+
 if [ -n "$pending_roots" ]; then
   printf '{"ts":"%s","level":"warn","event":"state_root_migration_pending","status":"refused","params":{"operation":"bootstrap_%s","pending":"%s"}}\n' \
     "$(/bin/date -u +%Y-%m-%dT%H:%M:%SZ)" "$operation" "${pending_roots# }" >&2

@@ -46,13 +46,7 @@ const OPERATIONS = new Map([
   ],
   ["get_bound_message", [["message_id", "string", 256, true]]],
   ["get_bound_thread", [["thread_id", "string", 256, true]]],
-  [
-    "begin_enrollment",
-    [
-      ["authorization", "string", 4096, true],
-      ["transaction_id", "string", 256, true],
-    ],
-  ],
+  ["begin_enrollment", TRUSTED_TRANSACTION],
   [
     "submit_enrollment",
     [
@@ -79,6 +73,7 @@ const OPERATIONS = new Map([
     ],
   ],
   ["uninstall", TRUSTED_TRANSACTION],
+  ["disconnect_email", TRUSTED_TRANSACTION],
 ]);
 
 const SAFE_ERRORS = new Map([

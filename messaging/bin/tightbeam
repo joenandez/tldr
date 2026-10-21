@@ -33,7 +33,7 @@ import { createRuntimeSnapshot, loadPersistedRuntimeEntries } from '../src/daemo
 // anything in schema.mjs that opens or migrates.
 import { SCHEMA_VERSION } from '../src/daemon/schema.mjs';
 import { runDoctorChecks } from '../src/cli/doctor_checks.mjs';
-import { AgentCommandError, loadAgentSession, parseAgentCommand, runAgentCommand } from '../src/cli/agent_commands.mjs';
+import { AgentCommandError, loadAgentSession, parseAgentCommand, resolveAgentSessionIdentity, runAgentCommand } from '../src/cli/agent_commands.mjs';
 // Text for a person or an agent to run names the front door
 // (`tldr-agents messaging`), not the retired `tightbeam` bin alias (item 36).
 import { tightbeamCommandName } from '../src/cli/package_context.mjs';
@@ -44,6 +44,7 @@ import { parseRuntimeManifest } from '../src/runtimes/registry.mjs';
 import { BASELINE_CAPABILITIES, DAEMON_VERSION, PROTOCOL_VERSION, TightbeamError } from '../src/protocol/envelope.mjs';
 
 class UsageError extends Error {}
+
 
 // --state-root, else TIGHTBEAM_STATE_ROOT, else ~/.tldr-agents/tightbeam.
 function resolveStateRoot(explicit) {
@@ -334,33 +335,43 @@ const COMMANDS = {
       // rather than implementing a second cache repair protocol. The cache is
       // a hint; registration is idempotent and refreshes missing/incomplete
       // identity facts for this live runtime session.
+      // One identity decision per invocation: an inherited session variable
+      // from another runtime must not pick the session (see
+      // resolveAgentIdentity), and the refresh must register the same one.
+      const identityLog = (fields) => {
+        if (process.env.TIGHTBEAM_HOOK_DEBUG) process.stderr.write(`${JSON.stringify({ component: 'tightbeam-agent', ...fields })}\n`);
+      };
+      const paths = statePaths(globalFlags.stateRoot);
+      const registry = createRuntimeSnapshot({
+        stateRoot: globalFlags.stateRoot,
+        runtimesDir: paths.runtimesDir,
+        entries: loadPersistedRuntimeEntries({ runtimesDir: paths.runtimesDir }),
+      });
+      const identity = resolveAgentSessionIdentity({ registry, log: identityLog });
       const refreshSession = async () => {
-        const paths = statePaths(globalFlags.stateRoot);
-        const registry = createRuntimeSnapshot({
-          stateRoot: globalFlags.stateRoot,
-          runtimesDir: paths.runtimesDir,
-          entries: loadPersistedRuntimeEntries({ runtimesDir: paths.runtimesDir }),
-        });
         await runHookVerb('session-start', {
           stateRoot: globalFlags.stateRoot,
           // An agent command is not a hook: nothing writes a payload to its
-          // stdin, and the session is the one loadAgentSession resolves from
-          // the environment. Reading fd 0 here blocked forever when the
-          // caller's stdin was an open, silent pipe or socket (a Claude Code
-          // Bash tool shell; item 41), so the refresh uses an empty payload.
-          stdin: '',
+          // stdin. Reading fd 0 here blocked forever when the caller's stdin
+          // was an open, silent pipe or socket (a Claude Code Bash tool
+          // shell; item 41), so the refresh supplies the payload itself,
+          // carrying the session loadAgentSession resolved — never letting
+          // the hook re-derive it from an environment that may name a
+          // different runtime's session.
+          stdin: identity.sessionId ? JSON.stringify({ session_id: identity.sessionId }) : '',
           flags: {
             appId: globalFlags.appId,
             appSecret: globalFlags.secretFile ? readAppSecret(globalFlags.secretFile) : undefined,
+            ...(identity.source === 'ancestry' ? { runtime: identity.runtime } : {}),
           },
           registry,
           socketPath: paths.socket,
         });
-        return loadAgentSession(globalFlags.stateRoot);
+        return loadAgentSession(globalFlags.stateRoot, { identity });
       };
       let session;
       try {
-        session = loadAgentSession(globalFlags.stateRoot);
+        session = loadAgentSession(globalFlags.stateRoot, { identity });
       } catch (error) {
         if (!(error instanceof AgentCommandError) || error.code !== 'session_unavailable') throw error;
         session = await refreshSession();
@@ -375,6 +386,13 @@ const COMMANDS = {
     print(result, globalFlags) {
       if (result.help) {
         process.stderr.write(agentUsage(result.command) + '\n');
+        return;
+      }
+      if (typeof result.rendered === 'string') {
+        // Verbs with a text view (agent sessions) keep it out of --json.
+        const { rendered, ...structured } = result;
+        if (globalFlags.json) printResult(true, structured);
+        else process.stdout.write(rendered + '\n');
         return;
       }
       if (!globalFlags.json && typeof result.confirmation === 'string') {
@@ -717,6 +735,18 @@ const COMMANDS = {
 
   'channel route retire': {
     op: 'channel.route.retire',
+    build(args) {
+      const requireNoActiveDeliveries = extractFlag(args, 'require-no-active-deliveries', { boolean: true });
+      const routeId = requirePositional(args, 'route_id');
+      if (args.length > 0) throw new UsageError(`unknown argument: ${args.join(' ')}`);
+      const payload = { route_id: routeId };
+      if (requireNoActiveDeliveries) payload.require_no_active_deliveries = true;
+      return payload;
+    },
+  },
+
+  'channel route impact': {
+    op: 'channel.route.impact',
     build(args) {
       const routeId = requirePositional(args, 'route_id');
       if (args.length > 0) throw new UsageError(`unknown argument: ${args.join(' ')}`);
@@ -1176,6 +1206,9 @@ async function runHook(globalFlags, args) {
     runtime: extractFlag(args, 'runtime'),
     authority: extractFlag(args, 'authority'),
     principalRef: extractFlag(args, 'principal-ref'),
+    // `stop --handoff`: the idle-wake background-hook gate records its
+    // decision for `wake-listen` instead of holding a park itself.
+    handoff: extractFlag(args, 'handoff', { boolean: true }) === true,
     appId: globalFlags.appId,
     appSecret: globalFlags.secretFile ? readAppSecret(globalFlags.secretFile) : undefined,
   };
@@ -1320,6 +1353,7 @@ function tailDaemonLog(root, lines) {
 
 async function main() {
   const globalFlagsRaw = parseGlobalFlags(process.argv.slice(2));
+  jsonErrors = globalFlagsRaw.json;
   const globalFlags = { stateRoot: resolveStateRoot(globalFlagsRaw.stateRoot), admin: globalFlagsRaw.admin, appId: globalFlagsRaw.appId, secretFile: globalFlagsRaw.secretFile, json: globalFlagsRaw.json };
   const rest = globalFlagsRaw.rest;
 
@@ -1364,6 +1398,11 @@ async function main() {
   if (!resolved) throw new UsageError(`unknown command: ${rest.join(' ')}`);
 
   const def = COMMANDS[resolved.key];
+
+  if (resolved.key.startsWith('recovery ') && resolved.args.length === 1 && ['--help', '-h'].includes(resolved.args[0])) {
+    process.stderr.write(`${USAGE_HEADER}\n${FULL_USAGE_AFTER_COMMIT.find((line) => line.startsWith(`  ${resolved.key} `))}\n`);
+    return;
+  }
 
   // Retired lifecycle writers answer the daemon's typed verdict BEFORE any
   // arg shaping: a client-side usage error must never mask the cutover
@@ -1429,13 +1468,14 @@ function agentUsage(command) {
     USAGE_HEADER,
     '',
     'send and track work:',
-    '  agent send --to agent:<ref> --subject <text> --reason <text> (--body <text> | --body-file <path>) [--no-reply]',
-    '  agent send --to user --subject <text> --reason <text> (--body <text> | --body-file <path>) [--channel <selector>|all] [--no-reply]',
-    '  agent request --to self|agent:<ref> --subject <text> --reason <text> (--body <text> | --body-file <path>) --completion-mode <message_committed|delivery_confirmed> [--notify user] [--channel <selector>]',
+    '  agent send --to session:<id>|agent:<runtime>:<cwd>|new:<runtime>:<cwd> --subject <text> --reason <text> (--body <text> | --body-file <path>) [--no-reply]',
+    '  agent send --to user --subject <text> --reason <text> (--body <text> | --body-file <path>) [--channel <selector>|all] [--no-reply] [--wait-delivery <duration>]',
+    '  agent send --thread <handle> (--body <text> | --body-file <path>)',
+    '  agent request --to self|session:<id>|agent:<runtime>:<cwd>|new:<runtime>:<cwd> --subject <text> --reason <text> (--body <text> | --body-file <path>) --completion-mode <message_committed|delivery_confirmed> [--notify user] [--channel <selector>]',
     '  agent reply --message <message_id> (--body <text> | --body-file <path>) [--channel <selector>] [--no-reply] [--wait-delivery <duration>]',
     '  agent ack --work <work_id> (--body <text> | --body-file <path>)',
     '  agent update --work <work_id> (--body <text> | --body-file <path>)',
-    '  agent delegate --work <work_id> --to agent:<ref> (--body <text> | --body-file <path>)',
+    '  agent delegate --work <work_id> --to session:<id>|agent:<runtime>:<cwd>|new:<runtime>:<cwd> (--body <text> | --body-file <path>)',
     '  agent accept --work <delegation_id> (--body <text> | --body-file <path>)',
     '  agent decline --work <delegation_id> (--body <text> | --body-file <path>)',
     '  agent complete --work <work_id> (--body <text> | --body-file <path>) [--notify user] [--wait-delivery <duration>]',
@@ -1443,6 +1483,9 @@ function agentUsage(command) {
     '  agent inbox [--unread]',
     '  agent receive --message <message_id>',
     '  agent status (--work <work_id>|--message <message_id>) [--wait-delivery <duration>]',
+    '  agent sessions [--here | --cwd <path>] [--runtime <runtime>] [--state <busy|idle|stopped|ended|unknown>] [--all]',
+    '  agent threads [--all] [--waiting-on me|them]',
+    '  agent thread --thread <handle> [--limit <n>] [--since <time>]',
     '',
     'advanced protocol (only when maintaining an existing integration):',
     ...COMMIT_USAGE,
@@ -1464,9 +1507,18 @@ function agentUsage(command) {
     USAGE_HEADER,
     ...lines.filter((line) => line.startsWith(`  agent ${command} `)),
     '',
-    ...(['reply', 'complete', 'ack'].includes(command) ? ['reply sends the final user response; ack acknowledges work that continues.'] : []),
-    ...(command === 'status' ? ['status --message uses the outbound message_id returned by reply/complete.'] : []),
-    ...(['reply', 'complete', 'status'].includes(command) ? ['--wait-delivery 30s waits up to the duration (1ms–60s); timeout never resends.'] : []),
+    ...(['reply', 'complete'].includes(command) ? ['reply sends the final user response.'] : []),
+    ...(command === 'ack' ? ['ack acknowledges a user (email) message you are working on, so the user knows it arrived and the final response is still coming; it applies only to work that arrived as a user message, not work another agent asked of you; report that with update and finish it with complete.'] : []),
+    ...(['update', 'complete', 'delegate'].includes(command) ? ['--work is the work id of the request you hold: it is in the request notification, the resume or start brief, the receive output (work_id), agent threads, and agent thread; it is not the thread handle. work_not_found means the value is not work you can see; agent threads --waiting-on me lists the work waiting on you.'] : []),
+    ...(['accept', 'decline'].includes(command) ? [`${command} answers a delegation offer made to you. --work is the delegation id the offer names: it is in the offer notification, the receive output, agent threads, agent thread, and agent status. handoff_unavailable means no offer awaits your answer; agent threads --waiting-on me lists any that do.`] : []),
+    ...(command === 'status' ? ['status --message uses the outbound message_id returned by reply/complete.', 'status --work shows the work state (cancelled is never shown as done), its holder, who it is waiting on, and the delivery step.'] : []),
+    ...(command === 'send' ? ['send --thread follows up with the agent that owes you in that thread (still the delegator after a delegation; the replacement if it was replaced). It creates no new work; closed work gives work_closed.'] : []),
+    ...(['send', 'request', 'delegate'].includes(command) ? ['new:<runtime>:<cwd> starts a headless claude-code or codex session in that existing folder and waits up to 20 s for its session id; if it is still starting, agent threads shows it.'] : []),
+    ...(command === 'sessions' ? ['sessions lists sessions that are live or were active in the last 24 hours, this folder first; --all lists the 200 most recently active, ended ones included. A cut-off list says more exist. Address one with --to session:<id>.'] : []),
+    ...(command === 'threads' ? ['threads lists the threads you started or take part in: open ones plus anything waiting on you; --all adds closed ones. Read one with agent thread --thread <handle>.'] : []),
+    ...(command === 'thread' ? ['thread shows one thread\'s messages and work events, oldest first. The handle is the thread id or at least 8 characters of it. Reading never marks anything read.'] : []),
+    ...(command === 'cancel' ? ['cancel works for the session that requested the work (even after it was delegated) or the session holding it; every downstream holder is told. Any other session gets not_requester.'] : []),
+    ...(['send', 'reply', 'complete', 'status'].includes(command) ? ['--wait-delivery 30s waits up to the duration (1ms–60s); timeout never resends.'] : []),
     ...(['reply', 'inbox'].includes(command) ? ['Runtime notifications already contain the reply target; inbox is for recovery.'] : []),
   ].join('\n');
   return lines.join('\n');
@@ -1505,7 +1557,8 @@ const FULL_USAGE_BEFORE_COMMIT = [
       '  conversation create --participants <id,id> --subject <text> --reason <text>',
       '  channel route register --selector <selector> --label <label> --principal <id> --endpoint <id> --capability <send|reply>',
       '  channel route list [--available] [--require-capability <send|reply>]',
-      '  channel route retire <route_id>',
+      '  channel route retire <route_id> [--require-no-active-deliveries]',
+      '  channel route impact <route_id>',
       '  channel reply publish --reply-binding <opaque_token> --body <text> --external-event-id <id> --provider-metadata-json <json>',
 ];
 
@@ -1530,7 +1583,8 @@ const FULL_USAGE_AFTER_COMMIT = [
       '  resume complete <resume_request_id> --token <token>',
       '  resume fail <resume_request_id> --token <token> [--retryable] [--reason <text>]',
       '  watch <principal_id>',
-      `  hook ${HOOK_EVENT_VERBS.join('|')}   (reads the runtime hook payload on stdin)`,
+      `  hook ${HOOK_EVENT_VERBS.join('|')} [--runtime <id>]   (reads the runtime hook payload on stdin)`,
+      '  hook stop --handoff [--runtime <id>]   (idle-wake gate: records the Stop decision for hook wake-listen)',
       '  hooks install [--runtime <id>] [--dry-run]   (id: a builtin or a registered manifest runtime)',
       '  hooks uninstall [--runtime <id>] [--settings-file <path>]',
       '  export [--app-id-scope <app_id>] [--out <file>] (admin)',
@@ -1542,6 +1596,7 @@ const FULL_USAGE_AFTER_COMMIT = [
       '  --version',
 ];
 
+let jsonErrors = false;
 main().catch((err) => {
   // Exit 1, never 2: Claude Code reads exit code 2 as "block this turn",
   // and a hook that cannot do its job must not stop the agent's work.
@@ -1558,7 +1613,20 @@ main().catch((err) => {
     process.exit(1);
   }
   if (err instanceof TightbeamError || (err && typeof err.code === 'string')) {
-    process.stderr.write(`error ${err.code}: ${err.message}\n`);
+    if (jsonErrors) {
+      printJson({
+        ok: false,
+        error: {
+          code: err.code,
+          message: err.message,
+          ...(err instanceof AgentCommandError ? {
+            details: err.details ?? null,
+            next_action: err.next_action ?? null,
+          } : {}),
+        },
+      });
+    }
+    process.stderr.write(`error ${err.code}: ${err.message}${err.next_action ? `\nNext: ${err.next_action}` : ''}\n`);
     process.exit(1);
   }
   process.stderr.write(`tightbeam: ${err.stack ?? err.message}\n`);

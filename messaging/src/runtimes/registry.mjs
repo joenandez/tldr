@@ -86,7 +86,13 @@ const TOP_LEVEL_FIELDS = new Set([
 // never adapter-authored, never serialized onto the wire or into state.
 const IDENTITY_FIELDS = new Set(['sessionEnvVars', 'envMarkers', 'transcriptHints']);
 const HOOKS_INSTALL_FIELDS = new Set(['settingsPath', 'format']);
-const CAPABILITY_FIELDS = new Set(['stdoutInjection', 'blockExitCodes']);
+const CAPABILITY_FIELDS = new Set(['stdoutInjection', 'blockExitCodes', 'idleWake']);
+// How a waiting message reaches an idle session (docs/runtime-adapter-contract.md
+// «Idle wake»). Optional on manifests; an undeclared runtime keeps today's
+// blocking Stop park. channel-push is reserved, not accepted.
+// The installer (cli/hooks_install.mjs) shapes Stop from these same values.
+export const IDLE_WAKE_MODES = Object.freeze(['stop-hold', 'background-hook']);
+export const DEFAULT_IDLE_WAKE = 'stop-hold';
 
 // Lowercase kebab: letter-led segments joined by single hyphens. The same
 // shape every builtin id already satisfies.
@@ -320,6 +326,10 @@ export function parseRuntimeManifest(input, { registeredCount = 0, maxRegistered
       return manifestRejection('invalid_field', 'capabilities.blockExitCodes entries must be non-negative integers', 'capabilities.blockExitCodes');
     }
   }
+  const idleWake = hasOwn(document.capabilities, 'idleWake') ? document.capabilities.idleWake : DEFAULT_IDLE_WAKE;
+  if (!IDLE_WAKE_MODES.includes(idleWake)) {
+    return manifestRejection('invalid_field', `capabilities.idleWake must be ${IDLE_WAKE_MODES.map((mode) => `"${mode}"`).join(' or ')}`, 'capabilities.idleWake');
+  }
 
   // Origin is loader-known metadata, mirroring builtins.mjs; it is never
   // adapter-authored (rejected above as unknown_field) and never serialized.
@@ -349,6 +359,7 @@ export function parseRuntimeManifest(input, { registeredCount = 0, maxRegistered
       capabilities: Object.freeze({
         stdoutInjection: document.capabilities.stdoutInjection,
         blockExitCodes: Object.freeze([...blockExitCodes]),
+        idleWake,
       }),
     }),
   };

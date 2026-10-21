@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { basename, join, resolve } from "node:path";
 
 import { createProductionOwnerSetupService } from "./aegis_native_setup_runtime.mjs";
+import { createEmailDisconnectMarker } from "./email_disconnect_marker.mjs";
 import { createTldrAgentSourceInstallLifecycle } from "./tldr_agent_source_lifecycle.mjs";
 import {
   assertStateRootsCreatable,
@@ -21,6 +22,12 @@ import {
 } from "./starport_onboarding.mjs";
 import { createStarportOrchestrator } from "./starport_orchestrator.mjs";
 import { createTightbeamChannel } from "./tightbeam_channel.mjs";
+import { defaultTightbeamInvocation } from "./tightbeam_channel_runtime.mjs";
+import {
+  createMessagingDoctorReader,
+  createTasksLivenessReader,
+  HELM_SCHEDULER_STATUS_PORT,
+} from "./tldr_capability_readers.mjs";
 import {
   AEGIS_APP,
   createLocalSnapshotComponentInspector,
@@ -120,6 +127,7 @@ export async function createProductionStarportRuntime({
   inspectComponents = null,
   installBundledAegis = null,
   tightbeam = null,
+  readTasksHealth = null,
 } = {}) {
   // The roots as the caller configured them, before this runtime pins
   // TLDR_AGENT_HOME and HELM_HOME into env below.
@@ -158,6 +166,13 @@ export async function createProductionStarportRuntime({
       }
       return sourceLifecycle.install();
     },
+    // Only explicit uninstall calls this, when the signed app is absent.
+    installNativeApp: () => installAegis(),
+    // Messaging or task state from a never-connected install.
+    hasProductState: () => {
+      const roots = resolveStateRoots({ env: stateRootEnv, userHome });
+      return [roots.helm.path, roots.tightbeam.path].some(existsSync);
+    },
     reconcile: () => sourceLifecycle.reconcileReplacementEvidence?.(),
     uninstall: () => sourceLifecycle.uninstall(),
   });
@@ -173,8 +188,9 @@ export async function createProductionStarportRuntime({
     findProviderAcceptanceByDelivery:
       tightbeamService.findProviderAcceptanceByDelivery,
   });
+  const tightbeamCommand = defaultTightbeamInvocation(env);
   const dispatchWelcome = createSessionWelcomeDispatcher({
-    command: env.TIGHTBEAM_BIN,
+    ...tightbeamCommand,
     stateRoot: env.TIGHTBEAM_STATE_ROOT,
     context,
     evidence: welcomeEvidence,
@@ -210,6 +226,18 @@ export async function createProductionStarportRuntime({
     onboarding: onboardingService,
     source: sourceAdapter,
     tightbeam: tightbeamService,
+    // The same readers as the cold probe; an injected Tightbeam keeps its own.
+    readMessagingHealth: tightbeam
+      ? tightbeam.doctor
+      : createMessagingDoctorReader(tightbeamCommand),
+    readTasksHealth:
+      readTasksHealth ??
+      createTasksLivenessReader({
+        port: Number(env.HELM_STATUS_PORT) || HELM_SCHEDULER_STATUS_PORT,
+        userHome,
+      }),
+    readEmailRoutes: tightbeamService.listEmailRoutes,
+    emailDisconnect: createEmailDisconnectMarker({ home }),
   });
   return withStateRoots(orchestrator, { env: stateRootEnv, userHome });
 }
@@ -274,6 +302,7 @@ function withStateRoots(orchestrator, { env, userHome }) {
 }
 
 export const _internals = Object.freeze({
+  createTasksLivenessReader,
   resolveSetupContext,
   AEGIS_APP,
   AEGIS_TEAM_ID,

@@ -11,6 +11,7 @@
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
 import { reapExpired } from './claims_shared.mjs';
+import { receiveOrderBy } from './message_shared.mjs';
 
 // F1: an inbox with enough large-body messages could otherwise produce a
 // result too large to encode into one frame (MAX_FRAME_BYTES,
@@ -143,7 +144,7 @@ export const inboxListOp = {
           WHERE e.principal_id = ?
             AND (? IS NULL OR d.endpoint_id = ?)
             AND (? IS NULL OR m.created_at > ?)
-          ORDER BY m.created_at ASC`,
+          ORDER BY ${receiveOrderBy('d')}`,
       )
       .all(principalId, endpointId ?? null, endpointId ?? null, since ?? null, since ?? null);
 
@@ -152,8 +153,15 @@ export const inboxListOp = {
     // message, preferring the most-complete delivery_state observed.
     const rank = { pending: 0, claimed: 1, delivered: 2, failed: 2, expired: 2, read: 3, acknowledged: 4 };
     const byMessage = new Map();
+    // Unread means receivable by one of these endpoints: message.receive skips
+    // failed deliveries and read ones are done, so for an unread listing those
+    // rows are dropped BEFORE collapsing. Otherwise a failed or read copy on a
+    // sibling endpoint would outrank a still-pending copy and hide a message
+    // the pending endpoint can receive (re-check 8).
+    const NOT_UNREAD = new Set(['read', 'acknowledged', 'failed']);
     for (const row of rows) {
       const state = computeDeliveryState(row);
+      if (unreadOnly && NOT_UNREAD.has(state)) continue;
       const existing = byMessage.get(row.message_id);
       if (!existing || rank[state] > rank[existing.delivery_state]) {
         const message = {
@@ -190,8 +198,9 @@ export const inboxListOp = {
       }
     }
 
-    let messages = [...byMessage.values()].sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0));
-    if (unreadOnly) messages = messages.filter((m) => m.delivery_state !== 'read' && m.delivery_state !== 'acknowledged');
+    // Map insertion order is the query's receive order (a repeat sighting of a
+    // message keeps its first position); never re-sort by message time.
+    let messages = [...byMessage.values()];
     messages = messages.slice(0, limit);
 
     let bodyBytes = 0;

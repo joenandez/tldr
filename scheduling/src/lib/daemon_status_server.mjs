@@ -11,6 +11,11 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function parseLimit(raw) {
+  const value = Number(raw);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 100;
+}
+
 function notFound(res, pathname) {
   json(res, 404, { error: { code: "not_found", message: pathname } });
 }
@@ -36,6 +41,8 @@ export async function runDaemonStatusServer(opts = {}) {
   const schedulerScriptPath = opts.schedulerScriptPath;
   const host = opts.host || "127.0.0.1";
   const port = opts.port !== undefined ? Number(opts.port) : 45173;
+  const loadServerEvents =
+    opts.loadServerEvents || (() => import("./observability_service.mjs"));
   const startedAt = nowIso();
 
   const server = createServer(async (req, res) => {
@@ -77,6 +84,28 @@ export async function runDaemonStatusServer(opts = {}) {
         json(res, 500, {
           error: {
             code: "service_status_failed",
+            message: err?.message || String(err),
+          },
+        });
+      }
+      return;
+    }
+    if (pathname === "/events") {
+      try {
+        const { globalServerEvents } = await loadServerEvents();
+        json(
+          res,
+          200,
+          globalServerEvents(schedulerScriptPath, {
+            since: requestUrl.searchParams.get("since"),
+            scope_id: requestUrl.searchParams.get("scope_id"),
+            limit: parseLimit(requestUrl.searchParams.get("limit")),
+          }),
+        );
+      } catch (err) {
+        json(res, 500, {
+          error: {
+            code: "events_status_failed",
             message: err?.message || String(err),
           },
         });

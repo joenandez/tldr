@@ -80,6 +80,34 @@ export function snapshotProcesses() {
   return processes;
 }
 
+// lsof lives in /usr/sbin, which a daemon started from launchd or a GUI does
+// not always have on PATH (src/cli/hook_process_tree.mjs hit the same thing
+// live). The absolute path is tried first, the PATH lookup second.
+const LSOF_COMMANDS = Object.freeze(['/usr/sbin/lsof', 'lsof']);
+
+/**
+ * The live processes holding one file open: `{ pids }` (empty when nobody
+ * does), or `{ unavailable: true }` when lsof cannot answer. A fixed probe
+ * of one path the caller built from a validated name; never a shell.
+ * F34 uses it to ask who holds a Codex thread's writer lock.
+ */
+export function observeFileHolders(filePath) {
+  for (const command of LSOF_COMMANDS) {
+    const result = spawnSync(command, ['-t', '--', filePath], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 });
+    if (result.error) {
+      if (result.error.code === 'ENOENT') continue;
+      return { unavailable: true };
+    }
+    const pids = String(result.stdout ?? '').split('\n').map((line) => line.trim()).filter((line) => /^\d+$/.test(line)).map(Number);
+    // lsof exits 1 for "nothing found", and also when it could not inspect
+    // some other process while still answering; only a failure that
+    // produced no answer at all and is not the plain "nothing" exit is unknown.
+    if (result.status === 0 || result.status === 1) return { pids };
+    return { unavailable: true };
+  }
+  return { unavailable: true };
+}
+
 function defaultProcesses() {
   return { inspect: observeRetirementProcess, snapshot: snapshotProcesses };
 }
@@ -242,6 +270,48 @@ const WATCHED_ENDPOINTS = `
      AND owner_process_exited_at IS NULL
      AND owner_process_generation = process_generation`;
 
+// F34: an interactive or unknown-mode endpoint that is idle while its
+// recorded owner is already known gone was revived without an owner. A
+// managed Codex app-server runs the next turn of a hosted thread (a queued
+// message) after its TUI exited; that turn's own hooks mark the session busy
+// and, at its Stop, idle. Nothing watches an owner that has already exited,
+// so without this the session would sit `idle` forever, never resumable
+// again: routing only enqueues for an idle interactive session. Back to
+// `dead`, exactly where the exit left it, so the next message wakes it. A
+// turn in progress (`busy`) is never touched, and neither is a headless
+// session (`non_interactive` idle is already resumable on its own branch).
+const REVIVED_IDLE_ENDPOINTS = `
+  SELECT id, runtime, launch_mode, process_generation, owner_process_pid
+    FROM endpoints
+   WHERE state = 'idle'
+     AND launch_mode IS NOT 'non_interactive'
+     AND provider_session_id IS NOT NULL
+     AND owner_process_pid IS NOT NULL
+     AND owner_process_exited_at IS NOT NULL
+     AND owner_process_generation = process_generation`;
+
+function returnRevivedIdleToDead(context, summary) {
+  const db = context.db;
+  for (const row of db.prepare(REVIVED_IDLE_ENDPOINTS).all()) {
+    const changed = withTransaction(db, () => db.prepare(
+      `UPDATE endpoints SET state = 'dead'
+        WHERE id = ? AND state = 'idle' AND process_generation = ? AND launch_mode IS ?
+          AND owner_process_exited_at IS NOT NULL AND owner_process_generation = process_generation`,
+    ).run(row.id, row.process_generation, row.launch_mode).changes === 1);
+    if (!changed) continue;
+    summary.died += 1;
+    context.logger?.info?.({
+      event: 'owner_process_exit_reconciled',
+      params: {
+        endpoint_id: row.id, runtime: row.runtime, launch_mode: row.launch_mode, process_generation: row.process_generation,
+        owner_process_pid: row.owner_process_pid, from_state: 'idle',
+      },
+      result: { to_state: 'dead', path: 'interactive_revived_idle_returns_dead' },
+      status: 'ok',
+    });
+  }
+}
+
 /**
  * One reconciliation pass. For every watched endpoint whose recorded owner
  * is gone, one CAS transaction (same state, generation, and owner tuple)
@@ -265,6 +335,7 @@ export function runOwnerProcessReconciliation(context, { now = new Date(), proce
   const startedAt = Date.now();
   const db = context.db;
   const summary = { watched: 0, exited: 0, idled: 0, died: 0, proven: 0, alive: 0, fenced: 0, unavailable: false };
+  returnRevivedIdleToDead(context, summary);
   const watched = db.prepare(WATCHED_ENDPOINTS).all()
     .filter((row) => ownerProcessTupleIssue(row, { runtime: row.runtime, processGeneration: row.process_generation }) === null);
   summary.watched = watched.length;

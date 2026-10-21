@@ -73,6 +73,12 @@ function event(type, scope, data, level = "info") {
     data,
   });
 }
+// The activity log drops agentmail_* codes, so client lines go to stderr as
+// JSON lines, the job log format the Linux poller already uses.
+const clientLogger = (line) =>
+  process.stderr.write(
+    `${JSON.stringify({ ts: new Date().toISOString(), level: line.code ? "warn" : "info", ...line })}\n`,
+  );
 export function extractAddress(value) {
   if (typeof value !== "string") return null;
   const match = value.trim().match(/<([^>]+)>/);
@@ -155,8 +161,14 @@ async function attachmentNotice({ state, messageId, threadId, invoke }) {
     idempotencyKey: `tldr-agent-${state}-${createHash("sha256").update(messageId).digest("hex").slice(0, 32)}`,
     parentMessageId: messageId,
     threadId,
+    logger: clientLogger,
   });
 }
+const PERMANENT_BROKER_CODES = new Set([
+  "REPLY_PARENT_UNAUTHORIZED",
+  "INVALID_REQUEST",
+  "UNAUTHORIZED",
+]);
 export const emailTransport = {
   async send(row, context = {}) {
     const scope = context.scope || null;
@@ -173,7 +185,7 @@ export const emailTransport = {
           ? await (() => {
               const parent = context.tightbeamProviderParent;
               if (!parent?.external_id || !parent.external_thread_id)
-                throw failed();
+                throw Object.assign(failed(), { retryable: false });
               return invoke({
                 operation: "reply_owner_thread",
                 body: envelope.text,
@@ -181,6 +193,7 @@ export const emailTransport = {
                 idempotencyKey: row.idempotency_key,
                 parentMessageId: parent.external_id,
                 threadId: parent.external_thread_id,
+                logger: clientLogger,
               });
             })()
           : await invoke({
@@ -189,6 +202,7 @@ export const emailTransport = {
               html: envelope.html,
               subject: envelope.subject || "(no subject)",
               idempotencyKey: row.idempotency_key,
+              logger: clientLogger,
             });
       if (!result?.messageId || !result?.threadId) throw failed();
       return {
@@ -203,6 +217,10 @@ export const emailTransport = {
           : Object.assign(failed(), {
               cause,
               ambiguous: cause?.ambiguous === true,
+              // Permanent broker rejections must not be released for retry.
+              ...(PERMANENT_BROKER_CODES.has(cause?.code)
+                ? { retryable: false }
+                : {}),
             });
       event(
         "transport_email_send_outcome",
@@ -399,6 +417,7 @@ export async function pollInbox({
             cursor,
             limit: 25,
             timeoutMs: brokerTimeoutMs,
+            logger: clientLogger,
           }),
           raceTimeoutMs,
           "inbox_poll_timeout",
@@ -496,6 +515,7 @@ export async function pollInbox({
           operation: "get_bound_message",
           messageId: summary.messageId,
           timeoutMs: AEGIS_INBOUND_POLL_TIMEOUT_MS,
+          logger: clientLogger,
         }),
         timeoutMs,
         "inbox_poll_timeout",

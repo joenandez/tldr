@@ -43,6 +43,7 @@ export const CHANNELS_REPLY_BINDING_V1 = 'channels.reply-binding.v1';
 export const LISTENER_V1 = 'listener.v1';
 export const MESSAGING_REPLY_CAUSALITY_V1 = 'messaging.reply-causality.v1';
 export const MESSAGING_RECEIPT_V1 = 'messaging.receipt.v1';
+export const SESSION_HOSTS_V1 = 'session_hosts.v1';
 
 // Stable names for the narrow operations introduced by those capabilities.
 // Keeping them at the protocol boundary prevents adapters from rebuilding
@@ -70,6 +71,7 @@ export const BASELINE_CAPABILITIES = Object.freeze([
   LISTENER_V1,
   MESSAGING_REPLY_CAUSALITY_V1,
   MESSAGING_RECEIPT_V1,
+  SESSION_HOSTS_V1,
 ]);
 
 export class TightbeamError extends Error {

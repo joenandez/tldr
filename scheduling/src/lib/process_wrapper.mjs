@@ -190,6 +190,14 @@ export function planMemoryLaunch({
     };
   }
 
+  const { home, reason, candidates } = provider.selection;
+  process.stderr.write(
+    `${JSON.stringify({
+      event: "subspace_home_selected",
+      params: { home, reason, candidates },
+    })}\n`,
+  );
+
   const resolvedWrapper =
     typeof provider.wrapper === "string" && isExecutableFile(provider.wrapper)
       ? provider.wrapper

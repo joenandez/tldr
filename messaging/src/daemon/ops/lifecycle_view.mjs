@@ -25,7 +25,39 @@
 // operator must see. Reading writes nothing and schedules nothing.
 
 import { TightbeamError } from '../../protocol/envelope.mjs';
-import { rootCompletionMode } from '../lifecycle_transition.mjs';
+import { uniqueShortIds } from '../../protocol/ids.mjs';
+import { rootCompletionMode, rootRequesterLineage } from '../lifecycle_transition.mjs';
+import { offerRecipientEndpointIds } from './message_shared.mjs';
+import { HOSTED_LAUNCH_FAILURE_REASONS, hostedAttentionSource } from './resume_fail.mjs';
+
+const HANDLE_MIN_CHARS = 8;
+
+/**
+ * How daemon-written copy names a session: its provider session id cut to the
+ * shortest prefix of at least 8 characters that no other known session shares
+ * (UX §9 `<id8>`). Codex session ids are UUIDv7, so sessions started close
+ * together share their first 8 characters and a plain cut would make a
+ * session and its replacement read identically. A session with no provider id
+ * yet (a placeholder) falls back to its endpoint id. The known sessions are
+ * read once, on first use.
+ * @returns {(endpoint: {id: string, provider_session_id?: string|null}) => string}
+ */
+export function sessionHandles(db) {
+  let byPrefix = null;
+  return (endpoint) => {
+    const sessionId = endpoint.provider_session_id;
+    if (typeof sessionId !== 'string' || sessionId.length === 0) return String(endpoint.id).replace(/^[^_]+_/, '').slice(0, HANDLE_MIN_CHARS);
+    if (byPrefix === null) {
+      byPrefix = new Map();
+      for (const row of db.prepare('SELECT DISTINCT provider_session_id AS id FROM endpoints WHERE provider_session_id IS NOT NULL').all()) {
+        const prefix = row.id.slice(0, HANDLE_MIN_CHARS);
+        byPrefix.set(prefix, [...(byPrefix.get(prefix) ?? []), row.id]);
+      }
+    }
+    const rivals = (byPrefix.get(sessionId.slice(0, HANDLE_MIN_CHARS)) ?? []).filter((other) => other !== sessionId);
+    return uniqueShortIds([sessionId, ...rivals], HANDLE_MIN_CHARS)[0];
+  };
+}
 
 const VIEW_FIELDS = ['conversation_id', 'root_obligation_id'];
 
@@ -48,7 +80,7 @@ function validateViewRequest(payload) {
   return request;
 }
 
-function chainNodes(db, rootId) {
+export function chainNodes(db, rootId) {
   return db
     .prepare(
       `WITH RECURSIVE chain(id) AS (
@@ -64,7 +96,7 @@ function chainNodes(db, rootId) {
     .all(rootId);
 }
 
-function chainWatches(db, rootId) {
+export function chainWatches(db, rootId) {
   return db
     .prepare(
       `WITH RECURSIVE chain(id) AS (
@@ -77,7 +109,7 @@ function chainWatches(db, rootId) {
     .all(rootId);
 }
 
-function conversationSubject(db, conversationId) {
+export function conversationSubject(db, conversationId) {
   const row = db.prepare('SELECT metadata FROM conversations WHERE id = ?').get(conversationId);
   try {
     const subject = JSON.parse(row?.metadata ?? '{}')?.subject;
@@ -166,7 +198,29 @@ function notificationProjection(db, rootId) {
   return { channel_selectors: channelSelectors, ...(resolution ? { message_id: resolution.message_id } : {}) };
 }
 
-function deriveChainLabel({ root, nodes, watches, attention }) {
+/**
+ * Who opened the work and which endpoints replaced them: the exact facts the
+ * requester-cancel authority reads, projected so the agent CLI can decide
+ * (and name the requester in a refusal) without guessing. Null for roots the
+ * daemon recorded no sending endpoint for (inbound user requests).
+ */
+function requesterProjection(db, rootId) {
+  const lineage = rootRequesterLineage(db, rootId);
+  if (!lineage) return { opening_message_id: null, requester: null };
+  const endpoint = db.prepare('SELECT runtime, provider_session_id FROM endpoints WHERE id = ?').get(lineage.endpoint_id);
+  return {
+    opening_message_id: lineage.message_id,
+    requester: {
+      endpoint_id: lineage.endpoint_id,
+      principal_id: lineage.principal_id,
+      runtime: endpoint?.runtime ?? null,
+      session_id: endpoint?.provider_session_id ?? null,
+      replacement_endpoint_ids: lineage.replacement_endpoint_ids,
+    },
+  };
+}
+
+export function deriveChainLabel({ root, nodes, watches, attention }) {
   if (root.status === 'closed') return 'done';
   if (attention) return 'needs_attention';
   const watchStateByDelegation = new Map(watches.map((watch) => [watch.delegation_id, watch.state]));
@@ -181,6 +235,51 @@ function deriveChainLabel({ root, nodes, watches, attention }) {
   // forbids; surfacing it as needs_attention keeps it impossible to lose.
   return 'needs_attention';
 }
+
+// The resumer's cwd refusal of an existing session (resumer.mjs
+// REFUSAL_CWD_NOT_FOUND and the attention source it marks).
+const CWD_NOT_FOUND_REASON = 'cwd_not_found';
+const CWD_NOT_FOUND_ATTENTION = 'resume.cwd_not_found';
+
+// The latest terminal launch failure in a conversation (plan §2.5): a failed
+// resume request whose endpoint never got a session, or a resume refused
+// because the session's folder is gone. The resumer records the reason when
+// it surfaces the failure (resumer.mjs surfaceLaunchFailure / failRequest).
+export function launchFailureFor(db, conversationId) {
+  const hostedReasons = HOSTED_LAUNCH_FAILURE_REASONS.map(() => '?').join(',');
+  const row = db
+    .prepare(
+      `SELECT r.replacement_failure_reason AS reason, e.runtime AS runtime, e.authority_reference AS cwd, e.provider_session_id AS session_id
+         FROM resume_requests r JOIN endpoints e ON e.id = r.endpoint_id
+        WHERE r.conversation_id = ? AND r.state = 'failed'
+          AND r.replacement_failure_reason IS NOT NULL
+          AND (e.provider_session_id IS NULL
+            OR (r.replacement_failure_reason = ? AND EXISTS (
+              SELECT 1 FROM root_attention ra JOIN obligations o ON o.id = ra.root_obligation_id
+               WHERE o.conversation_id = r.conversation_id AND ra.attention_source = ?))
+            -- F34: a resume the daemon ended on purpose for a session another
+            -- app holds. The message is unread, not failed, so the failure
+            -- stands exactly while the session has not read it.
+            OR (r.replacement_failure_reason IN (${hostedReasons}) AND EXISTS (
+              SELECT 1 FROM deliveries d
+               WHERE d.message_id = r.message_id AND d.endpoint_id = r.endpoint_id AND d.read_at IS NULL AND d.state != 'failed')))
+        ORDER BY r.updated_at DESC, r.id DESC
+        LIMIT 1`,
+    )
+    .get(conversationId, CWD_NOT_FOUND_REASON, CWD_NOT_FOUND_ATTENTION, ...HOSTED_LAUNCH_FAILURE_REASONS);
+  if (!row) return null;
+  const failure = { runtime: row.runtime, cwd: row.cwd, reason: row.reason };
+  // A resume the daemon refused (its folder is gone) names the existing
+  // session and the attention it left, for as long as that attention stands.
+  // The handle is the one every other session rendering uses, so a session and
+  // a same-prefix sibling never read alike in the failure line.
+  if (row.session_id === null) return failure;
+  const attentionSource = HOSTED_LAUNCH_FAILURE_REASONS.includes(row.reason) ? hostedAttentionSource(row.reason) : CWD_NOT_FOUND_ATTENTION;
+  return { ...failure, session_id: row.session_id, short_id: sessionHandles(db)({ id: null, provider_session_id: row.session_id }), attention_source: attentionSource };
+}
+
+/** Whether a launch-failure projection is one the daemon ended on purpose for a session another app holds. */
+export const isHostedLaunchFailure = (failure) => HOSTED_LAUNCH_FAILURE_REASONS.includes(failure?.reason);
 
 function projectionForRoot(db, root) {
   const nodes = chainNodes(db, root.id);
@@ -206,6 +305,10 @@ function projectionForRoot(db, root) {
       status: node.status,
       custodian_endpoint_id: node.custodian_endpoint_id,
       accountable_principal_id: node.accountable_principal_id,
+      // The one session an exact offer was delivered to plus its lineage
+      // successors, the only endpoints that may answer it; null when the
+      // offer is addressed to the principal as a whole.
+      offered_endpoint_ids: offerRecipientEndpointIds(db, node.id),
       endpoint_state: node.endpoint_state,
       watch_state: watches.find((watch) => watch.delegation_id === node.id)?.state ?? null,
       watch_outcome: watches.find((watch) => watch.delegation_id === node.id)?.outcome ?? null,
@@ -248,6 +351,8 @@ function projectionForRoot(db, root) {
     staged_resolution: root.status === 'open' ? activeStagedResolution(db, root.id) : null,
     notification: notificationProjection(db, root.id),
     attention,
+    launch_failure: root.status === 'open' ? launchFailureFor(db, root.conversation_id) : null,
+    ...requesterProjection(db, root.id),
   };
 }
 

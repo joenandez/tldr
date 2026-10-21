@@ -44,9 +44,13 @@ import { armTachyonFromCommittedEffect, endUnsupportedTachyonListeners, isTachyo
 import {
   createDeliveriesForChannelRoutes,
   createDeliveriesForRecipients,
+  createNoticeDeliveries,
   createParentResultDelivery,
   insertMessage,
   loadConversationOrUnknown,
+  maybeCreateResumeRequest,
+  newestLineageEndpointId,
+  offerRecipientEndpointIds,
   payloadHash,
   pushLiveDeliveryEvents,
   refreshSessionWatermark,
@@ -232,7 +236,7 @@ function fenceGeneration(node, suppliedGeneration) {
  * generation. A stale or foreign process never gets past this gate, so it can
  * never mutate open work (INV-06).
  */
-function requireActingEndpoint(db, { appId, senderPrincipalId, senderEndpointId, processGeneration }) {
+export function requireActingEndpoint(db, { appId, senderPrincipalId, senderEndpointId, processGeneration }) {
   const endpoint = db.prepare('SELECT id, principal_id, created_by_app_id, process_generation FROM endpoints WHERE id = ?').get(senderEndpointId);
   if (!endpoint || endpoint.created_by_app_id !== appId) {
     throw new TightbeamError('obligation_conflict', 'the acting endpoint is not visible to this application', { field: 'sender_endpoint_id' });
@@ -277,22 +281,102 @@ function requireTerminalCustody(db, { node, senderEndpointId }) {
 }
 
 /**
+ * The endpoint that opened a root (its `open` effect's declared sender) and
+ * every lineage replacement of it (resume_requests.replacement_endpoint_id
+ * chain), or null when the root recorded no sending endpoint (inbound roots).
+ * UNION in the recursive walk de-duplicates, so a malformed cycle terminates.
+ */
+export function rootRequesterLineage(db, rootId) {
+  const opening = db.prepare("SELECT message_id FROM message_effects WHERE effect = 'open' AND obligation_id = ?").get(rootId);
+  const requester = opening ? senderEndpointOfMessage(db, opening.message_id, 'open') : null;
+  if (!requester) return null;
+  const replacementEndpointIds = db
+    .prepare(
+      `WITH RECURSIVE lineage(endpoint_id) AS (
+         SELECT replacement_endpoint_id FROM resume_requests WHERE endpoint_id = ? AND replacement_endpoint_id IS NOT NULL
+         UNION
+         SELECT r.replacement_endpoint_id FROM resume_requests r JOIN lineage l ON r.endpoint_id = l.endpoint_id WHERE r.replacement_endpoint_id IS NOT NULL
+       )
+       SELECT endpoint_id FROM lineage ORDER BY endpoint_id`,
+    )
+    .all(requester.endpoint_id)
+    .map((row) => row.endpoint_id);
+  return { endpoint_id: requester.endpoint_id, principal_id: requester.principal_id, message_id: opening.message_id, replacement_endpoint_ids: replacementEndpointIds };
+}
+
+/**
+ * Which rule lets `senderEndpointId` cancel `root` as its requester, or null.
+ * Only the exact opening endpoint or a lineage replacement of it qualifies:
+ * another session of the same principal does not.
+ */
+function requesterCancelRule(db, { root, senderEndpointId }) {
+  const requester = rootRequesterLineage(db, root.id);
+  if (!requester) return null;
+  if (requester.endpoint_id === senderEndpointId) return 'requester_opening_endpoint';
+  return requester.replacement_endpoint_ids.includes(senderEndpointId) ? 'requester_lineage_replacement' : null;
+}
+
+/**
+ * close.cancelled authority. Holders keep their custody rights (a root is
+ * closed through the endpoint owning its open attempt); a root may also be
+ * cancelled by its requester (see requesterCancelRule). The structured log
+ * records which rule allowed or denied the cancel.
+ */
+function authorizeCancel(db, { node, senderEndpointId, logger }) {
+  const log = (status, rule) => logger?.[status === 'allowed' ? 'info' : 'warn']?.({
+    event: 'close_cancelled_authorization',
+    params: { obligation_id: node.id, role: node.role, sender_endpoint_id: senderEndpointId, rule },
+    result: { rule },
+    status,
+  });
+  try {
+    requireTerminalCustody(db, { node, senderEndpointId });
+    log('allowed', 'holder_custody');
+    return;
+  } catch (custodyError) {
+    if (!(custodyError instanceof TightbeamError)) throw custodyError;
+    const rule = node.role === 'root' ? requesterCancelRule(db, { root: node, senderEndpointId }) : null;
+    if (rule === null) {
+      log('denied', null);
+      throw custodyError;
+    }
+    log('allowed', rule);
+  }
+}
+
+/**
  * Writes the immutable one-per-message effect audit row. The payload keeps
  * the declared effect together with the rows it created: the forward schema
  * deliberately has no message column on obligations, so this payload is what
  * makes an identical-key replay able to return the originally created
  * root/attempt/delegation/watch IDs.
  */
-function insertEffectRow(db, { messageId, effect, obligationId, obligationGeneration, created, now }) {
+export function insertEffectRow(db, { messageId, effect, obligationId, obligationGeneration, created, route = null, now }) {
+  const payload = { declaration: effect, created: created ?? null, ...(route ? { route } : {}) };
   db.prepare(
     `INSERT INTO message_effects (id, message_id, effect, effect_payload, obligation_id, obligation_generation, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
-  ).run(generateId('message_effect'), messageId, effect.type, JSON.stringify({ declaration: effect, created: created ?? null }), obligationId ?? null, obligationGeneration ?? null, now);
+  ).run(generateId('message_effect'), messageId, effect.type, JSON.stringify(payload), obligationId ?? null, obligationGeneration ?? null, now);
+}
+
+/**
+ * The endpoint a commit actually reached: an `open` target's custodian or an
+ * exact recipient, after resume lineage moved it to the newest replacement.
+ * Kept in the effect audit so a replay reports the original route.
+ */
+function routeOf(namedEndpointId, routedEndpointId) {
+  return { routed_endpoint_id: routedEndpointId, replaced_endpoint_id: routedEndpointId === namedEndpointId ? null : namedEndpointId };
 }
 
 // ---------------------------------------------------------------------
 // Effect writers. Each runs INSIDE the caller's transaction after the
 // message row exists; any throw rolls the whole commit back to zero rows.
+
+function openTargetCustodian(db, targetEndpoint) {
+  const routedId = newestLineageEndpointId(db, targetEndpoint.id);
+  if (routedId === targetEndpoint.id) return targetEndpoint;
+  return db.prepare('SELECT id, principal_id, state FROM endpoints WHERE id = ?').get(routedId);
+}
 
 export function applyOpen(db, { appId, conversationId, messageId, effect, now }) {
   const target = requirePrincipal(db, effect.target_principal_id, 'obligation_effect.target_principal_id');
@@ -305,7 +389,10 @@ export function applyOpen(db, { appId, conversationId, messageId, effect, now })
   if (targetEndpoint.principal_id !== target.id) {
     throw new TightbeamError('obligation_conflict', 'the target endpoint must belong to the target principal', { field: 'obligation_effect.target_endpoint_id' });
   }
-  if (targetEndpoint.state === 'closed') {
+  // A replaced target takes custody through its newest lineage replacement;
+  // the declaration keeps the endpoint the sender named.
+  const custodian = openTargetCustodian(db, targetEndpoint);
+  if (custodian.state === 'closed') {
     throw new TightbeamError('obligation_conflict', 'open work requires an open target endpoint', { field: 'obligation_effect.target_endpoint_id' });
   }
 
@@ -318,10 +405,10 @@ export function applyOpen(db, { appId, conversationId, messageId, effect, now })
   db.prepare(
     `INSERT INTO obligations (id, conversation_id, parent_id, role, status, generation, accountable_principal_id, custodian_endpoint_id, created_at, updated_at)
      VALUES (?, ?, ?, 'attempt', 'open', 1, ?, ?, ?, ?)`,
-  ).run(attemptId, conversationId, rootId, target.id, targetEndpoint.id, now, now);
+  ).run(attemptId, conversationId, rootId, target.id, custodian.id, now, now);
 
   const created = { root_id: rootId, attempt_id: attemptId };
-  insertEffectRow(db, { messageId, effect, obligationId: rootId, obligationGeneration: 1, created, now });
+  insertEffectRow(db, { messageId, effect, obligationId: rootId, obligationGeneration: 1, created, route: routeOf(targetEndpoint.id, custodian.id), now });
   return { created, effectObligationId: rootId, effectGeneration: 1 };
 }
 
@@ -407,7 +494,7 @@ export function acceptProviderAcknowledgement(db, { deliveryId, now }) {
 }
 
 function applyHandoffOffer(db, ctxFields) {
-  const { appId, senderPrincipalId, conversationId, messageId, effect, now } = ctxFields;
+  const { appId, senderPrincipalId, conversationId, messageId, effect, now, recipientEndpointId = null, exactRoute = null, logger } = ctxFields;
   requireActingEndpoint(db, { appId, senderPrincipalId, senderEndpointId: effect.sender_endpoint_id, processGeneration: effect.process_generation });
   const parent = loadObligationInConversation(db, { obligationId: effect.obligation_id, conversationId });
   requireOpen(parent);
@@ -418,7 +505,22 @@ function applyHandoffOffer(db, ctxFields) {
   requireCustody(db, { node: parent, senderEndpointId: effect.sender_endpoint_id });
 
   const recipient = requirePrincipal(db, effect.target_principal_id, 'obligation_effect.target_principal_id');
-  requireParticipant(db, conversationId, recipient.id);
+  if (recipientEndpointId === null) {
+    requireParticipant(db, conversationId, recipient.id);
+  } else {
+    // The exact target was validated against this app and the offer's target
+    // principal, and custody just passed, so the delegate may join the thread.
+    // Same transaction as the delegation: a later failure removes this row too.
+    const admitted = db
+      .prepare('INSERT INTO conversation_participants (conversation_id, principal_id, role, added_at) VALUES (?, ?, NULL, ?) ON CONFLICT DO NOTHING')
+      .run(conversationId, recipient.id, now).changes;
+    logger?.info({
+      event: 'handoff_offer_participant_admission',
+      params: { conversation_id: conversationId, principal_id: recipient.id, recipient_endpoint_id: recipientEndpointId },
+      result: { admitted: admitted === 1 },
+      status: 'ok',
+    });
+  }
 
   const delegationId = generateId('obligation');
   db.prepare(
@@ -433,8 +535,40 @@ function applyHandoffOffer(db, ctxFields) {
   ).run(watchId, delegationId, effect.acceptance_deadline_at, now, now);
 
   const created = { delegation_id: delegationId, watch_id: watchId };
-  insertEffectRow(db, { messageId, effect, obligationId: parent.id, obligationGeneration: parent.generation, created, now });
-  return { created, effectObligationId: parent.id, effectGeneration: parent.generation };
+  insertEffectRow(db, { messageId, effect, obligationId: parent.id, obligationGeneration: parent.generation, created, route: exactRoute, now });
+  return {
+    created,
+    effectObligationId: parent.id,
+    effectGeneration: parent.generation,
+    chainNotice: delegationNotice(db, { delegation: { id: delegationId, parent_id: parent.id }, includeDelegator: false }),
+  };
+}
+
+/** Typed route of a canonical offer/accept/decline message to a chain party (paired with source_obligation_id = the delegation). */
+export const DELEGATION_NOTICE_ROUTE_REASON = 'delegation.notice';
+
+/** Typed route of a replacement-disclosure notice to a counterpart (paired with source_obligation_id = the adopted root). */
+export const REPLACEMENT_NOTICE_ROUTE_REASON = 'replacement.notice';
+
+/**
+ * Who a delegation change is disclosed to (plan §2.3): always the root's
+ * requester's live session, and, on acceptance, the delegator (the parent's
+ * custodian). The acting session is excluded later, at insertion; an
+ * inbound-opened root has no requester session.
+ */
+function delegationNotice(db, { delegation, includeDelegator }) {
+  const requester = rootRequesterLineage(db, chainRootOf(db, delegation.id));
+  const delegator = includeDelegator ? db.prepare('SELECT custodian_endpoint_id FROM obligations WHERE id = ?').get(delegation.parent_id)?.custodian_endpoint_id : null;
+  return { sourceObligationId: delegation.id, endpointIds: [liveRequesterEndpointId(db, requester), delegator].filter(Boolean) };
+}
+
+/**
+ * The requester's live session: the exact opening endpoint until it is
+ * replaced, then its newest lineage replacement. A replaced predecessor was
+ * declared unresumable, so it is never a notice target.
+ */
+function liveRequesterEndpointId(db, requester) {
+  return requester ? newestLineageEndpointId(db, requester.endpoint_id) : null;
 }
 
 /**
@@ -442,7 +576,7 @@ function applyHandoffOffer(db, ctxFields) {
  * actor is the recipient principal's endpoint at the exact observed process
  * generation, the delegation is open, and its named generation matches.
  */
-function loadDelegationForRecipientAction(db, { appId, senderPrincipalId, conversationId, effect }) {
+function loadDelegationForRecipientAction(db, { appId, senderPrincipalId, conversationId, effect, logger }) {
   const endpoint = requireActingEndpoint(db, { appId, senderPrincipalId, senderEndpointId: effect.sender_endpoint_id, processGeneration: effect.process_generation });
   const delegation = loadObligationInConversation(db, { obligationId: effect.obligation_id, conversationId });
   if (delegation.role !== 'delegation') {
@@ -451,6 +585,25 @@ function loadDelegationForRecipientAction(db, { appId, senderPrincipalId, conver
   if (delegation.accountable_principal_id !== endpoint.principal_id) {
     throw new TightbeamError('obligation_conflict', 'the acting endpoint does not belong to the delegation\'s recipient principal', { field: 'sender_endpoint_id' });
   }
+  // An exact offer belongs to the one session it was delivered to (or that
+  // session's lineage successor), not to every session of the recipient
+  // principal. An offer with no exact recipient keeps principal semantics.
+  const answerers = offerRecipientEndpointIds(db, delegation.id);
+  if (answerers !== null && !answerers.includes(effect.sender_endpoint_id)) {
+    logger?.warn({
+      event: 'handoff_offer_recipient_refused',
+      params: { effect: effect.type, delegation_id: delegation.id, acting_endpoint_id: effect.sender_endpoint_id, offered_endpoint_ids: answerers },
+      result: { code: 'obligation_conflict' },
+      status: 'refused',
+    });
+    throw new TightbeamError('obligation_conflict', 'this delegation was offered to a different session; only that session or its replacement can answer it', { field: 'sender_endpoint_id' });
+  }
+  logger?.debug?.({
+    event: 'handoff_offer_recipient_checked',
+    params: { effect: effect.type, delegation_id: delegation.id, acting_endpoint_id: effect.sender_endpoint_id },
+    result: { rule: answerers === null ? 'principal' : 'exact_endpoint' },
+    status: 'allowed',
+  });
   requireOpen(delegation);
   fenceGeneration(delegation, effect.generation);
 
@@ -484,9 +637,9 @@ function applyHandoffAccept(db, ctxFields) {
   }
 
   insertEffectRow(db, { messageId, effect, obligationId: delegation.id, obligationGeneration: delegation.generation, now });
-  // Acceptance wakes no one (transitions.yaml MSG-HANDOFF-ACCEPT): the parent
-  // learns the outcome from the watch, so this commit writes no deliveries.
-  return { effectObligationId: delegation.id, effectGeneration: delegation.generation };
+  // Acceptance wakes no one (transitions.yaml MSG-HANDOFF-ACCEPT): its only
+  // deliveries are the wake-free notices to the requester and delegator.
+  return { effectObligationId: delegation.id, effectGeneration: delegation.generation, chainNotice: delegationNotice(db, { delegation, includeDelegator: true }) };
 }
 
 function applyHandoffDecline(db, ctxFields) {
@@ -511,11 +664,13 @@ function applyHandoffDecline(db, ctxFields) {
   // the wake mirrors ENDPOINT-DEATH's
   // create_one_parent_custody_loss_delivery_if_parent_exists — best-effort,
   // never a reason to strand the offered delegation and its armed watch.
+  const parentEndpointId = newestLineageEndpointId(db, parent?.custodian_endpoint_id);
   const { liveDeliveries, presentations } = createParentResultDelivery(db, {
     conversationId,
     messageId,
     senderPrincipalId,
-    parentEndpointId: parent?.custodian_endpoint_id,
+    senderEndpointId: effect.sender_endpoint_id,
+    parentEndpointId,
     ifParentExists: true,
     stateRoot,
     logger,
@@ -523,7 +678,7 @@ function applyHandoffDecline(db, ctxFields) {
 
   // Decline wakes the immediate parent exactly once: the single durable
   // delivery row doubles as the watch's unique parent_delivery_id reference.
-  const parentDeliveryId = db.prepare('SELECT id FROM deliveries WHERE message_id = ? AND endpoint_id = ?').get(messageId, parent?.custodian_endpoint_id)?.id ?? null;
+  const parentDeliveryId = db.prepare('SELECT id FROM deliveries WHERE message_id = ? AND endpoint_id = ?').get(messageId, parentEndpointId)?.id ?? null;
   db.prepare("UPDATE handoff_watches SET state = 'closed', outcome = 'declined', closed_at = ?, parent_delivery_id = ?, updated_at = ? WHERE id = ? AND state = 'awaiting_acceptance'").run(
     now,
     parentDeliveryId,
@@ -532,7 +687,13 @@ function applyHandoffDecline(db, ctxFields) {
   );
 
   insertEffectRow(db, { messageId, effect, obligationId: delegation.id, obligationGeneration: delegation.generation, now });
-  return { liveDeliveries, presentations, effectObligationId: delegation.id, effectGeneration: delegation.generation };
+  return {
+    liveDeliveries,
+    presentations,
+    effectObligationId: delegation.id,
+    effectGeneration: delegation.generation,
+    chainNotice: delegationNotice(db, { delegation, includeDelegator: false }),
+  };
 }
 
 /**
@@ -550,6 +711,115 @@ function applyHandoffDecline(db, ctxFields) {
  * watches would stay armed forever with no reconciler left to decide them.
  * Death/recovery paths stay exact-custody-only and never call this.
  */
+/** Typed route of the canonical cancel message to a descendant holder (paired with source_obligation_id = the cancelled node). */
+export const CANCEL_NOTICE_ROUTE_REASON = 'cancel.requester';
+
+/** Route of the re-delivery a replacement session gets for its predecessor's unread message (resumer.mjs). */
+export const RECOVERY_REPLACEMENT_ROUTE_REASON = 'recovery.replacement';
+
+/**
+ * SQL for "this delivery's message is a requester's cancel of a root": a
+ * close.cancelled on a root sent by the exact endpoint that opened it or its
+ * lineage replacement. Typed or ordinary copy alike; the one definition shared
+ * by the closed-work predicate and the notification that presents the copy as
+ * a notice. The alias names a row with a `message_id` column.
+ */
+export function requesterCancelMessageSql(alias = 'd') {
+  return `EXISTS (SELECT 1 FROM message_effects cx_me
+                JOIN message_effects cx_open ON cx_open.obligation_id = cx_me.obligation_id AND cx_open.effect = 'open'
+                WHERE cx_me.message_id = ${alias}.message_id AND cx_me.effect = 'close.cancelled'
+                  AND EXISTS (SELECT 1 FROM obligations cx_root WHERE cx_root.id = cx_me.obligation_id AND cx_root.role = 'root')
+                  AND json_extract(cx_me.effect_payload, '$.declaration.sender_endpoint_id') IN (
+                    WITH RECURSIVE cx_lineage(endpoint_id) AS (
+                      SELECT json_extract(cx_open.effect_payload, '$.declaration.sender_endpoint_id')
+                      UNION
+                      SELECT r.replacement_endpoint_id FROM resume_requests r JOIN cx_lineage l ON r.endpoint_id = l.endpoint_id WHERE r.replacement_endpoint_id IS NOT NULL
+                    ) SELECT endpoint_id FROM cx_lineage))`;
+}
+
+/**
+ * SQL for "this delivery asks nothing of the session because its work is
+ * already closed": a typed notice about closed work, or the request or offer
+ * that opened work since closed (a request cancelled before its holder read
+ * it; proof F38). It holds no Stop, starts no takeover clock, and never
+ * launches a stopped holder on its own account (ux F10: delivered whenever
+ * the holder next runs). A result or reply about closed work is NOT covered:
+ * its effect is not `open`/`handoff.offer`, so a requester is still woken to
+ * read the outcome. An offer's own (untyped) delivery is judged by the
+ * delegation it created, the thing its recipient can still accept: the
+ * effect row names the still-open parent attempt, so an expired or declined
+ * offer would otherwise look live. The typed deliveries of an offer message
+ * (the expiry or custody-loss wake routed back to the offerer) are results
+ * and keep the parent-based reading, so they still wake. One definition for
+ * every path that decides whether an unread row justifies a wake; the alias
+ * names the deliveries row. An exact offer whose audit cannot be linked to
+ * the delegation it created (an imported or damaged row; re-check 6 N2) can
+ * be answered by nobody, so it asks nothing either. Every copy of a
+ * requester's cancel of a root (close.cancelled on the root, sent by the
+ * exact endpoint that opened it or its lineage replacement, the same
+ * identification requesterCancelRule uses) asks nothing of any recipient,
+ * typed or ordinary: a finished delegate or bystander still holds a copy but
+ * owes nothing to it (proof F40). A holder's own cancel or failure reported
+ * to the requester is sent by another endpoint, so it still wakes. Inlines
+ * constant literals, no binds.
+ */
+export function closedWorkNoticeSql(alias = 'd') {
+  // The recipient's copies of an offer: its own untyped delivery, and the
+  // re-delivery a replacement gets for it (re-check 6 N1). Both are judged by
+  // the delegation the offer created.
+  const offerCopy = `(${alias}.route_reason IS NULL OR ${alias}.route_reason = '${RECOVERY_REPLACEMENT_ROUTE_REASON}')`;
+  return `((${alias}.route_reason IN ('${DELEGATION_NOTICE_ROUTE_REASON}', '${CANCEL_NOTICE_ROUTE_REASON}')
+    AND EXISTS (SELECT 1 FROM obligations closed_o WHERE closed_o.id = ${alias}.source_obligation_id AND closed_o.status = 'closed'))
+    OR EXISTS (SELECT 1 FROM message_effects closed_me
+                JOIN obligations closed_opened ON closed_opened.id = CASE
+                  WHEN closed_me.effect = 'handoff.offer' AND ${offerCopy}
+                    THEN COALESCE(json_extract(closed_me.effect_payload, '$.created.delegation_id'), closed_me.obligation_id)
+                  ELSE closed_me.obligation_id END
+                WHERE closed_me.message_id = ${alias}.message_id AND closed_me.effect IN ('open', 'handoff.offer')
+                  AND closed_opened.status = 'closed')
+    OR ${requesterCancelMessageSql(alias)}
+    OR EXISTS (SELECT 1 FROM message_effects unlinked_me
+                WHERE unlinked_me.message_id = ${alias}.message_id AND unlinked_me.effect = 'handoff.offer' AND ${offerCopy}
+                  AND json_extract(unlinked_me.effect_payload, '$.route.routed_endpoint_id') IS NOT NULL
+                  AND json_extract(unlinked_me.effect_payload, '$.created.delegation_id') IS NULL))`;
+}
+
+/**
+ * SQL for "this endpoint has unread work that justifies a wake": an unread,
+ * non-failed delivery that is not a closed-work notice. A notice waiting
+ * beside such work rides the same wake (receive order is oldest first, so
+ * the notice is read before the work behind it).
+ */
+export function endpointHasWakingUnreadSql(endpointExpr) {
+  return `EXISTS (
+    SELECT 1 FROM deliveries waking
+     WHERE waking.endpoint_id = ${endpointExpr} AND waking.state != 'failed' AND waking.read_at IS NULL
+       AND NOT ${closedWorkNoticeSql('waking')}
+  )`;
+}
+
+/**
+ * The distinct custodian endpoints of a node's still-open descendants, read
+ * BEFORE supersedeOpenDescendants closes them: the cascade stores no trace of
+ * who was holding. An offered-but-unaccepted delegation has no custodian yet.
+ */
+function openDescendantHolderEndpoints(db, { nodeId, excludeEndpointId }) {
+  return db
+    .prepare(
+      `WITH RECURSIVE descendants(id) AS (
+         SELECT id FROM obligations WHERE parent_id = ?
+         UNION ALL
+         SELECT o.id FROM obligations o JOIN descendants d ON o.parent_id = d.id
+       )
+       SELECT DISTINCT custodian_endpoint_id AS endpoint_id
+         FROM obligations
+        WHERE id IN descendants AND status = 'open' AND custodian_endpoint_id IS NOT NULL AND custodian_endpoint_id <> ?
+        ORDER BY custodian_endpoint_id`,
+    )
+    .all(nodeId, excludeEndpointId)
+    .map((row) => row.endpoint_id);
+}
+
 function supersedeOpenDescendants(db, { closingNodeId, source, now }) {
   db.prepare(
     `WITH RECURSIVE descendants(id) AS (
@@ -602,13 +872,16 @@ function closeDelegationWatchWithResult(db, { delegationId, parentDeliveryId, no
  * everything itself, so the ordinary participant fan-out must not
  * double-deliver.
  */
-function routeChildResultDelivery(db, { conversationId, messageId, senderPrincipalId, delegation, stateRoot, logger }) {
+function routeChildResultDelivery(db, { conversationId, messageId, senderPrincipalId, senderEndpointId, delegation, stateRoot, logger }) {
   const parent = db.prepare('SELECT id, custodian_endpoint_id FROM obligations WHERE id = ?').get(delegation.parent_id);
+  // A replaced delegator's result reaches its newest replacement.
+  const parentEndpointId = newestLineageEndpointId(db, parent?.custodian_endpoint_id);
   const { liveDeliveries, presentations } = createParentResultDelivery(db, {
     conversationId,
     messageId,
     senderPrincipalId,
-    parentEndpointId: parent?.custodian_endpoint_id,
+    senderEndpointId,
+    parentEndpointId,
     routeReason: 'handoff.child.result',
     sourceObligationId: delegation.id,
     stateRoot,
@@ -616,7 +889,7 @@ function routeChildResultDelivery(db, { conversationId, messageId, senderPrincip
   });
   // Exactly one delivery was written for this message, to the parent
   // endpoint; its row id is the watch's unique parent_delivery_id.
-  const parentDeliveryId = db.prepare('SELECT id FROM deliveries WHERE message_id = ? AND endpoint_id = ?').get(messageId, parent?.custodian_endpoint_id)?.id ?? null;
+  const parentDeliveryId = db.prepare('SELECT id FROM deliveries WHERE message_id = ? AND endpoint_id = ?').get(messageId, parentEndpointId)?.id ?? null;
   return { liveDeliveries, presentations, parentDeliveryId };
 }
 
@@ -871,7 +1144,7 @@ function applyCloseFulfilled(db, ctxFields) {
   let routedDeliveries;
   let routedPresentations;
   if (node.role === 'delegation') {
-    const routed = routeChildResultDelivery(db, { conversationId, messageId, senderPrincipalId, delegation: node, eventBus, stateRoot, logger });
+    const routed = routeChildResultDelivery(db, { conversationId, messageId, senderPrincipalId, senderEndpointId: effect.sender_endpoint_id, delegation: node, eventBus, stateRoot, logger });
     closeDelegationWatchWithResult(db, { delegationId: node.id, parentDeliveryId: routed.parentDeliveryId, now });
     routedDeliveries = routed.liveDeliveries;
     routedPresentations = routed.presentations;
@@ -892,7 +1165,7 @@ function applyCloseFulfilled(db, ctxFields) {
 }
 
 function applyCloseCancelled(db, ctxFields) {
-  const { appId, senderPrincipalId, conversationId, messageId, effect, now } = ctxFields;
+  const { appId, senderPrincipalId, conversationId, messageId, effect, now, logger } = ctxFields;
   const node = db.prepare('SELECT * FROM obligations WHERE id = ?').get(effect.obligation_id);
   const accountableApp = node && db.prepare('SELECT created_by_app_id FROM principals WHERE id = ?').get(node.accountable_principal_id);
   if (!node || !accountableApp || accountableApp.created_by_app_id !== appId) {
@@ -906,7 +1179,7 @@ function applyCloseCancelled(db, ctxFields) {
   requireOpen(node);
   fenceGeneration(node, effect.generation);
   requireActingEndpoint(db, { appId, senderPrincipalId, senderEndpointId: effect.sender_endpoint_id, processGeneration: effect.process_generation });
-  requireTerminalCustody(db, { node, senderEndpointId: effect.sender_endpoint_id });
+  authorizeCancel(db, { node, senderEndpointId: effect.sender_endpoint_id, logger });
 
   const origin = node.role === 'root' ? immutableOriginForRoot(db, node.id) : null;
   if (node.role === 'root' && origin?.route_id) {
@@ -925,7 +1198,16 @@ function applyCloseCancelled(db, ctxFields) {
     db.prepare("UPDATE handoff_watches SET state = 'closed', outcome = 'child_failed', closed_at = ?, updated_at = ? WHERE delegation_id = ? AND state <> 'closed'").run(now, now, node.id);
   }
   // Same role-independent cascade as close.fulfilled: a cancelled attempt or
-  // delegation takes its open subtree down with it, silently.
+  // delegation takes its open subtree down with it. The stored resolution
+  // stays `superseded`, but the holders are told through the cancel message's
+  // own deliveries (see cancelNotice), captured before the cascade erases them.
+  // Only a root cancel is the requester's withdrawal; a holder cancelling its
+  // own attempt/delegation keeps the silent cascade it always had.
+  // A replaced holder is told through its newest lineage replacement.
+  const holderEndpointIds = node.role === 'root'
+    ? [...new Set(openDescendantHolderEndpoints(db, { nodeId: node.id, excludeEndpointId: effect.sender_endpoint_id }).map((endpointId) => newestLineageEndpointId(db, endpointId)))]
+      .filter((endpointId) => endpointId !== effect.sender_endpoint_id)
+    : [];
   supersedeOpenDescendants(db, {
     closingNodeId: node.id,
     source: node.role === 'root' ? `root_cancel:${messageId}` : `close_cancelled:${messageId}`,
@@ -933,11 +1215,11 @@ function applyCloseCancelled(db, ctxFields) {
   });
 
   insertEffectRow(db, { messageId, effect, obligationId: node.id, obligationGeneration: node.generation, now });
-  return { effectObligationId: node.id, effectGeneration: node.generation };
+  return { effectObligationId: node.id, effectGeneration: node.generation, cancelNotice: { sourceObligationId: node.id, holderEndpointIds, requesterCancel: node.role === 'root' && requesterCancelRule(db, { root: node, senderEndpointId: effect.sender_endpoint_id }) !== null } };
 }
 
 function applyNone(db, ctxFields) {
-  const { appId, senderPrincipalId, conversationId, messageId, effect, now } = ctxFields;
+  const { appId, senderPrincipalId, conversationId, messageId, effect, now, exactRoute = null } = ctxFields;
   requireActingEndpoint(db, { appId, senderPrincipalId, senderEndpointId: effect.sender_endpoint_id, processGeneration: effect.process_generation });
   const ownedOpenWork = db
     .prepare("SELECT id FROM obligations WHERE conversation_id = ? AND custodian_endpoint_id = ? AND status = 'open' ORDER BY id LIMIT 2")
@@ -947,7 +1229,7 @@ function applyNone(db, ctxFields) {
     throw new TightbeamError('obligation_conflict', 'an endpoint holding open work in this conversation cannot send a none effect', { field: 'obligation_effect.type', reason: 'open_work_requires_effect', ...(ownedOpenWork.length === 1 ? { work_id: ownedOpenWork[0].id } : {}) });
   }
 
-  insertEffectRow(db, { messageId, effect, obligationId: null, obligationGeneration: null, now });
+  insertEffectRow(db, { messageId, effect, obligationId: null, obligationGeneration: null, route: exactRoute, now });
   return { effectObligationId: null, effectGeneration: null };
 }
 
@@ -983,8 +1265,11 @@ function reconstructResult(db, { messageId, conversationId, idempotentReplay }) 
     throw new TightbeamError('obligation_conflict', `message "${messageId}" carries no lifecycle effect audit`);
   }
   let created = null;
+  let route = null;
   try {
-    created = JSON.parse(effectRow.effect_payload)?.created ?? null;
+    const payload = JSON.parse(effectRow.effect_payload);
+    created = payload?.created ?? null;
+    route = payload?.route ?? null;
   } catch {
     created = null;
   }
@@ -1007,7 +1292,15 @@ function reconstructResult(db, { messageId, conversationId, idempotentReplay }) 
       generation: effectRow.obligation_generation,
     },
     ...(created ?? {}),
+    // Additive: where an open's custody or an exact recipient's delivery
+    // landed, and the endpoint named when lineage moved it to a replacement.
+    ...(route ? { routed_endpoint_id: route.routed_endpoint_id } : {}),
+    ...(route?.replaced_endpoint_id ? { replaced_endpoint_id: route.replaced_endpoint_id } : {}),
     ...(replyWaitIds.length > 0 ? { await_reply: true, reply_wait_ids: replyWaitIds } : {}),
+    // Descendant holders told of a cancel, derived from the typed deliveries so a replay reports the same count.
+    ...(effectRow.effect === 'close.cancelled'
+      ? { notified_holders: db.prepare('SELECT COUNT(*) AS n FROM deliveries WHERE message_id = ? AND route_reason = ?').get(messageId, CANCEL_NOTICE_ROUTE_REASON).n }
+      : {}),
     idempotent_replay: idempotentReplay,
   };
 }
@@ -1244,6 +1537,84 @@ function validateInboundTargetEndpoint(db, { inboundTargetEndpointId, conversati
   return endpoint.id;
 }
 
+// Informational sends and delegation offers carry no `target_endpoint_id`, so
+// an agent that already resolved ONE session names it here instead of letting
+// delivery fan out to every sibling endpoint of the recipient principal.
+const EXACT_RECIPIENT_EFFECTS = ['none', 'handoff.offer'];
+
+function refuseRecipientEndpoint(logger, { effect, recipientEndpointId, conversationId = null }, error) {
+  logger?.warn({
+    event: 'recipient_endpoint_refused',
+    params: { effect: effect.type, recipient_endpoint_id: typeof recipientEndpointId === 'string' ? recipientEndpointId : null, conversation_id: conversationId },
+    result: { code: error.code },
+    status: 'refused',
+  });
+  throw error;
+}
+
+/** Shape and branch checks that need no database: run before the idempotency hash. */
+function checkRecipientEndpointRequest({ logger, recipientEndpointId, effect, sendBranch }) {
+  if (recipientEndpointId === undefined || recipientEndpointId === null) return;
+  const fail = (code, message) => refuseRecipientEndpoint(logger, { effect, recipientEndpointId }, new TightbeamError(code, message, { field: 'recipient_endpoint_id' }));
+  if (typeof recipientEndpointId !== 'string' || recipientEndpointId.length === 0) {
+    fail('malformed_request', 'recipient_endpoint_id must be a non-empty string when present');
+  }
+  if (sendBranch !== 'agent') fail('permission_denied', 'recipient_endpoint_id is reserved for agent-authored messages');
+  if (!EXACT_RECIPIENT_EFFECTS.includes(effect.type)) {
+    fail('malformed_request', `recipient_endpoint_id applies only to the "none" and "handoff.offer" effects, not "${effect.type}"`);
+  }
+}
+
+/**
+ * The exact recipient must be an open endpoint of this app other than the
+ * sender's own (a same-folder sibling of the sender's principal is allowed):
+ * a `none` recipient must already take part
+ * in the conversation, a `handoff.offer` recipient must be the offer's own
+ * target principal (its participant admission happens with the offer, in the
+ * same transaction). Validated before any row is written.
+ */
+function validateRecipientEndpoint(db, { logger, appId, recipientEndpointId, conversationId, senderPrincipalId, effect }) {
+  if (recipientEndpointId === undefined || recipientEndpointId === null) return null;
+  const fail = (code, message) => refuseRecipientEndpoint(logger, { effect, recipientEndpointId, conversationId }, new TightbeamError(code, message, { field: 'recipient_endpoint_id' }));
+  const endpoint = db.prepare('SELECT id, principal_id, state FROM endpoints WHERE id = ? AND created_by_app_id = ?').get(recipientEndpointId, appId);
+  if (!endpoint) fail('endpoint_unknown', `no endpoint "${recipientEndpointId}" is visible to this application`);
+  if (endpoint.state === 'closed') fail('obligation_conflict', 'recipient_endpoint_id must name an open endpoint');
+  if (endpoint.id === effect.sender_endpoint_id) fail('permission_denied', 'recipient_endpoint_id must name a session other than the sender');
+  if (endpoint.principal_id === senderPrincipalId) {
+    // Sessions of one runtime in one cwd share a principal: a same-folder
+    // sibling is a different endpoint of the sender's own principal, reached
+    // exactly and never by fan-out.
+    logger?.info({
+      event: 'recipient_endpoint_sibling_route',
+      params: { effect: effect.type, recipient_endpoint_id: endpoint.id, sender_endpoint_id: effect.sender_endpoint_id, conversation_id: conversationId },
+      result: { route: 'exact_sibling' },
+      status: 'allowed',
+    });
+  }
+  if (effect.type === 'handoff.offer') {
+    if (endpoint.principal_id !== effect.target_principal_id) {
+      fail('permission_denied', "recipient_endpoint_id must belong to the offer's target principal");
+    }
+  } else {
+    const participant = db.prepare('SELECT 1 FROM conversation_participants WHERE conversation_id = ? AND principal_id = ?').get(conversationId, endpoint.principal_id);
+    if (!participant) fail('permission_denied', 'recipient_endpoint_id must belong to a participant of the conversation');
+  }
+  const routedEndpointId = newestLineageEndpointId(db, endpoint.id);
+  if (routedEndpointId !== endpoint.id) {
+    // As applyOpen refuses a closed custodian: a closed replacement would
+    // leave the exact route with no delivery at all.
+    const routed = db.prepare('SELECT state FROM endpoints WHERE id = ?').get(routedEndpointId);
+    if (routed?.state === 'closed') fail('obligation_conflict', 'recipient_endpoint_id was replaced by a session that has since closed');
+    logger?.info({
+      event: 'recipient_endpoint_replacement_route',
+      params: { effect: effect.type, recipient_endpoint_id: endpoint.id, conversation_id: conversationId },
+      result: { routed_endpoint_id: routedEndpointId },
+      status: 'ok',
+    });
+  }
+  return routedEndpointId;
+}
+
 function conversationSubjectForUnreadAdmission(db, conversationId) {
   try {
     const subject = JSON.parse(db.prepare('SELECT metadata FROM conversations WHERE id = ?').get(conversationId)?.metadata ?? '{}')?.subject;
@@ -1273,10 +1644,17 @@ function rejectUnreadForActingEndpoint(db, { appId, senderPrincipalId, conversat
          JOIN messages m ON m.id = d.message_id
          LEFT JOIN principals sender ON sender.id = m.sender_principal_id
         WHERE d.endpoint_id = ? AND m.conversation_id = ?
+          AND d.state != 'failed'
           AND d.read_at IS NULL AND d.acknowledged_at IS NULL
+          AND (d.route_reason IS NULL OR d.route_reason NOT IN (?, ?))
         ORDER BY m.created_at DESC, d.id DESC`,
     )
-    .all(effect.sender_endpoint_id, conversationId);
+    // A delegation or replacement notice only discloses who holds the work;
+    // its recipient may act (cancel, follow up) before reading it. A failed
+    // row (e.g. a recovery route a later retry retired) can never be
+    // presented, so it is never unread mail (as recovery.context's unread
+    // projection already holds).
+    .all(effect.sender_endpoint_id, conversationId, DELEGATION_NOTICE_ROUTE_REASON, REPLACEMENT_NOTICE_ROUTE_REASON);
   if (rows.length === 0) return;
   const latest = rows[0];
   throw new TightbeamError('blocked_unread', 'an unread message must be read before sending on this thread', {
@@ -1323,8 +1701,10 @@ function senderEndpointOfMessage(db, messageId, effectFilter = null) {
  * principal wins, in this order:
  *
  *   1. open_target   an `open` names its target endpoint; custody lands there,
- *                    so only it may be woken (anchor: now). Its rows stay
- *                    principal-wide so each window keeps a copy (F19).
+ *                    so only it holds a row and only it may be woken (anchor:
+ *                    now). A sibling window's copy was another session's
+ *                    work: the successor waker resumed a dead sibling from it
+ *                    (2026-10-06), so targeted rows are exact.
  *   2. in_reply_to   the replied-to message's own sending endpoint.
  *   3. work_requester any effect on an existing chain returns to the endpoint
  *                    that opened the chain's root (the requester), read from
@@ -1334,22 +1714,29 @@ function senderEndpointOfMessage(db, messageId, effectFilter = null) {
  * most one endpoint (message_shared.mjs selectRecipientEndpoints). Reads
  * only; never throws for a missing fact — no binding is the fallback.
  */
-function resolveEndpointBindings(db, { effect, inReplyToMessageId, now }) {
+function resolveEndpointBindings(db, { effect, inReplyToMessageId, now, noticeEndpointIds = [] }) {
   const bindings = new Map();
-  const bind = (principalId, endpointId, source, anchorAt, rows = 'exact') => {
+  const bind = (principalId, endpointId, source, anchorAt, mode = 'bound') => {
     if (!principalId || !endpointId || bindings.has(principalId)) return;
-    bindings.set(principalId, { endpoint_id: endpointId, source, anchor_at: anchorAt, rows });
+    bindings.set(principalId, { endpoint_id: endpointId, source, anchor_at: anchorAt, mode });
   };
-  if (effect.type === 'open') bind(effect.target_principal_id, effect.target_endpoint_id, 'open_target', now, 'principal');
+  if (effect.type === 'open') bind(effect.target_principal_id, newestLineageEndpointId(db, effect.target_endpoint_id), 'open_target', now, 'targeted');
+  // A replied-to or requesting endpoint that a replacement superseded is
+  // bound through its newest replacement, never the unresumable predecessor.
   if (inReplyToMessageId) {
     const replied = senderEndpointOfMessage(db, inReplyToMessageId);
-    if (replied) bind(replied.principal_id, replied.endpoint_id, 'in_reply_to', replied.anchor_at);
+    if (replied) bind(replied.principal_id, newestLineageEndpointId(db, replied.endpoint_id), 'in_reply_to', replied.anchor_at);
   }
   if (typeof effect.obligation_id === 'string') {
     const rootId = chainRootOf(db, effect.obligation_id);
     const opening = db.prepare("SELECT message_id FROM message_effects WHERE effect = 'open' AND obligation_id = ?").get(rootId);
     const requester = opening ? senderEndpointOfMessage(db, opening.message_id, 'open') : null;
-    if (requester) bind(requester.principal_id, requester.endpoint_id, 'work_requester', requester.anchor_at);
+    if (requester) bind(requester.principal_id, newestLineageEndpointId(db, requester.endpoint_id), 'work_requester', requester.anchor_at);
+  }
+  // A cancel notice belongs to the exact holder session, not its principal.
+  for (const endpointId of noticeEndpointIds) {
+    const holder = db.prepare('SELECT principal_id FROM endpoints WHERE id = ?').get(endpointId);
+    if (holder) bind(holder.principal_id, endpointId, 'cancel_notice', now);
   }
   return bindings;
 }
@@ -1399,6 +1786,7 @@ export function commitMessageWithEffect(context, connection, request) {
   const awaitReply = request.await_reply;
   const requestedOriginChannelRouteId = request.origin_channel_route_id;
   const requestedInboundTargetEndpointId = request.inbound_target_endpoint_id;
+  const requestedRecipientEndpointId = request.recipient_endpoint_id;
 
   const sender = requirePrincipal(context.db, senderPrincipalId, 'sender_principal_id');
   const sendBranch = resolveSendBranch(connection, sender);
@@ -1418,6 +1806,7 @@ export function commitMessageWithEffect(context, connection, request) {
   if (requestedInboundTargetEndpointId !== undefined && requestedInboundTargetEndpointId !== null && sendBranch !== 'inbound') {
     throw new TightbeamError('permission_denied', 'inbound_target_endpoint_id is reserved for publish_inbound_messages', { field: 'inbound_target_endpoint_id' });
   }
+  checkRecipientEndpointRequest({ logger: context.logger, recipientEndpointId: requestedRecipientEndpointId, effect, sendBranch });
 
   const hash = payloadHash({
     conversation_id: request.conversation_id ?? null,
@@ -1432,6 +1821,9 @@ export function commitMessageWithEffect(context, connection, request) {
     origin_channel_route_id: requestedOriginChannelRouteId ?? null,
     inbound_target_endpoint_id: requestedInboundTargetEndpointId ?? null,
     await_reply: awaitReply ?? false,
+    // Added only when present: a request without the field keeps the hash it
+    // had before this field existed, so in-flight retries still replay.
+    ...(requestedRecipientEndpointId === undefined || requestedRecipientEndpointId === null ? {} : { recipient_endpoint_id: requestedRecipientEndpointId }),
   });
 
   const preChecked = findIdempotentReplay(context.db, { appId: connection.appId, idempotencyKey: request.idempotency_key, hash });
@@ -1483,6 +1875,14 @@ export function commitMessageWithEffect(context, connection, request) {
         conversationId,
         senderPrincipalId,
       });
+      const exactRecipientEndpointId = validateRecipientEndpoint(context.db, {
+        logger: context.logger,
+        appId: connection.appId,
+        recipientEndpointId: requestedRecipientEndpointId,
+        conversationId,
+        senderPrincipalId,
+        effect,
+      });
       const channelRoutes = resolveChannelRoutes(context.db, {
         selectors: channelSelectors,
         conversationId,
@@ -1532,6 +1932,8 @@ export function commitMessageWithEffect(context, connection, request) {
           messageId,
           effect,
           now,
+          recipientEndpointId: exactRecipientEndpointId,
+          exactRoute: exactRecipientEndpointId === null ? null : routeOf(requestedRecipientEndpointId, exactRecipientEndpointId),
         }) ?? {};
 
       // Delivery routing per transitions.yaml: acceptance wakes no one;
@@ -1581,15 +1983,21 @@ export function commitMessageWithEffect(context, connection, request) {
           throw new TightbeamError('obligation_conflict', 'a user terminal outcome requires its immutable origin route', { field: 'channel_selectors' });
         }
         const stagedRootId = writerResult.stageDeliveryConfirmedRootId ?? null;
+        const cancelNotice = writerResult.cancelNotice ?? null;
+        const noticeEndpointIds = cancelNotice?.holderEndpointIds ?? [];
         ({ liveDeliveries, presentations } = createDeliveriesForRecipients(context.db, {
           conversationId,
           messageId,
           senderPrincipalId,
-          recipientEndpointId: inboundTargetEndpointId,
-          routeReason: stagedRootId === null ? null : DELIVERY_CONFIRMED_ROUTE_REASON,
-          sourceObligationId: stagedRootId,
+          senderEndpointId: effect.sender_endpoint_id ?? null,
+          recipientEndpointId: inboundTargetEndpointId ?? exactRecipientEndpointId,
+          routeReason: stagedRootId !== null ? DELIVERY_CONFIRMED_ROUTE_REASON : noticeEndpointIds.length > 0 ? CANCEL_NOTICE_ROUTE_REASON : null,
+          sourceObligationId: stagedRootId ?? (noticeEndpointIds.length > 0 ? cancelNotice.sourceObligationId : null),
           routeReasonPrincipalId: writerResult.stageConfirmationRecipientPrincipalId ?? null,
-          endpointBindings: resolveEndpointBindings(context.db, { effect, inReplyToMessageId, now }),
+          routeReasonEndpointIds: noticeEndpointIds.length > 0 ? new Set(noticeEndpointIds) : null,
+          typedRouteIsClosedWorkNotice: noticeEndpointIds.length > 0,
+          everyCopyIsClosedWorkNotice: cancelNotice?.requesterCancel === true,
+          endpointBindings: resolveEndpointBindings(context.db, { effect, inReplyToMessageId, now, noticeEndpointIds }),
           resumeStaleAfterMs: context.resumeStaleAfterMs,
           stateRoot: context.stateRoot,
           logger: context.logger,
@@ -1608,6 +2016,27 @@ export function commitMessageWithEffect(context, connection, request) {
             });
           }
         }
+      }
+
+      const notices = [
+        writerResult.chainNotice && { ...writerResult.chainNotice, routeReason: DELEGATION_NOTICE_ROUTE_REASON },
+        // The holder fan-out above binds by principal; a holder in the
+        // requester's own folder is reached here, exactly, instead.
+        writerResult.cancelNotice && { endpointIds: writerResult.cancelNotice.holderEndpointIds, sourceObligationId: writerResult.cancelNotice.sourceObligationId, routeReason: CANCEL_NOTICE_ROUTE_REASON },
+      ].filter(Boolean);
+      for (const notice of notices) {
+        const routed = createNoticeDeliveries(context.db, {
+          conversationId,
+          messageId,
+          endpointIds: notice.endpointIds,
+          senderEndpointId: effect.sender_endpoint_id ?? null,
+          routeReason: notice.routeReason,
+          sourceObligationId: notice.sourceObligationId,
+          effectType: effect.type,
+          stateRoot: context.stateRoot,
+          logger: context.logger,
+        });
+        liveDeliveries.push(...routed.liveDeliveries);
       }
 
       const tachyonArmed = armTachyonFromCommittedEffect(context.db, { sendBranch, effect });
@@ -1715,13 +2144,38 @@ function requireRecoverableRoot(db, { appId, rootObligationId }) {
 }
 
 /**
+ * A superseded endpoint was declared unresumable when its replacement was
+ * admitted: a delivery or resume routed to it would never be picked up. The
+ * refusal names the newest lineage replacement, the one selectable endpoint
+ * for that work, and is raised before any write.
+ */
+function refuseSupersededRecoveryTarget(db, { root, target, logger }) {
+  const superseded = db.prepare('SELECT 1 FROM resume_requests WHERE endpoint_id = ? AND replacement_endpoint_id IS NOT NULL LIMIT 1').get(target.id);
+  if (!superseded) return;
+  const replacementId = newestLineageEndpointId(db, target.id);
+  const replacement = db.prepare('SELECT process_generation FROM endpoints WHERE id = ?').get(replacementId);
+  logger?.warn?.({
+    event: 'recovery_target_refused',
+    params: { root_obligation_id: root.id, target_endpoint_id: target.id },
+    result: { reason: 'target_superseded', replacement_endpoint_id: replacementId },
+    status: 'refused',
+  });
+  throw new TightbeamError('obligation_conflict', `endpoint "${target.id}" was replaced by "${replacementId}" and can never resume; recover to "${replacementId}" instead`, {
+    field: 'target_endpoint_id',
+    reason: 'target_superseded',
+    replacement_endpoint_id: replacementId,
+    replacement_process_generation: replacement?.process_generation ?? null,
+  });
+}
+
+/**
  * The explicitly selected target: visible to this application (a foreign
  * and a nonexistent endpoint are indistinguishable), not closed, a
  * participant of the root's conversation, and sitting at the exact observed
  * process generation. A runtime nobody ever adopted (NULL process
  * generation) can never be targeted.
  */
-function requireAuthorizedRecoveryTarget(db, { appId, root, request }) {
+function requireAuthorizedRecoveryTarget(db, { appId, root, request, logger }) {
   const target = db.prepare('SELECT * FROM endpoints WHERE id = ? AND created_by_app_id = ?').get(request.target_endpoint_id, appId);
   if (!target) {
     throw new TightbeamError('endpoint_unknown', `no endpoint "${request.target_endpoint_id}" is visible to this application`, { field: 'target_endpoint_id' });
@@ -1729,6 +2183,7 @@ function requireAuthorizedRecoveryTarget(db, { appId, root, request }) {
   if (target.state === 'closed') {
     throw new TightbeamError('obligation_conflict', 'the selected endpoint is closed; re-read the root before recovering', { field: 'target_endpoint_id' });
   }
+  refuseSupersededRecoveryTarget(db, { root, target, logger });
   try {
     requireParticipant(db, root.conversation_id, target.principal_id);
   } catch {
@@ -1787,11 +2242,16 @@ function createRecoveryRoute(db, { root, openingMessageId, target, operation, st
     db.prepare("UPDATE claims SET state = 'released', outcome = 'failed', released_at = ? WHERE resource_type = 'delivery' AND resource_id = ? AND state = 'claimed'").run(now, delivery.id);
   }
   const staleResumes = db
-    .prepare("SELECT id FROM resume_requests WHERE endpoint_id = ? AND message_id = ? AND state IN ('pending', 'claimed')")
+    .prepare("SELECT id, recovery_mode FROM resume_requests WHERE endpoint_id = ? AND message_id = ? AND state IN ('pending', 'claimed')")
     .all(target.id, openingMessageId);
   for (const resume of staleResumes) {
-    db.prepare("UPDATE resume_requests SET state = 'failed', updated_at = ? WHERE id = ?").run(now, resume.id);
-    db.prepare("UPDATE claims SET state = 'released', outcome = 'failed', released_at = ? WHERE resource_type = 'resume_request' AND resource_id = ? AND state = 'claimed'").run(now, resume.id);
+    // The request that started a replacement did its job once the replacement
+    // session exists (it adopted the placeholder); ending it `failed` would
+    // record the opposite of what happened. Any other superseded request is
+    // retired as failed: this route is the one that now wakes the endpoint.
+    const outcome = resume.recovery_mode === 'replacement' && target.provider_session_id ? 'completed' : 'failed';
+    db.prepare('UPDATE resume_requests SET state = ?, updated_at = ? WHERE id = ?').run(outcome, now, resume.id);
+    db.prepare("UPDATE claims SET state = 'released', outcome = ?, released_at = ? WHERE resource_type = 'resume_request' AND resource_id = ? AND state = 'claimed'").run(outcome, now, resume.id);
   }
 
   // Recovery has no listener ownership hand-off in this phase. In
@@ -1805,24 +2265,129 @@ function createRecoveryRoute(db, { root, openingMessageId, target, operation, st
   ).run(deliveryId, openingMessageId, target.id, operation, root.id, now, now);
   refreshSessionWatermark({ stateRoot, sessionId: target.provider_session_id, deliveryId, logger });
   if (route === 'resume_dead' || route === 'resume_idle') {
-    db.prepare(
-      `INSERT INTO resume_requests
-        (id, endpoint_id, principal_id, session_id, conversation_id, message_id, reason, authority_reference, state, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
-    ).run(
-      generateId('resume_request'),
-      target.id,
-      target.principal_id,
-      target.provider_session_id,
-      root.conversation_id,
-      openingMessageId,
-      route === 'resume_dead' ? 'endpoint_dead' : 'endpoint_idle',
-      target.authority_reference,
-      now,
-      now,
-    );
+    // The shared writer keeps the superseded-endpoint guard on this path too.
+    maybeCreateResumeRequest(db, {
+      endpoint: { ...target, session_id: target.provider_session_id },
+      conversationId: root.conversation_id,
+      messageId: openingMessageId,
+      reason: route === 'resume_dead' ? 'endpoint_dead' : 'endpoint_idle',
+      logger,
+    });
   }
   return [];
+}
+
+/**
+ * Every endpoint the target replaced, directly or through a chain of
+ * replacements. Each was declared unresumable when its replacement was
+ * admitted, so custody it still records can never be exercised.
+ */
+function lineagePredecessorIds(db, targetEndpointId) {
+  return db
+    .prepare(
+      `WITH RECURSIVE predecessors(id) AS (
+         SELECT endpoint_id FROM resume_requests WHERE replacement_endpoint_id = ?
+         UNION
+         SELECT rr.endpoint_id FROM resume_requests rr JOIN predecessors p ON rr.replacement_endpoint_id = p.id
+       )
+       SELECT id FROM predecessors`,
+    )
+    .all(targetEndpointId)
+    .map((row) => row.id);
+}
+
+/**
+ * Closes ONLY a replaced predecessor's exact open attempt, like death evidence
+ * would have: delegations beneath it stay with their own holders, and their
+ * results already reach the replacement through lineage routing.
+ */
+function supersedeStrandedAttempt(db, { attemptId, rootId, source, now }) {
+  db.prepare(
+    `UPDATE obligations
+        SET status = 'closed', resolution = 'superseded', resolution_replacement_id = ?, resolution_source = ?, updated_at = ?
+      WHERE id = ? AND status = 'open'`,
+  ).run(rootId, source, now, attemptId);
+}
+
+/** The one open attempt a recovery admits under a root, plus its recovery route. */
+function admitRecoveryAttempt(context, { root, target, operation, now }) {
+  const { db } = context;
+  clearRootAttention(db, { rootId: root.id, operation, logger: context.logger });
+  const attemptGeneration = db.prepare("SELECT COALESCE(MAX(generation), 0) AS n FROM obligations WHERE parent_id = ? AND role = 'attempt'").get(root.id).n + 1;
+  const attemptId = generateId('obligation');
+  db.prepare(
+    `INSERT INTO obligations (id, conversation_id, parent_id, role, status, generation, accountable_principal_id, custodian_endpoint_id, created_at, updated_at)
+     VALUES (?, ?, ?, 'attempt', 'open', ?, ?, ?, ?, ?)`,
+  ).run(attemptId, root.conversation_id, root.id, attemptGeneration, target.principal_id, target.id, now, now);
+  const openingEffect = db.prepare("SELECT message_id FROM message_effects WHERE effect = 'open' AND obligation_id = ?").get(root.id);
+  if (!openingEffect) {
+    // Unreachable for roots this engine created (every open effect writes
+    // its audit row in the same transaction) — fail closed rather than
+    // route a recovery without its originating message.
+    throw new TightbeamError('obligation_conflict', `root "${root.id}" has no opening message to route the recovery admission against`);
+  }
+  const liveDeliveries = createRecoveryRoute(db, {
+    root,
+    openingMessageId: openingEffect.message_id,
+    target,
+    operation,
+    stateRoot: context.stateRoot,
+    logger: context.logger,
+    now,
+  });
+  return { rootId: root.id, attemptId, attemptGeneration, liveDeliveries };
+}
+
+/**
+ * Open roots a replaced predecessor still holds besides the admitted one:
+ * its open attempt, or its failed newest attempt with nothing open since
+ * (custody lost at its death). Nobody else holds these, so the replacement
+ * adopts them in the same transaction (plan §2.2, ux F12). A root another
+ * endpoint holds, a staged resolution, or a conversation the target is not
+ * part of is never touched.
+ */
+function strandedRootsOf(db, { appId, admittedRootId, predecessorIds }) {
+  if (predecessorIds.length === 0) return [];
+  return db
+    .prepare(
+      `SELECT root.* FROM obligations root
+         JOIN principals owner ON owner.id = root.accountable_principal_id
+        WHERE root.role = 'root' AND root.status = 'open' AND root.id <> ? AND owner.created_by_app_id = ?
+          AND EXISTS (
+            SELECT 1 FROM obligations attempt
+             WHERE attempt.parent_id = root.id AND attempt.role = 'attempt'
+               AND attempt.custodian_endpoint_id IN (SELECT value FROM json_each(?))
+               AND (attempt.status = 'open'
+                 OR (attempt.resolution = 'failed'
+                   AND attempt.generation = (SELECT MAX(newest.generation) FROM obligations newest WHERE newest.parent_id = root.id AND newest.role = 'attempt')
+                   AND NOT EXISTS (SELECT 1 FROM obligations live WHERE live.parent_id = root.id AND live.role = 'attempt' AND live.status = 'open'))))
+        ORDER BY root.created_at ASC, root.id ASC`,
+    )
+    .all(admittedRootId, appId, JSON.stringify(predecessorIds));
+}
+
+function inheritStrandedRoots(context, { appId, admittedRootId, target, predecessorIds, operation, source, now }) {
+  const inherited = [];
+  for (const root of strandedRootsOf(context.db, { appId, admittedRootId, predecessorIds })) {
+    if (hasActiveStagedResolution(context.db, root.id)) continue;
+    try {
+      requireParticipant(context.db, root.conversation_id, target.principal_id);
+    } catch {
+      continue;
+    }
+    const open = context.db.prepare("SELECT id FROM obligations WHERE parent_id = ? AND role = 'attempt' AND status = 'open'").get(root.id);
+    if (open) supersedeStrandedAttempt(context.db, { attemptId: open.id, rootId: root.id, source, now });
+    inherited.push(admitRecoveryAttempt(context, { root, target, operation, now }));
+  }
+  if (inherited.length > 0) {
+    context.logger?.info({
+      event: 'recovery_replacement_inherited_roots',
+      params: { operation, target_endpoint_id: target.id, predecessor_count: predecessorIds.length },
+      result: { root_obligation_ids: inherited.map((entry) => entry.rootId) },
+      status: 'ok',
+    });
+  }
+  return inherited;
 }
 
 function runRecoveryCommand(context, connection, rawRequest, operation) {
@@ -1856,12 +2421,16 @@ function runRecoveryCommand(context, connection, rawRequest, operation) {
           field: 'root_obligation_id',
         });
       }
-      const target = requireAuthorizedRecoveryTarget(context.db, { appId: connection.appId, root, request });
+      const target = requireAuthorizedRecoveryTarget(context.db, { appId: connection.appId, root, request, logger: context.logger });
 
-      const priorOpenAttempt = context.db.prepare("SELECT id FROM obligations WHERE parent_id = ? AND role = 'attempt' AND status = 'open'").get(root.id);
-      if (operation === 'recovery.retry' && priorOpenAttempt) {
+      const predecessorIds = lineagePredecessorIds(context.db, target.id);
+      const priorOpenAttempt = context.db.prepare("SELECT id, custodian_endpoint_id FROM obligations WHERE parent_id = ? AND role = 'attempt' AND status = 'open'").get(root.id);
+      const strandedAttempt = priorOpenAttempt && predecessorIds.includes(priorOpenAttempt.custodian_endpoint_id) ? priorOpenAttempt : null;
+      if (operation === 'recovery.retry' && priorOpenAttempt && !strandedAttempt) {
         // transitions.yaml rejects healthy_owner_exists: retry never displaces
-        // live custody — that is switch's explicit job.
+        // live custody — that is switch's explicit job. Custody recorded on an
+        // endpoint this target replaced is not live: that endpoint can never
+        // resume, so it is the replacement's to take over (below).
         throw new TightbeamError('obligation_conflict', `root "${root.id}" already has a healthy open attempt; retry requires none — use recovery.switch to displace it explicitly`, {
           field: 'root_obligation_id',
         });
@@ -1869,33 +2438,29 @@ function runRecoveryCommand(context, connection, rawRequest, operation) {
 
       const now = new Date().toISOString();
       const commandId = generateId('lifecycle_command');
+      const source = `${operation}:${commandId}`;
 
       // Switch fences the WHOLE stale subtree (prior attempt plus any open
       // delegation beneath it) as superseded by the root; retry reaches this
-      // point only when no open attempt exists. The superseded variant points
-      // at the still-open root, which keeps FK ordering trivially satisfied.
+      // point only when no open attempt exists, or when the open one is a
+      // replaced predecessor's. The superseded variant points at the
+      // still-open root, which keeps FK ordering trivially satisfied.
       if (operation === 'recovery.switch') {
-        supersedeOpenDescendants(context.db, { closingNodeId: root.id, source: `recovery.switch:${commandId}`, now });
+        supersedeOpenDescendants(context.db, { closingNodeId: root.id, source, now });
+      } else if (strandedAttempt) {
+        supersedeStrandedAttempt(context.db, { attemptId: strandedAttempt.id, rootId: root.id, source, now });
       }
 
-      clearRootAttention(context.db, { rootId: root.id, operation, logger: context.logger });
-
-      const attemptGeneration =
-        context.db.prepare("SELECT COALESCE(MAX(generation), 0) AS n FROM obligations WHERE parent_id = ? AND role = 'attempt'").get(root.id).n + 1;
-      const attemptId = generateId('obligation');
-      context.db
-        .prepare(
-          `INSERT INTO obligations (id, conversation_id, parent_id, role, status, generation, accountable_principal_id, custodian_endpoint_id, created_at, updated_at)
-           VALUES (?, ?, ?, 'attempt', 'open', ?, ?, ?, ?, ?)`,
-        )
-        .run(attemptId, root.conversation_id, root.id, attemptGeneration, target.principal_id, target.id, now, now);
+      const admitted = admitRecoveryAttempt(context, { root, target, operation, now });
+      const inherited = inheritStrandedRoots(context, { appId: connection.appId, admittedRootId: root.id, target, predecessorIds, operation, source, now });
 
       const resultPayload = {
         root_obligation_id: root.id,
         root_generation: root.generation,
-        attempt_id: attemptId,
-        attempt_generation: attemptGeneration,
+        attempt_id: admitted.attemptId,
+        attempt_generation: admitted.attemptGeneration,
         endpoint_id: target.id,
+        inherited_root_obligation_ids: inherited.map((entry) => entry.rootId),
       };
       context.db
         .prepare(
@@ -1904,23 +2469,7 @@ function runRecoveryCommand(context, connection, rawRequest, operation) {
         )
         .run(commandId, connection.appId, operation, request.idempotency_key, hash, root.id, JSON.stringify(resultPayload), now);
 
-      const openingEffect = context.db.prepare("SELECT message_id FROM message_effects WHERE effect = 'open' AND obligation_id = ?").get(root.id);
-      if (!openingEffect) {
-        // Unreachable for roots this engine created (every open effect writes
-        // its audit row in the same transaction) — fail closed rather than
-        // route a recovery without its originating message.
-        throw new TightbeamError('obligation_conflict', `root "${root.id}" has no opening message to route the recovery admission against`);
-      }
-      const liveDeliveries = createRecoveryRoute(context.db, {
-        root,
-        openingMessageId: openingEffect.message_id,
-        target,
-        operation,
-        stateRoot: context.stateRoot,
-        logger: context.logger,
-        now,
-      });
-
+      const liveDeliveries = [admitted, ...inherited].flatMap((entry) => entry.liveDeliveries);
       return { result: resultPayload, conversationId: root.conversation_id, liveDeliveries };
     });
   } catch (error) {
@@ -2037,7 +2586,7 @@ const STOP_BLOCK_CAP = 3;
 // {...request, park:true} would admit as the original command and forbidden
 // concepts would be accepted-and-ignored. The same strict extra-field
 // convention validateEffect enforces per effect family.
-const SESSION_STOP_FIELDS = ['endpoint_id', 'process_generation', 'idempotency_key'];
+const SESSION_STOP_FIELDS = ['endpoint_id', 'process_generation', 'idempotency_key', 'background_wait'];
 
 function validateSessionStopRequest(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) {
@@ -2045,8 +2594,11 @@ function validateSessionStopRequest(request) {
   }
   for (const key of Object.keys(request)) {
     if (!SESSION_STOP_FIELDS.includes(key)) {
-      throw new TightbeamError('malformed_request', `session.stop declares "${key}", which is not part of its three-field request contract`, { field: key });
+      throw new TightbeamError('malformed_request', `session.stop declares "${key}", which is not part of its request contract`, { field: key });
     }
+  }
+  if (request.background_wait !== undefined && typeof request.background_wait !== 'boolean') {
+    throw new TightbeamError('malformed_request', 'session.stop background_wait must be a boolean', { field: 'background_wait' });
   }
   const processGeneration =
     request.process_generation === undefined || request.process_generation === null
@@ -2056,6 +2608,7 @@ function validateSessionStopRequest(request) {
     endpoint_id: requireRecoveryString(request, 'endpoint_id'),
     process_generation: processGeneration,
     idempotency_key: requireRecoveryString(request, 'idempotency_key'),
+    background_wait: request.background_wait === true,
   };
 }
 
@@ -2157,9 +2710,10 @@ function recordBlockAttention(db, { rootId, now, listenerGeneration = null }) {
   return true;
 }
 
+// A takeover_pending row changes owner only by adoption or exhausted release.
 function markEndpointIdle(db, { endpointId, processGeneration, now }) {
   return db
-    .prepare("UPDATE endpoints SET state = 'idle', updated_at = ? WHERE id = ? AND process_generation IS ? AND state != 'retiring'")
+    .prepare("UPDATE endpoints SET state = 'idle', updated_at = ? WHERE id = ? AND process_generation IS ? AND state NOT IN ('retiring', 'takeover_pending')")
     .run(now, endpointId, processGeneration).changes === 1;
 }
 
@@ -2174,7 +2728,7 @@ function activeListenerForStop(db, { endpointId, processGeneration }) {
     .get(endpointId, processGeneration);
 }
 
-function oldestUnreadDeliveryForStop(db, { endpointId }) {
+function oldestUnreadDeliveryForStop(db, { endpointId, processGeneration }) {
   return db
     .prepare(
       `SELECT d.id AS delivery_id, d.message_id
@@ -2184,10 +2738,22 @@ function oldestUnreadDeliveryForStop(db, { endpointId }) {
             SELECT 1 FROM listener_presentations p
              WHERE p.target_delivery_id = d.id AND p.state = 'pending'
           )
+          AND NOT EXISTS (
+            SELECT 1 FROM listener_presentations p
+              JOIN listeners l ON l.id = p.listener_id
+             WHERE p.target_delivery_id = d.id AND p.state = 'acked'
+               AND l.endpoint_id = d.endpoint_id AND l.process_generation = ?
+          )
+          AND NOT ${closedWorkNoticeSql('d')}
         ORDER BY d.created_at ASC, d.id ASC
         LIMIT 1`,
     )
-    .get(endpointId);
+    // A chain notice about work that is already closed asks nothing of this
+    // session: it waits for the next tool boundary instead of holding Stop.
+    // A delivery this process generation already acked was notified once;
+    // the T+30 retry and availability takeover bound it from here, so Stop
+    // must not wake the session for it again (protocol.md, bounded notices).
+    .get(endpointId, processGeneration);
 }
 
 function replyWaitForDelivery(db, { endpointId, processGeneration, deliveryId }) {
@@ -2231,7 +2797,7 @@ function parkResult(listener, replyWaitState, endpoint) {
   };
 }
 
-function createParkedListener(db, { endpoint, wait = null, now }) {
+function createParkedListener(db, { endpoint, wait = null, now, backgroundWait = false }) {
   const currentGeneration = db.prepare('SELECT MAX(listener_generation) AS n FROM listeners WHERE endpoint_id = ?').get(endpoint.id)?.n ?? 0;
   const nowMs = Date.parse(now);
   const listener = {
@@ -2244,8 +2810,8 @@ function createParkedListener(db, { endpoint, wait = null, now }) {
   db.prepare(
     `INSERT INTO listeners
        (id, reply_wait_id, endpoint_id, provider_session_id, process_generation, listener_generation, state,
-        lease_expires_at, park_deadline_at, terminal_reason, created_at, updated_at, ended_at)
-     VALUES (?, ?, ?, ?, ?, ?, 'parked', ?, ?, NULL, ?, ?, NULL)`,
+        lease_expires_at, park_deadline_at, terminal_reason, created_at, updated_at, ended_at, background_wait_at)
+     VALUES (?, ?, ?, ?, ?, ?, 'parked', ?, ?, NULL, ?, ?, NULL, ?)`,
   ).run(
     listener.id,
     wait?.id ?? null,
@@ -2257,6 +2823,7 @@ function createParkedListener(db, { endpoint, wait = null, now }) {
     listener.park_deadline_at,
     now,
     now,
+    backgroundWait ? now : null,
   );
   return listener;
 }
@@ -2282,29 +2849,75 @@ function isHeadlessDaemonProcess(endpoint) {
   return typeof endpoint.owner_launch_token === 'string' && endpoint.owner_launch_token.length > 0;
 }
 
-function parkEligibleEndpoint(db, { endpoint, processGeneration, now, obligationIds = [] }) {
+// subagent-safe-delivery W2: a fresh headless run (non_interactive, not
+// daemon-resumed) whose Stop reports background work in flight parks
+// without tachyon arming, so a message arriving mid-wait still wakes it.
+function isBackgroundWaitPark(endpoint, processGeneration, backgroundWait) {
+  return backgroundWait && endpoint.launch_mode === 'non_interactive' && !isHeadlessDaemonProcess(endpoint) && Number.isInteger(processGeneration);
+}
+
+// A session never stops with an unread message. The headless and
+// unarmed allow paths first look for one and block so the model receives it.
+// Blocks are counted from the stop ledger per delivery (no new state); after
+// STOP_BLOCK_CAP the Stop is allowed rather than wedge a session whose receipt keeps failing.
+function unreadStopBlock(db, { endpoint, processGeneration, trace }) {
+  const delivery = oldestUnreadDeliveryForStop(db, { endpointId: endpoint.id, processGeneration });
+  if (!delivery) return null;
+  const blocked = db
+    .prepare("SELECT COUNT(*) AS n FROM lifecycle_commands WHERE operation = 'session.stop' AND json_extract(result_payload, '$.unread_delivery_id') = ?")
+    .get(delivery.delivery_id).n;
+  if (blocked >= STOP_BLOCK_CAP) {
+    trace.unread_escape = { delivery_id: delivery.delivery_id, blocked };
+    return null;
+  }
+  trace.reason = 'unread_block';
+  return {
+    decision: 'block',
+    obligation_ids: [],
+    unread_delivery_id: delivery.delivery_id,
+    reason:
+      `[tightbeam] Cannot stop: you have an unread message (${delivery.message_id}).\n` +
+      `Receive command: ${tightbeamCommandName()} agent receive --message ${delivery.message_id}`,
+  };
+}
+
+// `trace` collects the decision branch for the post-commit session_stop_decided log.
+function parkEligibleEndpoint(db, { endpoint, processGeneration, now, obligationIds = [], backgroundWait = false, trace = {} }) {
   if (endpoint.state === 'retiring') return { decision: 'allow', obligation_ids: obligationIds };
-  if (endpoint.launch_mode === 'non_interactive' || isHeadlessDaemonProcess(endpoint) || !Number.isInteger(processGeneration)) {
+  const backgroundPark = isBackgroundWaitPark(endpoint, processGeneration, backgroundWait);
+  const stopAllowedByMode = !backgroundPark && (endpoint.launch_mode === 'non_interactive' || isHeadlessDaemonProcess(endpoint) || !Number.isInteger(processGeneration) || !isTachyonArmedForGeneration(endpoint, processGeneration));
+  if (stopAllowedByMode && Number.isInteger(processGeneration)) {
+    const block = unreadStopBlock(db, { endpoint, processGeneration, trace });
+    if (block) return block;
+  }
+  if (!backgroundPark && (endpoint.launch_mode === 'non_interactive' || isHeadlessDaemonProcess(endpoint) || !Number.isInteger(processGeneration))) {
+    // A headless Stop with no background work left releases any earlier
+    // background-wait listener so its wake-listen / hold exits with the run.
+    trace.ended_listeners = Number.isInteger(processGeneration) ? endUnsupportedTachyonListeners(db, { endpointId: endpoint.id, processGeneration, now, reason: 'background_wait_ended' }) : 0;
+    trace.reason = 'headless_allow';
     markEndpointIdle(db, { endpointId: endpoint.id, processGeneration, now });
     return { decision: 'allow', obligation_ids: obligationIds };
   }
-  if (!isTachyonArmedForGeneration(endpoint, processGeneration)) {
-    endUnsupportedTachyonListeners(db, { endpointId: endpoint.id, processGeneration, now });
+  if (!backgroundPark && !isTachyonArmedForGeneration(endpoint, processGeneration)) {
+    trace.ended_listeners = endUnsupportedTachyonListeners(db, { endpointId: endpoint.id, processGeneration, now });
+    trace.reason = 'unarmed_allow';
     markEndpointIdle(db, { endpointId: endpoint.id, processGeneration, now });
     return { decision: 'allow', obligation_ids: obligationIds };
   }
+  trace.reason = backgroundPark ? 'background_wait' : 'armed';
 
   const existingListener = activeListenerForStop(db, { endpointId: endpoint.id, processGeneration });
   if (existingListener) {
+    if (backgroundPark) db.prepare('UPDATE listeners SET background_wait_at = COALESCE(background_wait_at, ?) WHERE id = ?').run(now, existingListener.id);
     markEndpointIdle(db, { endpointId: endpoint.id, processGeneration, now });
     return { ...parkResult(existingListener, db.prepare('SELECT state FROM reply_waits WHERE id = ?').get(existingListener.reply_wait_id)?.state ?? null, endpoint), obligation_ids: obligationIds };
   }
 
-  const delivery = oldestUnreadDeliveryForStop(db, { endpointId: endpoint.id });
+  const delivery = oldestUnreadDeliveryForStop(db, { endpointId: endpoint.id, processGeneration });
   const wait = delivery
     ? replyWaitForDelivery(db, { endpointId: endpoint.id, processGeneration, deliveryId: delivery.delivery_id })
     : oldestParkableWaitForStop(db, { endpointId: endpoint.id, processGeneration });
-  const listener = createParkedListener(db, { endpoint, wait, now });
+  const listener = createParkedListener(db, { endpoint, wait, now, backgroundWait: backgroundPark });
   if (delivery) {
     createPendingPresentation(db, { listener, messageId: delivery.message_id, deliveryId: delivery.delivery_id, now });
     db.prepare("UPDATE listeners SET state = 'waking' WHERE id = ? AND state = 'parked'").run(listener.id);
@@ -2320,6 +2933,8 @@ function runSessionStop(context, connection, rawRequest) {
     operation: SESSION_STOP_OPERATION,
     endpoint_id: request.endpoint_id,
     process_generation: request.process_generation,
+    // Only a set flag enters the hash, so unflagged ledger rows replay as before.
+    ...(request.background_wait ? { background_wait: true } : {}),
   });
   const replayed = findCommandReplay(context.db, { appId: connection.appId, operation: SESSION_STOP_OPERATION, idempotencyKey: request.idempotency_key, hash });
   if (replayed) {
@@ -2329,6 +2944,8 @@ function runSessionStop(context, connection, rawRequest) {
   const startedAt = Date.now();
   let outcome;
   const replyDiagnosticOutcomes = [];
+  const trace = {};
+  let launchMode = null;
   try {
     outcome = withTransaction(context.db, () => {
       const endpoint = requireStopEndpoint(context.db, {
@@ -2336,12 +2953,13 @@ function runSessionStop(context, connection, rawRequest) {
         endpointId: request.endpoint_id,
         processGeneration: request.process_generation,
       });
+      launchMode = endpoint.launch_mode ?? null;
       const untracked = findUntrackedOffers(context.db, endpoint.id);
       const now = new Date().toISOString();
 
       let resultPayload;
       if (untracked.length === 0) {
-        resultPayload = parkEligibleEndpoint(context.db, { endpoint, processGeneration: request.process_generation, now });
+        resultPayload = parkEligibleEndpoint(context.db, { endpoint, processGeneration: request.process_generation, now, backgroundWait: request.background_wait, trace });
         replyDiagnosticOutcomes.push(
           resultPayload.decision === 'park'
             ? 'parked'
@@ -2370,6 +2988,8 @@ function runSessionStop(context, connection, rawRequest) {
             processGeneration: request.process_generation,
             now,
             obligationIds: untracked.map((offer) => offer.id),
+            backgroundWait: request.background_wait,
+            trace,
           });
         } else {
           for (const entry of counts) {
@@ -2405,11 +3025,24 @@ function runSessionStop(context, connection, rawRequest) {
     throw error;
   }
 
+  if (trace.unread_escape) {
+    context.logger?.warn?.({ event: 'session_stop_unread_escape', params: { endpoint_id: request.endpoint_id, process_generation: request.process_generation, ...trace.unread_escape }, result: 'allowed_with_unread', status: 'warn' });
+  }
   const forced = outcome.decision === 'allow' && outcome.obligation_ids.length > 0;
   for (const replyDiagnosticOutcome of replyDiagnosticOutcomes) replyContinuityDiagnostic(context.logger, replyDiagnosticOutcome);
   context.logger?.info({
     event: 'session_stop_decided',
-    params: { endpoint_id: request.endpoint_id, decision: outcome.decision, escaped: outcome.obligation_ids.length },
+    params: {
+      endpoint_id: request.endpoint_id,
+      process_generation: request.process_generation,
+      decision: outcome.decision,
+      escaped: outcome.obligation_ids.length,
+      background_wait: request.background_wait,
+      ...(outcome.listener_id ? { listener_id: outcome.listener_id } : {}),
+      launch_mode: launchMode,
+      reason: trace.reason ?? (outcome.decision === 'block' ? 'untracked_offer' : 'retiring'),
+      ended_listeners: trace.ended_listeners ?? 0,
+    },
     result: forced ? 'force_allowed' : outcome.decision === 'block' ? 'blocked' : 'allowed',
     status: 'ok',
     latency_ms: Date.now() - startedAt,

@@ -14,6 +14,19 @@ import { execFileSync as runFile } from 'node:child_process';
 import { createRuntimeRegistry } from '../runtimes/registry.mjs';
 
 import { isSafeSessionId } from '../protocol/session_paths.mjs';
+import { HOST_NAME_PATTERN, HOST_REF_PATTERN } from '../protocol/host_binding.mjs';
+import {
+  CODEX_COMMAND,
+  claudeArgsAreHeadless,
+  claudeInvocationArgs,
+  commandBaseName,
+  isAppServerArgs,
+  observeProcessRow as observeOwnerCandidate,
+  readProcessArgs,
+  resolveAppServerClientOwner,
+} from './hook_process_tree.mjs';
+
+export { claudeInvocationArgs };
 
 // Cross-runtime legacy fallbacks that belong to the CHAIN, not to any one
 // runtime record: HELM_AGENT_SESSION_ID predates per-runtime identity and
@@ -130,7 +143,7 @@ function sleepSync(ms) {
  * constructing anything.
  */
 export function readStdinSync() {
-  if (tty.isatty(0)) return { text: '', complete: true };
+  if (tty.isatty(0)) return { text: '', raw: Buffer.alloc(0), complete: true };
   const chunks = [];
   let complete = true;
   const buffer = Buffer.alloc(65536);
@@ -157,7 +170,10 @@ export function readStdinSync() {
     if (bytesRead === 0) break;
     chunks.push(Buffer.from(buffer.subarray(0, bytesRead)));
   }
-  return { text: Buffer.concat(chunks).toString('utf8'), complete };
+  // `raw` is the exact bytes read: the Stop gate and its wake listener key
+  // their handoff on them, so neither may re-serialize the payload.
+  const raw = Buffer.concat(chunks);
+  return { text: raw.toString('utf8'), raw, complete };
 }
 
 /**
@@ -234,7 +250,7 @@ const OWNER_CAPTURE_SOURCES = Object.freeze({ codex: 'codex-hook', 'claude-code'
 // headless resume; stopping at a short-lived helper would read its exit as
 // the session's and resume beside a live pane, so it is never done.
 const OWNER_RUNTIME_COMMANDS = Object.freeze({
-  codex: /^codex(-(aarch64|x86_64|arm64)-[a-z0-9_-]+)?$/i,
+  codex: CODEX_COMMAND,
   'claude-code': /^claude$/i,
   claude: /^claude$/i,
 });
@@ -244,57 +260,34 @@ function isOwnerCommand(runtime, name) {
   return name === 'node' || OWNER_RUNTIME_COMMANDS[runtime].test(name);
 }
 
-// `ps -o lstart=` is locale-formatted. Capture and the daemon's later
-// re-observation must print the same bytes for the same process, so both
-// pin the C locale (and collapse whitespace) rather than inherit whatever
-// the hook's or the launchd daemon's environment happens to carry.
-function psEnvironment() {
-  return { ...process.env, LC_ALL: 'C', LANG: 'C' };
-}
-
-const PROCESS_ROW = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+\s+\S+\s+\d+\s+\d{1,2}:\d{2}:\d{2}\s+\d{4})\s+(.+?)\s*$/;
-
-function observeOwnerCandidate(pid, execFileSync) {
-  // `pgid`, never `pgrp`: macOS ps rejects `pgrp` ("keyword not found")
-  // and exits 1, which is why no owner was ever recorded before 42 C.
-  const raw = execFileSync('ps', ['-o', 'pid=', '-o', 'ppid=', '-o', 'pgid=', '-o', 'lstart=', '-o', 'comm=', '-p', String(pid)], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-    env: psEnvironment(),
-  });
-  const match = PROCESS_ROW.exec(String(raw).split('\n').find((line) => line.trim().length > 0) ?? '');
-  if (!match) return null;
-  const row = {
-    pid: Number(match[1]),
-    ppid: Number(match[2]),
-    processGroupId: Number(match[3]),
-    startIdentity: match[4].trim().replace(/\s+/g, ' '),
-    command: match[5].trim(),
-  };
-  if (row.pid !== pid || !Number.isSafeInteger(row.ppid) || !Number.isSafeInteger(row.processGroupId) || row.processGroupId < 1 || row.startIdentity.length === 0) return null;
-  return row;
-}
-
-function commandBaseName(command) {
-  const base = command.split('/').pop() ?? '';
-  return base.replace(/^-/, '');
-}
-
 /**
- * The runtime process that owns this session's transcript, observed from
- * the installed hook: the hook's nearest ancestor that is the runtime's own
- * binary (or `node`), past any shell, launcher, or helper relay, named by
- * PID, its OS start identity (lstart, C locale), and its process group. The start identity is what keeps a reused PID from
- * passing for the recorded owner later.
+ * The runtime process that owns this session, observed from the installed
+ * hook, named by PID, its OS start identity (lstart, C locale), and its
+ * process group. The start identity is what keeps a reused PID from passing
+ * for the recorded owner later.
+ *
+ * The owner is the hook's nearest ancestor that is the runtime's own binary
+ * (or `node`), past any shell, launcher, or helper relay — with one
+ * exception that is the point of F27: a Codex `app-server` is never an
+ * owner. Since Codex 0.161 the TUI delegates its hooks to one managed
+ * app-server shared by every TUI (and by whichever pane started it), so the
+ * hook's ancestor says nothing about which TUI the session belongs to. For
+ * that layout the session's own TUI is resolved from the app-server's socket
+ * clients (see hook_process_tree.mjs); when that cannot be proven the
+ * capture is `unknown` and records nothing. Older Codex, `--no-daemon`,
+ * `codex exec` and Claude hook directly under the runtime process.
  *
  * Both built-in runtimes capture (item 42 C). Null — never a partial
- * snapshot — for any other runtime, an unobservable ancestor, or a chain
- * that does not reach the runtime process within OWNER_CAPTURE_MAX_HOPS;
- * the daemon then has no liveness evidence and never resumes an
- * interactive session on that endpoint's behalf. `log`, when given,
- * receives one structured record of the decision.
+ * snapshot — for any other runtime, an unobservable ancestor, a chain that
+ * does not reach the runtime process within OWNER_CAPTURE_MAX_HOPS, or an
+ * app-server layout whose TUI is not provable; the daemon then has no
+ * liveness evidence and never resumes an interactive session on that
+ * endpoint's behalf. `sessionId` and `cwd` identify the session being
+ * registered. `log`, when given, receives one structured record of the
+ * decision naming the signal that chose the owner (never arguments, ids or
+ * folders).
  */
-export function captureOwnerProcess({ runtime, parentProcessId = process.ppid, execFileSync = runFile, log } = {}) {
+export function captureOwnerProcess({ runtime, parentProcessId = process.ppid, sessionId, cwd, execFileSync = runFile, log } = {}) {
   const captureSource = Object.hasOwn(OWNER_CAPTURE_SOURCES, runtime) ? OWNER_CAPTURE_SOURCES[runtime] : null;
   const report = (status, extra = {}) => {
     if (typeof log === 'function') log({ event: 'owner_process_capture', params: { runtime: runtime ?? null }, status, ...extra });
@@ -318,7 +311,23 @@ export function captureOwnerProcess({ runtime, parentProcessId = process.ppid, e
       }
       const name = commandBaseName(observed.command);
       if (isOwnerCommand(runtime, name)) {
-        report('ok', { result: { pid: observed.pid, process_group_id: observed.processGroupId, command: name, relays } });
+        if (runtime === 'codex') {
+          const args = readProcessArgs(observed.pid, execFileSync);
+          if (args === null) {
+            report('unknown', { result: 'owner_args_unobservable', relays });
+            return null;
+          }
+          if (isAppServerArgs(args)) {
+            const { owner, reason, signal, command, ...facts } = resolveAppServerClientOwner({ appServerPid: observed.pid, sessionId, cwd, captureSource, execFileSync });
+            if (owner === null) {
+              report('unknown', { result: reason, ...facts });
+              return null;
+            }
+            report('ok', { result: { pid: owner.pid, process_group_id: owner.process_group_id, command, relays, signal, ...facts } });
+            return owner;
+          }
+        }
+        report('ok', { result: { pid: observed.pid, process_group_id: observed.processGroupId, command: name, relays, signal: 'runtime_ancestor' } });
         return { pid: observed.pid, start_identity: observed.startIdentity, process_group_id: observed.processGroupId, capture_source: captureSource };
       }
       relays.push(name);
@@ -331,6 +340,87 @@ export function captureOwnerProcess({ runtime, parentProcessId = process.ppid, e
   }
   report('failed', { result: 'no_runtime_ancestor', relays });
   return null;
+}
+
+// Agent commands sit a few relays below their runtime (node CLI, launcher
+// sh, component dispatch, the tool shell, a runtime helper); this bound
+// only has to clear that chain, never reach launchd.
+export const AGENT_RUNTIME_ANCESTOR_MAX_HOPS = 16;
+
+/**
+ * The built-in runtime whose own binary is this process's nearest ancestor,
+ * or null. Unlike owner capture, `node` is NOT a match: it names no runtime,
+ * and the agent CLI is itself a node process.
+ */
+export function nearestRuntimeAncestor({ parentProcessId = process.ppid, execFileSync = runFile } = {}) {
+  if (!Number.isInteger(parentProcessId) || parentProcessId < 1) return null;
+  let pid = parentProcessId;
+  try {
+    for (let hop = 0; hop < AGENT_RUNTIME_ANCESTOR_MAX_HOPS; hop += 1) {
+      const observed = observeOwnerCandidate(pid, execFileSync);
+      if (!observed) return null;
+      const name = commandBaseName(observed.command);
+      for (const [runtime, pattern] of Object.entries(OWNER_RUNTIME_COMMANDS)) {
+        if (runtime !== 'claude' && pattern.test(name)) return runtime;
+      }
+      if (observed.ppid <= 1) return null;
+      pid = observed.ppid;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/**
+ * The session an agent command acts for. Agent commands have no hook
+ * payload, so identity comes from the environment — and a process launched
+ * from another runtime's shell inherits that runtime's session variable (a
+ * Claude pane in an app relaunched by a Codex agent carries CODEX_THREAD_ID,
+ * which outranks Claude's own CLAUDE_CODE_SESSION_ID in the chain). When
+ * runtime families disagree, an explicit TIGHTBEAM_RUNTIME pin decides, then
+ * the nearest runtime-binary ancestor; otherwise this refuses rather than
+ * act as a session that may belong to another agent.
+ */
+export function resolveAgentIdentity({ env = process.env, registry, parentProcessId, execFileSync, log } = {}) {
+  const activeRegistry = registry ?? defaultRegistry();
+  const families = [];
+  for (const record of activeRegistry.list()) {
+    const sessionId = record.identity.sessionEnvVars.map((name) => env[name]).find((value) => typeof value === 'string' && value.length > 0 && isSafeSessionId(value));
+    if (sessionId !== undefined) families.push({ runtime: record.id, sessionId });
+  }
+  const report = (status, result) => {
+    if (typeof log === 'function') log({ event: 'agent_identity_resolved', params: { families: families.map((family) => family.runtime) }, status, result });
+  };
+
+  const pinned = typeof env.TIGHTBEAM_RUNTIME === 'string' && env.TIGHTBEAM_RUNTIME.length > 0 ? env.TIGHTBEAM_RUNTIME : null;
+  if (pinned !== null) {
+    const record = activeRegistry.get(pinned);
+    if (!record) throw namedIdentityError('unknown_runtime', `unknown runtime: ${pinned} (registered runtimes: ${activeRegistry.names().join(', ')})`);
+    const sessionId = scopedSessionChain(record).map((name) => env[name]).find((value) => typeof value === 'string' && value.length > 0 && isSafeSessionId(value)) ?? null;
+    report('ok', { source: 'pin', runtime: record.id });
+    return { sessionId, runtime: record.id, source: 'pin' };
+  }
+
+  const distinct = new Set(families.map((family) => family.sessionId));
+  if (distinct.size <= 1) {
+    const sessionId = resolveSessionId({ env, registry: activeRegistry });
+    const runtime = families.length === 1 ? families[0].runtime : null;
+    return { sessionId, runtime, source: 'env' };
+  }
+
+  const ancestor = nearestRuntimeAncestor({ parentProcessId, execFileSync });
+  const match = families.find((family) => family.runtime === ancestor);
+  if (match) {
+    report('ok', { source: 'ancestry', runtime: match.runtime });
+    return { sessionId: match.sessionId, runtime: match.runtime, source: 'ancestry' };
+  }
+  report('refused', { reason: 'session_identity_ambiguous', ancestor });
+  throw namedIdentityError(
+    'session_identity_ambiguous',
+    `this process carries session ids from several runtimes (${families.map((family) => family.runtime).join(', ')}) and its runtime could not be identified; ` +
+      'set TIGHTBEAM_RUNTIME to the runtime running this command (for example TIGHTBEAM_RUNTIME=claude-code) and retry',
+  );
 }
 
 /**
@@ -455,6 +545,41 @@ function codexTranscriptLaunchMode({ payload, runtime, readMeta }) {
   return { mode, evidence };
 }
 
+const CLAUDE_RUNTIMES = new Set(['claude-code', 'claude']);
+
+/**
+ * Claude Code runs hooks without a controlling terminal, so the terminal
+ * signal below never fires for a real TUI (F26). What the binary itself
+ * exports is the reliable evidence (observed on 2.1.295):
+ *
+ *   TUI       CLAUDE_CODE_ENTRYPOINT=cli      CLAUDE_CODE_SESSION_ATTENDED=1
+ *   -p, SDK   CLAUDE_CODE_ENTRYPOINT=sdk-cli  CLAUDE_CODE_SESSION_ATTENDED=0
+ *
+ * (the sdk entrypoint is decided by the caller). Older builds export no
+ * attended flag; for them `cli` alone is interactive unless the claude
+ * process's own arguments say headless, and arguments alone say headless
+ * only when a print flag comes with a format flag. Evidence that disagrees
+ * is left unknown rather than resolved either way, and these variables mean
+ * nothing for another runtime that merely inherited a Claude shell.
+ */
+function claudeLaunchMode({ env, runtime, observeArgs }) {
+  if (!CLAUDE_RUNTIMES.has(runtime)) return { mode: null, evidence: {} };
+  const entrypoint = typeof env.CLAUDE_CODE_ENTRYPOINT === 'string' ? env.CLAUDE_CODE_ENTRYPOINT.trim().toLowerCase() : '';
+  const attended = typeof env.CLAUDE_CODE_SESSION_ATTENDED === 'string' ? env.CLAUDE_CODE_SESSION_ATTENDED.trim() : '';
+  if (attended === '0') return { mode: 'non_interactive', signal: 'claude_code_session_attended', evidence: {} };
+  if (entrypoint === 'cli' && attended === '1') return { mode: 'interactive', signal: 'claude_code_attended_cli', evidence: {} };
+  const claudeMarked = ['CLAUDECODE', 'CLAUDE_PID'].some((name) => typeof env[name] === 'string' && env[name].length > 0) || entrypoint !== '' || attended !== '';
+  if (!claudeMarked) return { mode: null, evidence: {} };
+  const args = observeArgs();
+  const headless = typeof args === 'string' && claudeArgsAreHeadless(args);
+  if (entrypoint === 'cli') {
+    return headless
+      ? { mode: null, evidence: { claude_mode: 'conflict_entrypoint_cli_vs_process_args' } }
+      : { mode: 'interactive', signal: 'claude_code_entrypoint_cli', evidence: {} };
+  }
+  return headless ? { mode: 'non_interactive', signal: 'claude_process_args', evidence: {} } : { mode: null, evidence: {} };
+}
+
 function helmJobPresent(env) {
   return ['HELM_JOB_ID', 'HELM_RUN_ID'].some((name) => typeof env[name] === 'string' && env[name].trim().length > 0);
 }
@@ -476,13 +601,16 @@ function helmJobPresent(env) {
  *   4. Runtime-declared headless evidence: `claude -p` sets
  *      CLAUDE_CODE_ENTRYPOINT=sdk-cli (observed against Claude Code
  *      2.1.237), the interactive TUI does not.
- *   5. The Codex rollout's session_meta `source` on a fresh start: `exec`
+ *   5. Claude's own attended/entrypoint flags and process arguments (see
+ *      claudeLaunchMode): a real TUI has no controlling terminal, so this
+ *      is what makes it interactive.
+ *   6. The Codex rollout's session_meta `source` on a fresh start: `exec`
  *      is non_interactive; `cli` and `vscode` are interactive; anything
  *      else falls through.
- *   6. A Helm job run (HELM_JOB_ID or HELM_RUN_ID, which the executor sets
+ *   7. A Helm job run (HELM_JOB_ID or HELM_RUN_ID, which the executor sets
  *      on every run, process jobs included) is non_interactive.
- *   7. A controlling terminal with no headless evidence is interactive.
- *   8. Missing terminal evidence is unknown (NULL), not headless.
+ *   8. A controlling terminal with no headless evidence is interactive.
+ *   9. Missing terminal evidence is unknown (NULL), not headless.
  *
  * Positive noninteractive evidence is never inferred from a missing TTY:
  * a visible pane can lack conventional terminal evidence. A PRESENT
@@ -490,8 +618,9 @@ function helmJobPresent(env) {
  * instead of falling through the chain — an explicit answer cannot degrade
  * into a guess.
  *
- * `runtime`, when given, limits transcript reading to Codex. `readMeta` is
- * the transcript reader seam for tests.
+ * `runtime`, when given, limits transcript reading to Codex and the Claude
+ * flags to Claude. `readMeta` and `observeClaudeArgs` are the transcript and
+ * process-argument reader seams for tests.
  */
 export function resolveLaunchModeEvidence({
   payload = {},
@@ -499,6 +628,7 @@ export function resolveLaunchModeEvidence({
   hasControllingTerminal: tty,
   runtime,
   readMeta = readCodexSessionMeta,
+  observeClaudeArgs,
 } = {}) {
   const override = normalizeLaunchMode(env.TIGHTBEAM_LAUNCH_MODE);
   if (override) return { launch_mode: override, signal: 'tightbeam_launch_mode' };
@@ -515,6 +645,10 @@ export function resolveLaunchModeEvidence({
 
   const entrypoint = typeof env.CLAUDE_CODE_ENTRYPOINT === 'string' ? env.CLAUDE_CODE_ENTRYPOINT.toLowerCase() : '';
   if (entrypoint.startsWith('sdk')) return { launch_mode: 'non_interactive', signal: 'claude_code_entrypoint', ...evidence };
+
+  const claude = claudeLaunchMode({ env, runtime, observeArgs: observeClaudeArgs ?? (() => claudeInvocationArgs({ env })) });
+  Object.assign(evidence, claude.evidence);
+  if (claude.mode) return { launch_mode: claude.mode, signal: claude.signal, ...evidence };
 
   const transcript = codexTranscriptLaunchMode({ payload, runtime, readMeta });
   Object.assign(evidence, transcript.evidence);
@@ -538,6 +672,25 @@ export function resolveLaunchMode({ log, ...options } = {}) {
   const decision = resolveLaunchModeEvidence(options);
   if (typeof log === 'function') log({ event: 'launch_mode_resolved', ...decision });
   return decision.launch_mode;
+}
+
+/**
+ * The session-host binding from TIGHTBEAM_HOST / TIGHTBEAM_HOST_REF. The
+ * values are only validated name strings; they never select a binary, path,
+ * or arguments. An invalid value is omitted with one debug record, and a ref
+ * without a valid host is dropped with it.
+ */
+export function resolveHostBinding(env = process.env, { log } = {}) {
+  const read = (field, pattern) => {
+    const value = env[field];
+    if (value === undefined || value === '') return null;
+    if (typeof value === 'string' && pattern.test(value)) return value;
+    if (typeof log === 'function') log({ event: 'host.binding_invalid', params: { field }, status: 'omitted' });
+    return null;
+  };
+  const hostName = read('TIGHTBEAM_HOST', HOST_NAME_PATTERN);
+  if (hostName === null) return { host_name: null, host_ref: null };
+  return { host_name: hostName, host_ref: read('TIGHTBEAM_HOST_REF', HOST_REF_PATTERN) };
 }
 
 /**

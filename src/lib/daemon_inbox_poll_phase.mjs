@@ -1,7 +1,10 @@
 import { existsSync } from "node:fs";
 
 import { isTldrAgentPollOnlyDaemon } from "./tldr_agent_daemon_mode.mjs";
-import { runInboxPollChild } from "./daemon_child_commands.mjs";
+import {
+  runInboxPollChild,
+  runOutboundDrainChild,
+} from "./daemon_child_commands.mjs";
 import { getHelmHome } from "./helm_home.mjs";
 import { resolveTldrAgentScope } from "./store.mjs";
 
@@ -10,6 +13,52 @@ function readTldrAgentPollConfigDefault() {
     inbox_id: "aegis-protected-bound-inbox",
     inbox_email: "aegis-protected-bound-inbox",
   });
+}
+
+function resolveInboxTarget({
+  scopes,
+  daemonInstanceId,
+  defaultEmailConfigPath,
+  readEmailConfig,
+  appendActivityEvent,
+  pollOnly,
+  readTldrAgentPollConfig,
+}) {
+  const configPath = defaultEmailConfigPath();
+  const legacyConfigured = !pollOnly && existsSync(configPath);
+  const config = pollOnly
+    ? readTldrAgentPollConfig()
+    : legacyConfigured
+      ? readEmailConfig()
+      : null;
+  const configured = pollOnly ? Boolean(config) : legacyConfigured;
+  const activeScopes =
+    scopes.length > 0
+      ? scopes
+      : pollOnly
+        ? [resolveTldrAgentScope({ cwd: getHelmHome() })]
+        : [];
+  if (!configured || activeScopes.length === 0) {
+    return {
+      skip: {
+        action: "skipped",
+        reason: configured ? "no_registered_scopes" : "email_not_configured",
+      },
+    };
+  }
+  const targetScope = activeScopes[0];
+  const inboxId = config?.inbox_id || config?.inbox_email || null;
+  if (!inboxId) {
+    appendActivityEvent({
+      event_type: "daemon_inbox_poll_scheduler",
+      daemon_instance_id: daemonInstanceId,
+      scope_id: targetScope.scope_id,
+      cwd: targetScope.cwd,
+      metadata: { skipped: true, reason: "missing_inbox_key" },
+    });
+    return { skip: { action: "skipped", reason: "missing_inbox_key" } };
+  }
+  return { targetScope, inboxId };
 }
 
 // Retained poll-child phase extracted from the inherited mail-phase module so
@@ -29,38 +78,17 @@ export async function runInboxPollChildPhase({
   pollOnly = isTldrAgentPollOnlyDaemon(),
   readTldrAgentPollConfig = readTldrAgentPollConfigDefault,
 }) {
-  const configPath = defaultEmailConfigPath();
-  const legacyConfigured = !pollOnly && existsSync(configPath);
-  const config = pollOnly
-    ? readTldrAgentPollConfig()
-    : legacyConfigured
-      ? readEmailConfig()
-      : null;
-  const configured = pollOnly ? Boolean(config) : legacyConfigured;
-  const activeScopes =
-    scopes.length > 0
-      ? scopes
-      : pollOnly
-        ? [resolveTldrAgentScope({ cwd: getHelmHome() })]
-        : [];
-  if (!configured || activeScopes.length === 0) {
-    return {
-      action: "skipped",
-      reason: configured ? "no_registered_scopes" : "email_not_configured",
-    };
-  }
-  const targetScope = activeScopes[0];
-  const inboxId = config?.inbox_id || config?.inbox_email || null;
-  if (!inboxId) {
-    appendActivityEvent({
-      event_type: "daemon_inbox_poll_scheduler",
-      daemon_instance_id: daemonInstanceId,
-      scope_id: targetScope.scope_id,
-      cwd: targetScope.cwd,
-      metadata: { skipped: true, reason: "missing_inbox_key" },
-    });
-    return { action: "skipped", reason: "missing_inbox_key" };
-  }
+  const target = resolveInboxTarget({
+    scopes,
+    daemonInstanceId,
+    defaultEmailConfigPath,
+    readEmailConfig,
+    appendActivityEvent,
+    pollOnly,
+    readTldrAgentPollConfig,
+  });
+  if (target.skip) return target.skip;
+  const { targetScope, inboxId } = target;
   const decision = inboxPollScheduler.nextDecision(inboxId);
   if (!decision.shouldPoll && decision.reason === "poll_skipped_in_flight") {
     emitInboxPollSchedulerSkip({
@@ -228,4 +256,109 @@ function pollResult(data, started, candidateFound) {
     last_polled_at: data.last_polled_at || null,
     next_poll_at: new Date(started.nextPollAtMs).toISOString(),
   };
+}
+
+// Outbound lane: no due gate, only an own in-flight key so it never overlaps
+// itself. It never feeds poll health; only the inbound result stamps that.
+export async function runOutboundDrainChildPhase({
+  scopes,
+  schedulerScriptPath,
+  daemonInstanceId,
+  signal,
+  childTimeoutMs,
+  defaultEmailConfigPath,
+  readEmailConfig,
+  inboxPollScheduler,
+  appendActivityEvent,
+  runOutboundDrain = runOutboundDrainChild,
+  pollOnly = isTldrAgentPollOnlyDaemon(),
+  readTldrAgentPollConfig = readTldrAgentPollConfigDefault,
+}) {
+  const target = resolveInboxTarget({
+    scopes,
+    daemonInstanceId,
+    defaultEmailConfigPath,
+    readEmailConfig,
+    appendActivityEvent,
+    pollOnly,
+    readTldrAgentPollConfig,
+  });
+  if (target.skip) return target.skip;
+  const { targetScope } = target;
+  const key = `${target.inboxId}:outbound`;
+  if (
+    inboxPollScheduler.nextDecision(key).reason === "poll_skipped_in_flight"
+  ) {
+    return { action: "skipped", reason: "poll_skipped_in_flight" };
+  }
+  const startedAt = Date.now();
+  inboxPollScheduler.recordPollStarted(key, { atMs: startedAt });
+  const event = (event_type, extra) =>
+    appendActivityEvent({
+      event_type,
+      daemon_instance_id: daemonInstanceId,
+      scope_id: targetScope.scope_id,
+      cwd: targetScope.cwd,
+      ...extra.top,
+      metadata: {
+        ...extra.metadata,
+        latency_ms: Date.now() - startedAt,
+        inbox_id: target.inboxId,
+      },
+    });
+  const counts = (outbound) => ({
+    attempted: outbound?.attempted ?? 0,
+    delivered: outbound?.delivered ?? 0,
+    failed: outbound?.failed ?? 0,
+    released: outbound?.released ?? 0,
+    stopped_for_deadline: Boolean(outbound?.stopped_for_deadline),
+  });
+  try {
+    const child = await runOutboundDrain({
+      schedulerScriptPath,
+      scope: targetScope,
+      daemonInstanceId,
+      signal,
+      timeoutMs: childTimeoutMs,
+    });
+    const outbound = child.data?.outbound || null;
+    if (!child.ok) {
+      throw Object.assign(
+        new Error(child.error || "outbound drain child failed"),
+        {
+          code: child.error_code || null,
+          reasonCode: child.timed_out
+            ? "poll_child_timeout"
+            : child.abort_source
+              ? "poll_child_aborted"
+              : "poll_child_failed",
+          outbound,
+        },
+      );
+    }
+    event("daemon_outbound_tick", {
+      metadata: {
+        ok: Boolean(outbound?.ok),
+        error: outbound?.error || null,
+        ...counts(outbound),
+      },
+    });
+    return { action: "drained", ...counts(outbound) };
+  } catch (err) {
+    process.stderr.write(`helm daemon outbound drain failed: ${err.message}\n`);
+    event("daemon_outbound_tick_failed", {
+      top: {
+        error_code: err.code || null,
+        reason_code: err.reasonCode || "poll_child_failed",
+      },
+      metadata: {
+        error: err.message,
+        ...counts(err.outbound),
+        ...(err.outbound?.cause ? { cause: err.outbound.cause } : {}),
+      },
+    });
+    return { action: "failed", reason: err?.message || String(err) };
+  } finally {
+    inboxPollScheduler.recordPollFinished(key);
+  }
 }

@@ -1,7 +1,15 @@
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { executeJob } from "./executor.mjs";
-import { launchCommandUntilStarted } from "./executor_start_confirm.mjs";
+import { launchRecordedCommandUntilStarted } from "./executor_command_handoff.mjs";
+import {
+  commandExitRecordPath,
+  readCommandExitRecord,
+} from "./command_exit_record.mjs";
+import {
+  closeCancelledCommandRun,
+  finalizeCommandExit,
+} from "./command_exit_finalization.mjs";
 import { emitNotifications } from "./notify.mjs";
 import { appendActivityEvent } from "./activity_stream.mjs";
 import { appendJobHistoryEvent, loadJobHistory } from "./read_store.mjs";
@@ -33,6 +41,12 @@ import {
   skyhookStartupWindowMs,
 } from "./skyhook_dispatch_policy.mjs";
 import { recordRunSessionOutcome } from "./run_session_outcome.mjs";
+import {
+  finalizeProviderRunOutcome,
+  recordPendingProviderRun,
+  sweepProviderRunOutcomes,
+} from "./provider_run_outcome.mjs";
+import { finalizeProviderSkip } from "./dispatch_provider_skip.mjs";
 import {
   evaluateScopeDispatch,
   advanceAfterOverflow,
@@ -1066,6 +1080,21 @@ async function executeAndFinalizeSkyhookAgent(
     };
   }
 
+  if (result.status === "skipped" && result.skip?.reason) {
+    releaseCapacity();
+    if (spawned) clearActiveRun(scope, job.id);
+    return finalizeProviderSkip(scope, job, result, {
+      finalizeAttempt: finalizeRunAttemptWithRuntimeStoreRetry,
+      runId,
+      startedAt,
+      scheduledAt,
+      daemonInstanceId,
+      logPaths,
+      baselineUpdatedAt,
+      consumedPhaseAbortedSlot,
+    });
+  }
+
   if (result.status !== "started") {
     releaseCapacity();
     if (spawned) clearActiveRun(scope, job.id);
@@ -1281,12 +1310,15 @@ async function executeAndFinalizeSkyhookAgent(
         handoff: true,
       },
     });
+    // The handoff proves the launch, not the work: history and last_status
+    // say `started` until the session's own exit is observed
+    // (provider_run_outcome.mjs).
     const completedEvent = historyCompleteEvent(
       job,
       runId,
       startedAt,
       finishedAt,
-      { ...result, status: "success", error: null },
+      { ...result, status: "started", error: null },
       logPaths,
       [],
     );
@@ -1295,10 +1327,29 @@ async function executeAndFinalizeSkyhookAgent(
       scope_id: scope.scope_id,
       cwd: scope.cwd,
       scheduled_at: scheduledAt,
+      reason: "skyhook_started",
       session_id: result.session_id || null,
+      payload: {
+        ...(completedEvent.payload || {}),
+        handoff: true,
+        outcome_pending: true,
+      },
+    });
+    const pending = recordPendingProviderRun(scope, {
+      jobId: job.id,
+      runId,
+      startedAt,
+      scheduledAt,
+      handedOffAt: finishedAt,
+      pid: result.pid || livePid || null,
+      pidStartTime: pidStartTimeOf(result.pid || livePid),
+      pgid: result.pgid || null,
+      sessionId: result.session_id || null,
+      logPaths,
+      outcomeCwds: [job.process?.cwd || scope.cwd],
     });
     job.state.last_run_at = finishedAt;
-    job.state.last_status = "success";
+    job.state.last_status = "started";
     job.state.last_error = null;
     job.state.last_failed_step = null;
     job.state.deferred_since = null;
@@ -1317,8 +1368,49 @@ async function executeAndFinalizeSkyhookAgent(
       baselineUpdatedAt,
       runtimePatchFor(job, consumedPhaseAbortedSlot),
     );
+    if (pending.written) {
+      observeProviderRunOutcome({
+        scope,
+        job,
+        runId,
+        terminal: result.terminal,
+        daemonInstanceId,
+      });
+    }
     return startedEvent;
   }
+}
+
+// While this dispatcher is alive it sees the session exit first; otherwise the
+// next daemon tick finalizes from the session's own boundary record.
+function observeProviderRunOutcome({
+  scope,
+  job,
+  runId,
+  terminal,
+  daemonInstanceId,
+}) {
+  if (!terminal || typeof terminal.then !== "function") return;
+  terminal
+    .then((outcome) =>
+      finalizeProviderRunOutcome({
+        scope,
+        runId,
+        outcome: {
+          exit_code: outcome?.exit_code ?? null,
+          signal: outcome?.signal ?? null,
+          finished_at: nowIso(),
+        },
+        observedBy: "dispatcher",
+        daemonInstanceId,
+        metadata: job.metadata || null,
+      }),
+    )
+    .catch((err) => {
+      process.stderr.write(
+        `[helm provider-outcome] dispatcher finalize failed job=${job.id} run=${runId} error=${err?.message || String(err)}\n`,
+      );
+    });
 }
 
 async function executeAndFinalizeCommandStarted(scope, job, opts, ctx) {
@@ -1341,7 +1433,7 @@ async function executeAndFinalizeCommandStarted(scope, job, opts, ctx) {
     const runtimeScopeId = scope.scope_id || scope.cwd;
     const runtimeScopeCwd = cwd;
     const heartbeatPath = runHeartbeatPath(scope, runId);
-    result = await launchCommandUntilStarted({
+    result = await launchRecordedCommandUntilStarted({
       command: job.process.command,
       args: Array.isArray(job.process.args)
         ? job.process.args.map((value) => String(value))
@@ -1368,6 +1460,7 @@ async function executeAndFinalizeCommandStarted(scope, job, opts, ctx) {
         spawnedProcessInfo = processInfo;
       },
       logPaths,
+      exitRecordPath: commandExitRecordPath(logPaths),
       startupWindowMs: commandStartupWindowMs(),
     });
   } catch (err) {
@@ -1403,6 +1496,16 @@ async function executeAndFinalizeCommandStarted(scope, job, opts, ctx) {
       wrapper: spawnedProcessInfo.wrapper || null,
       memory: spawnedProcessInfo.wrapper?.memory || null,
       start_confirm: true,
+      scheduled_at: scheduledAt,
+      exit_record_path: commandExitRecordPath(logPaths),
+      // A quiet command (sleeping, waiting on the network) is not hung; the
+      // reaper's idle-kill applies only if the job opts in. The hard cap
+      // (job limits.hard_timeout_sec, else HELM_DEFAULT_HARD_TIMEOUT_SEC, else
+      // 6h) still bounds a command that never exits, so it cannot hold its
+      // job in flight forever.
+      limits: {
+        quiet_timeout_sec: job.limits?.quiet_timeout_sec ?? 0,
+      },
     });
   }
 
@@ -1478,25 +1581,18 @@ async function executeAndFinalizeCommandStarted(scope, job, opts, ctx) {
     };
   }
 
+  // Surviving the startup window proves the launch, not the work. The run
+  // stays active and is finalized with the command's real exit status
+  // (command_exit_finalization.mjs): here when this dispatcher outlives the
+  // command, otherwise by the reaper from the exit record the command's own
+  // wrapper writes once this forked dispatcher is gone.
   result.detach?.();
-  const finishedAt = nowIso();
-  if (spawned) clearActiveRun(scope, job.id);
-  finalizeRunAttemptWithRuntimeStoreRetry({
-    scope,
-    jobId: job.id,
-    runId,
-    daemonInstanceId,
-    metadata: job.metadata || null,
-    status: "success",
-    error: "process_started",
-    cleanup: result.wrapper?.cleanup || null,
-    terminalSource: "process-handoff",
-    signalSource: result.signal_source || null,
-    startupWindowMs: result.startup_window_ms || null,
-    now: finishedAt,
-  });
+  const handedOffAt = nowIso();
+  const activeEntry = spawned
+    ? loadActiveRunsReadOnly(scope).runs?.[job.id] || null
+    : null;
   appendActivityEvent({
-    type: "job_run_completed_success",
+    type: "job_run_handed_off",
     kind: "run",
     level: "info",
     daemon_instance_id: daemonInstanceId,
@@ -1504,11 +1600,10 @@ async function executeAndFinalizeCommandStarted(scope, job, opts, ctx) {
     cwd: scope.cwd,
     job_id: job.id,
     run_id: runId,
-    status: "success",
+    status: "running",
     reason: "process_started",
     scheduled_at: scheduledAt,
     started_at: startedAt,
-    finished_at: finishedAt,
     duration_ms: result.duration_ms,
     elapsed_ms: result.elapsed_ms ?? result.duration_ms,
     pid: result.pid || livePid,
@@ -1522,45 +1617,112 @@ async function executeAndFinalizeCommandStarted(scope, job, opts, ctx) {
       pid: result.pid || livePid || null,
       signal_source: result.signal_source || null,
       startup_window_ms: result.startup_window_ms || null,
+      exit_record_path: result.exit_record_path || null,
       handoff: true,
     },
   });
-  const completedEvent = historyCompleteEvent(
-    job,
-    runId,
-    startedAt,
-    finishedAt,
-    { ...result, status: "success", error: null },
-    logPaths,
-    [],
-  );
-  appendJobHistoryEvent(scope, job.id, {
-    ...completedEvent,
-    scope_id: scope.scope_id,
-    cwd: scope.cwd,
-    scheduled_at: scheduledAt,
-  });
-  job.state.last_run_at = finishedAt;
-  job.state.last_status = "success";
-  job.state.last_error = null;
-  job.state.last_failed_step = null;
+  // Advance the schedule only; last_run_at/last_status wait for the exit.
   job.state.deferred_since = null;
   job.state.deferred_reason = null;
-  const next = computeNextAfterRun(job, scheduledAt || finishedAt, finishedAt);
+  const next = computeNextAfterRun(
+    job,
+    scheduledAt || handedOffAt,
+    handedOffAt,
+  );
   job.state.next_run_at = next.next_run_at;
   if (!next.enabled) job.state.enabled = false;
   job.meta.updated_at = nowIso();
-  await persistRuntimePatch(
-    scope,
-    job.id,
-    baselineUpdatedAt,
-    runtimePatchFor(job, consumedPhaseAbortedSlot),
-  );
+  const schedulePatch = runtimePatchFor(job, consumedPhaseAbortedSlot);
+  for (const field of [
+    "last_run_at",
+    "last_status",
+    "last_error",
+    "last_failed_step",
+  ]) {
+    delete schedulePatch.state[field];
+  }
+  await persistRuntimePatch(scope, job.id, baselineUpdatedAt, schedulePatch);
+  if (activeEntry && result.terminal?.then) {
+    const finalizing = result.terminal
+      .then((outcome) => {
+        // The wrapper's own record is what the reaper would read; prefer it
+        // so both observers report the same exit.
+        const recorded = readCommandExitRecord(activeEntry.exit_record_path);
+        return finalizeCommandExit({
+          scope,
+          jobId: job.id,
+          entry: activeEntry,
+          outcome:
+            recorded.kind === "valid"
+              ? recorded.record
+              : { ...outcome, finished_at: nowIso() },
+          job,
+          daemonInstanceId,
+          observedBy: "dispatcher",
+        });
+      })
+      .catch((err) => {
+        process.stderr.write(
+          `[helm command-exit] dispatcher finalize failed job=${job.id} run=${runId} error=${err?.message || String(err)}\n`,
+        );
+        return null;
+      });
+    // Already exited inside the startup window: its outcome is known now, so
+    // close the run within this dispatch instead of leaving it to an observer.
+    if (result.signal_source === "process_exit_zero_before_start") {
+      const closed = await finalizing;
+      if (closed?.finalized) {
+        const finishedAt = nowIso();
+        return {
+          id: `run_${runId}_completed`,
+          ts: finishedAt,
+          scope_id: scope.scope_id,
+          cwd: scope.cwd,
+          job_id: job.id,
+          run_id: runId,
+          kind: "completed",
+          status: closed.status,
+          reason: "process_exited",
+          scheduled_at: scheduledAt,
+          started_at: startedAt,
+          finished_at: finishedAt,
+          duration_ms: result.duration_ms,
+          error: null,
+          log_paths: logPaths,
+          payload: {
+            metadata: isPlainObject(job.metadata) ? job.metadata : {},
+            log_paths: logPaths,
+            exit_code: 0,
+            handoff: false,
+          },
+        };
+      }
+    }
+  }
   return {
-    ...completedEvent,
+    id: `run_${runId}_handed_off`,
+    ts: handedOffAt,
     scope_id: scope.scope_id,
     cwd: scope.cwd,
+    job_id: job.id,
+    run_id: runId,
+    kind: "started",
+    status: "running",
+    reason: "process_started",
     scheduled_at: scheduledAt,
+    started_at: startedAt,
+    finished_at: null,
+    duration_ms: result.duration_ms,
+    error: null,
+    log_paths: logPaths,
+    payload: {
+      metadata: isPlainObject(job.metadata) ? job.metadata : {},
+      log_paths: logPaths,
+      signal_source: result.signal_source || null,
+      startup_window_ms: result.startup_window_ms || null,
+      exit_record_path: result.exit_record_path || null,
+      handoff: true,
+    },
   };
 }
 
@@ -2088,6 +2250,7 @@ export async function dispatchScope(scope, opts = {}) {
         return { dueEvents: [], spawnedHandles: [] };
       }
       await reapWorkspace(scope, { daemonInstanceId, now: at });
+      await sweepProviderRunOutcomes(scope, { daemonInstanceId });
     }
 
     const dueEvents = [];
@@ -2640,6 +2803,7 @@ export async function cancelJob(scope, id, opts = {}) {
       }
     }
   }
+  closeCancelledCommandRun({ scope, jobId: id, entry });
   clearActiveRun(scope, id);
   appendActivityEvent({
     type: "job_run_cancelled",

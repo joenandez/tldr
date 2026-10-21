@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
-import { createDerivedInboundDelivery, insertMessage, payloadHash, pushLiveDeliveryEvents, refreshSessionWatermark, validateBody } from './message_shared.mjs';
+import { createDerivedInboundDelivery, insertMessage, newestLineageEndpointId, payloadHash, pushLiveDeliveryEvents, refreshSessionWatermark, validateBody } from './message_shared.mjs';
 import { activeListenerForEndpoint, createPendingPresentation, pendingReplyWaitForBinding, publishPresentation } from './listener_operations.mjs';
 import { replyContinuityDiagnostic } from '../reply_continuity_diagnostics.mjs';
 import { applyOpen } from '../lifecycle_transition.mjs';
@@ -98,7 +98,24 @@ function resolveBinding(db, { tokenDigest, appId }) {
   if (!row) {
     throw new TightbeamError('permission_denied', 'reply binding is not granted for this authenticated application');
   }
-  return row;
+  return routeToNewestLineage(db, row);
+}
+
+// A binding names the session that sent the message being answered. Once a
+// replacement superseded that session, the reply belongs to its newest
+// lineage replacement (plan §2.2): custody, delivery, and any wake land
+// there. A closed newest replacement keeps the existing closed-target
+// refusal; the superseded predecessor is never a fallback.
+function routeToNewestLineage(db, binding) {
+  const routedId = newestLineageEndpointId(db, binding.target_id);
+  if (routedId === binding.target_id) return binding;
+  const routed = db.prepare(
+    `SELECT id AS target_id, principal_id AS target_principal_id, created_by_app_id AS target_app_id, state AS target_state,
+            provider_session_id AS target_session_id, process_generation AS target_process_generation,
+            launch_mode AS target_launch_mode, authority_reference AS target_authority_reference
+       FROM endpoints WHERE id = ?`,
+  ).get(routedId);
+  return { ...binding, ...routed };
 }
 
 function findReplay(db, { bindingId, externalEventId, payloadHashValue }) {
@@ -170,6 +187,14 @@ export const channelReplyPublishOp = {
         return { result: { ...replay, idempotent_replay: true }, presentation: null, live: false };
       }
 
+      if (binding.target_id !== binding.target_endpoint_id) {
+        context.logger?.info?.({
+          event: 'reply_binding_replacement_route',
+          params: { binding_id: binding.id, target_endpoint_id: binding.target_endpoint_id },
+          result: { routed_endpoint_id: binding.target_id, routed_state: binding.target_state },
+          status: 'ok',
+        });
+      }
       requireNewEventBinding(context.db, binding, new Date());
       const messageId = insertMessage(context.db, {
         conversationId: binding.conversation_id,
@@ -231,14 +256,13 @@ export const channelReplyPublishOp = {
       context.db.prepare(
         'UPDATE obligations SET ack_due_at = ?, ack_message_id = ?, ack_delivery_id = ? WHERE id = ?',
       ).run(new Date(Date.parse(now) + 120_000).toISOString(), messageId, delivery.delivery_id, opened.created.root_id);
-      if (delivery.route_outcome === 'enqueue_only') {
-        refreshSessionWatermark({
-          stateRoot: context.stateRoot,
-          sessionId: binding.target_session_id,
-          deliveryId: delivery.delivery_id,
-          logger: context.logger,
-        });
-      }
+      // Every route that wrote a delivery refreshes the marker the PreToolUse fast path compares.
+      refreshSessionWatermark({
+        stateRoot: context.stateRoot,
+        sessionId: binding.target_session_id,
+        deliveryId: delivery.delivery_id,
+        logger: context.logger,
+      });
       const result = {
         message_id: messageId,
         conversation_id: binding.conversation_id,
@@ -255,7 +279,7 @@ export const channelReplyPublishOp = {
         result,
         presentation,
         live: Boolean(listener),
-        liveDeliveries: [{ principal_id: binding.target_principal_id, endpoint_id: binding.target_id, message_id: messageId }],
+        liveDeliveries: [{ principal_id: binding.target_principal_id, endpoint_id: binding.target_id, message_id: messageId, delivery_id: delivery.delivery_id }],
       };
     });
     if (!outcome.result.idempotent_replay) {

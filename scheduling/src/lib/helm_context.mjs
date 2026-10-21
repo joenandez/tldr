@@ -87,13 +87,19 @@ export function buildHelmContextBlock({
     );
   }
   if (assignment) {
+    // The agent's tool shell may not carry HELM_RUN_ID/HELM_JOB_ID (a Codex
+    // tool shell lost them on 2026-10-06 and the report silently recorded
+    // nothing), so the required command names this run explicitly. A
+    // placeholder run id is never written into a command.
+    const boundReportCmd =
+      runId === "pending" ? reportCmd : `${reportCmd} --run ${runId} --job ${jobId}`;
     lines.push(
       "Required final step: before ending this assignment, you must run one of:",
-      `  ${reportCmd} --status ok --summary "<one line>"`,
-      `  ${reportCmd} --status fail --summary "<reason>"`,
+      `  ${boundReportCmd} --status ok --summary "<one line>"`,
+      `  ${boundReportCmd} --status fail --summary "<reason>"`,
       assignment.completion_delivery === "notify" ||
         assignment.completion_delivery === "conversation"
-        ? "For both ok and fail reports, send the terminal Tightbeam result through this run's official thread. If no official conversation exists, the first send must use --channel subspace; retain the exact returned conversation_id and message_id. Reuse the exact returned conversation_id for this run, and only the message named by --completion-message satisfies the terminal requirement. Use --await-reply only when an interactive Agent Pane message explicitly asks the external user to respond; omit it for informational notifications, headless assignments, and daemon resumes. Then add --origin-thread <conversation_id> --completion-message <message_id>."
+        ? "For both ok and fail reports, send the terminal Tightbeam result through this run's official thread. If no official conversation exists, the first send must use tldr-agents messaging agent send --to user --channel subspace --subject <text> --reason <text> --body-file <path>; retain the exact returned conversation_id and message_id. Reuse the exact returned conversation_id for this run, and only the message named by --completion-message satisfies the terminal requirement. Replies are expected by default on reply-capable channels; use --no-reply to turn that off. Then add --origin-thread <conversation_id> --completion-message <message_id>."
         : "No terminal Tightbeam message is required for activity delivery.",
       "Without a valid report, Helm records this assignment's outcome as indeterminate.",
     );

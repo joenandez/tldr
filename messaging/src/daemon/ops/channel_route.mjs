@@ -1,4 +1,5 @@
-// channel.route.register / channel.route.list / channel.route.retire — durable
+// channel.route.register / channel.route.list / channel.route.retire /
+// channel.route.impact — durable
 // descriptor records for application-owned channel endpoints. Routes deliberately store no
 // provider configuration or health state: availability is derived from the
 // application's existing active state and its endpoint's live state.
@@ -140,31 +141,86 @@ export const channelRouteListOp = {
   },
 };
 
+// The rows delivery.claim can still select for a route: it picks pending
+// and claimed deliveries by channel_route_id and endpoint owner regardless
+// of the route's own state, so these are what a retirement would strand.
+const ACTIVE_DELIVERY_COUNTS = `SELECT COALESCE(SUM(d.state = 'pending'), 0) AS pending_deliveries,
+                                      COALESCE(SUM(d.state = 'claimed'), 0) AS claimed_deliveries
+                                 FROM deliveries d
+                                 JOIN endpoints e ON e.id = d.endpoint_id
+                                WHERE d.channel_route_id = ? AND e.created_by_app_id = ?
+                                  AND d.state IN ('pending', 'claimed')`;
+
+function requireRouteId(payload) {
+  const routeId = payload && payload.route_id;
+  if (typeof routeId !== 'string' || routeId.length === 0) {
+    malformed('route_id', 'route_id is required and must be a string');
+  }
+  return routeId;
+}
+
+// Existence-hiding, matching message.delivery.list's convention: an
+// unknown route and a foreign-owned route both answer permission_denied,
+// never not_found, so a caller cannot use these ops to probe which route
+// ids exist.
+function ownedRoute(context, connection, routeId) {
+  const route = context.db.prepare('SELECT id, app_id, state, retired_at FROM channel_routes WHERE id = ?').get(routeId);
+  if (!route || route.app_id !== connection.appId) {
+    throw new TightbeamError('permission_denied', 'register_endpoints is not granted for this route');
+  }
+  return route;
+}
+
+function activeDeliveryCounts(context, connection, routeId) {
+  return context.db.prepare(ACTIVE_DELIVERY_COUNTS).get(routeId, connection.appId);
+}
+
+export const channelRouteImpactOp = {
+  name: 'channel.route.impact',
+  allowedScopes: ['agent'],
+  permission: 'register_endpoints',
+  handler(context, payload, connection) {
+    const routeId = requireRouteId(payload);
+    const route = ownedRoute(context, connection, routeId);
+    const counts = activeDeliveryCounts(context, connection, routeId);
+    const result = { route_id: routeId, state: route.state, ...counts };
+    context.logger?.info({ event: 'channel_route_impact', params: { route_id: routeId }, result, status: 'ok' });
+    return { result };
+  },
+};
+
+function refuseActiveDeliveries(context, connection, routeId) {
+  const counts = activeDeliveryCounts(context, connection, routeId);
+  if (counts.pending_deliveries === 0 && counts.claimed_deliveries === 0) return;
+  context.logger?.info({ event: 'channel_route_retire_refused', params: { route_id: routeId }, result: counts, status: 'route_has_active_deliveries' });
+  throw new TightbeamError(
+    'route_has_active_deliveries',
+    `route has ${counts.pending_deliveries} pending and ${counts.claimed_deliveries} claimed deliveries; resolve them before retiring`,
+    { route_id: routeId, ...counts },
+  );
+}
+
 export const channelRouteRetireOp = {
   name: 'channel.route.retire',
   allowedScopes: ['agent'],
   permission: 'register_endpoints',
   handler(context, payload, connection) {
-    const routeId = payload && payload.route_id;
-    if (typeof routeId !== 'string' || routeId.length === 0) {
-      malformed('route_id', 'route_id is required and must be a string');
+    const routeId = requireRouteId(payload);
+    const guarded = payload.require_no_active_deliveries ?? false;
+    if (typeof guarded !== 'boolean') {
+      malformed('require_no_active_deliveries', 'require_no_active_deliveries must be a boolean when present');
     }
+    // Ownership, state, guard, and write all run under one BEGIN IMMEDIATE
+    // lock, so no delivery can be committed to this route (and no second
+    // retire can re-stamp it) between the check and the retirement.
+    return withTransaction(context.db, () => {
+      const route = ownedRoute(context, connection, routeId);
+      if (route.state === 'retired') {
+        return { result: { route_id: routeId, state: 'retired', retired_at: route.retired_at } };
+      }
+      if (guarded) refuseActiveDeliveries(context, connection, routeId);
 
-    // Existence-hiding, matching message.delivery.list's convention: an
-    // unknown route and a foreign-owned route both answer permission_denied,
-    // never not_found, so a caller cannot use this op to probe which route
-    // ids exist.
-    const route = context.db.prepare('SELECT id, app_id, state, retired_at FROM channel_routes WHERE id = ?').get(routeId);
-    if (!route || route.app_id !== connection.appId) {
-      throw new TightbeamError('permission_denied', 'register_endpoints is not granted for this route');
-    }
-
-    if (route.state === 'retired') {
-      return { result: { route_id: routeId, state: 'retired', retired_at: route.retired_at } };
-    }
-
-    const retiredAt = new Date().toISOString();
-    withTransaction(context.db, () => {
+      const retiredAt = new Date().toISOString();
       context.db
         .prepare("UPDATE channel_routes SET state = 'retired', retired_at = ?, updated_at = ? WHERE id = ?")
         .run(retiredAt, retiredAt, routeId);
@@ -179,8 +235,7 @@ export const channelRouteRetireOp = {
             WHERE channel_route_id = ? AND state = 'active'`,
         )
         .run(retiredAt, routeId);
+      return { result: { route_id: routeId, state: 'retired', retired_at: retiredAt } };
     });
-
-    return { result: { route_id: routeId, state: 'retired', retired_at: retiredAt } };
   },
 };

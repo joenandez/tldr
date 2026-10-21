@@ -285,8 +285,12 @@ export function buildRunCompletion({
   if (runEvents.length === 0 && !sidecar) return null;
 
   const started = latestOf(runEvents, (event) => event.kind === "started");
-  const terminal = latestOf(runEvents, (event) =>
-    TERMINAL_KINDS.has(event.kind),
+  // A session-exit record is a process exit, not the work outcome: the handoff
+  // terminal plus the session boundary below carry that.
+  const terminal = latestOf(
+    runEvents,
+    (event) =>
+      TERMINAL_KINDS.has(event.kind) && event.payload?.session_exit !== true,
   );
   const startedAt =
     started?.started_at ||

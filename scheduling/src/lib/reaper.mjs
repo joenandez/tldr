@@ -21,6 +21,8 @@ import {
 } from "./store.mjs";
 import { runSatisfiedReportSidecar } from "./effective_owner_completion.mjs";
 import { effectiveHardTimeoutSec } from "./run_deadline.mjs";
+import { readCommandExitRecord } from "./command_exit_record.mjs";
+import { finalizeCommandExit } from "./command_exit_finalization.mjs";
 
 // Sample state is persisted per-workspace on disk because the daemon spawns
 // a fresh child process per scope per tick — in-memory Maps don't survive.
@@ -165,6 +167,39 @@ export async function reapWorkspace(scope, opts = {}) {
     // unrelated process (PID reuse). The run is dead; never signal the
     // impostor.
     if (!isSameProcessAlive(entry.pid, entry.pid_start_time || null)) {
+      // A handed-off command job records its own exit status; close the run
+      // with it rather than calling a finished command orphaned.
+      if (entry.exit_record_path) {
+        // The path is unique per run, so no id check: a job env that
+        // overrides HELM_RUN_ID must not turn a recorded exit into "lost".
+        const exit = readCommandExitRecord(entry.exit_record_path);
+        if (exit.kind === "valid" || !shouldDeferRuntimeLedgerOrphan(entry, at)) {
+          const closed = await finalizeCommandExit({
+            scope,
+            jobId,
+            entry,
+            outcome: exit.record,
+            job: jobsById.get(jobId) || null,
+            daemonInstanceId,
+            observedBy: "reaper",
+          });
+          // already_claimed: another observer is finalizing (or died doing
+          // so; its claim goes stale and a later pass takes over).
+          // runtime_store_locked: retried on a later pass.
+          if (
+            closed.finalized ||
+            closed.reason === "already_claimed" ||
+            closed.reason === "runtime_store_locked"
+          ) {
+            if (entry.run_id && samples[entry.run_id]) {
+              delete samples[entry.run_id];
+              samplesDirty = true;
+            }
+            if (closed.finalized) reaped += 1;
+            return;
+          }
+        }
+      }
       if (shouldDeferRuntimeLedgerOrphan(entry, at)) {
         process.stderr.write(
           `[🪳 TEMP REAPER] active run orphan deferred for finalization grace scope=${scope.scope_id || "unknown"} job=${jobId} run=${entry.run_id || "unknown"} pid=${entry.pid} daemon=${daemonInstanceId || "none"} at=${at}\n`,
@@ -360,6 +395,26 @@ async function killAndReap(
     }
   }
 
+  if (entry.exit_record_path) {
+    // Handed-off command: close it through the same path as a recorded exit
+    // so job history and last_status show the timeout too.
+    if (entry.run_id && samples && samples[entry.run_id])
+      delete samples[entry.run_id];
+    const closed = await finalizeCommandExit({
+      scope,
+      jobId,
+      entry,
+      outcome: {
+        status: eventType === "job_run_completed_timeout" ? "timeout" : "failure",
+        exit_code: null,
+        error: reason,
+        finished_at: finishedAt,
+      },
+      daemonInstanceId,
+      observedBy: "reaper",
+    });
+    if (closed.finalized || closed.reason !== "runtime_store_locked") return;
+  }
   clearActiveRun(scope, jobId);
   if (entry.run_id && samples && samples[entry.run_id])
     delete samples[entry.run_id];

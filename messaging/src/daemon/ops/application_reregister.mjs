@@ -1,6 +1,7 @@
 // application.reregister — admin-only credential replacement for an existing
 // application. The application id and every row owned by it remain unchanged;
 // only the one-way secret hash is replaced and the new secret is returned once.
+// Session-host subscriptions on open connections are dropped with the old secret.
 
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { generateAppSecret, hashSecret } from '../auth.mjs';
@@ -22,6 +23,9 @@ export const applicationReregisterOp = {
 
     const secret = generateAppSecret();
     context.db.prepare('UPDATE applications SET secret_hash = ? WHERE id = ?').run(hashSecret(secret), application.id);
+    // Already-open connections lose authority with the old secret; the push
+    // path never re-checks a credential, so drop the app's host subscriptions.
+    context.eventBus?.unsubscribeHost(application.id);
 
     return {
       result: {

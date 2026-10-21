@@ -2,7 +2,7 @@
   "$schema": "https://json.schemastore.org/claude-code-plugin-manifest.json",
   "name": "tldr",
   "displayName": "tldr;",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Set up the private owner-email bridge for Claude Code; Tightbeam owns session routing and continuation.",
   "author": {
     "name": "Codename, Inc."

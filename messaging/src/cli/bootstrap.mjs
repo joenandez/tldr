@@ -37,6 +37,7 @@ import { connect, writeAdminNonce } from '../client/client.mjs';
 import { hookCredentialsPath, readHookCredentials } from './hook_credentials.mjs';
 import { tightbeamCommandName } from './package_context.mjs';
 import { assertStateRootCreatable } from '../protocol/state_root_location.mjs';
+import { withoutSessionEnv } from '../protocol/session_env.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const DAEMON_BIN = path.resolve(HERE, '..', '..', 'bin', 'tightbeam-daemon');
@@ -175,6 +176,8 @@ export async function ensureDaemon(stateRoot, socketPath, { timeoutMs = DAEMON_S
   const child = spawn(nodePath, [daemonBin, '--state-root', stateRoot], {
     detached: true,
     stdio: 'ignore',
+    // The daemon outlives this caller and serves every session; it must not run as this one.
+    env: withoutSessionEnv(process.env),
   });
   child.unref();
 

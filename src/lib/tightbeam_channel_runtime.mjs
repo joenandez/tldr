@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { lstat, mkdir, readFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { writeTextAtomic } from "./durable_file_io.mjs";
@@ -20,22 +21,68 @@ export const TIGHTBEAM_COMPATIBILITY = Object.freeze({
 // root (off every PATH; bin/ holds only the front door). TIGHTBEAM_BIN
 // overrides it; the retired standalone ~/.tightbeam/install copy is never a
 // default.
-export const PACKAGE_TIGHTBEAM_BIN = join(
-  dirname(dirname(dirname(fileURLToPath(import.meta.url)))),
-  "libexec",
-  "tightbeam",
-);
+const PACKAGE_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+export const PACKAGE_TIGHTBEAM_BIN = join(PACKAGE_ROOT, "libexec", "tightbeam");
 
 export function defaultTightbeamCommand(env = process.env) {
   return env.TIGHTBEAM_BIN || PACKAGE_TIGHTBEAM_BIN;
 }
 
+function realpathOrNull(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return null;
+  }
+}
+
+// The public bootstrap installs this source as install/tldr-agent beside
+// install/runtime, without release/activation-manifest.json or the payloads it
+// names, so libexec/tightbeam there exits RUNTIME_MANIFEST_MISSING. When this
+// is that tree running on that runtime node (which the bootstrap verified),
+// Tightbeam's own entrypoint runs on the same node. Null anywhere else.
+export function installedTightbeamInvocation({
+  packageRoot = PACKAGE_ROOT,
+  execPath = process.execPath,
+} = {}) {
+  const source = realpathOrNull(packageRoot);
+  if (source === null || basename(source) !== "tldr-agent") return null;
+  const install = dirname(source);
+  if (basename(install) !== "install") return null;
+  const runtimeNode = realpathOrNull(join(install, "runtime", "bin", "node"));
+  if (runtimeNode === null || realpathOrNull(execPath) !== runtimeNode) {
+    return null;
+  }
+  return Object.freeze({
+    command: execPath,
+    commandPrefix: Object.freeze([
+      join(source, "messaging", "bin", "tightbeam"),
+    ]),
+  });
+}
+
+// How this process runs Tightbeam: TIGHTBEAM_BIN when set, the installed
+// runtime's entrypoint in the installed layout, else this package's launcher.
+export function defaultTightbeamInvocation(env = process.env) {
+  if (env.TIGHTBEAM_BIN) return Object.freeze({ command: env.TIGHTBEAM_BIN });
+  const installed = installedTightbeamInvocation();
+  if (!installed) return Object.freeze({ command: PACKAGE_TIGHTBEAM_BIN });
+  process.stderr.write(
+    `${JSON.stringify({ ts: new Date().toISOString(), level: "info", event: "tightbeam.invocation", status: "installed_runtime", params: { entrypoint: installed.commandPrefix[0] } })}\n`,
+  );
+  return installed;
+}
+
+// An explicit command keeps its own prefix; no command means the default.
+export function tightbeamInvocation({ command, commandPrefix } = {}) {
+  if (!command) return defaultTightbeamInvocation();
+  return commandPrefix?.length ? { command, commandPrefix } : { command };
+}
+
 export const AUTHORITY = "tldr-email";
 export const APPLICATION = "tldr-email";
-export const WELCOME_APPLICATION = "tldr-welcome";
 export const PRINCIPAL_REF = "verified-owner";
 export const ENDPOINT_SESSION = "tldr-email-owner";
-export const WELCOME_ENDPOINT_SESSION = "tldr-welcome-sender";
 
 export function unavailable(failedDimensions = []) {
   const dimensions = [
@@ -72,6 +119,32 @@ export function launcherUnavailable() {
         "Activate Tightbeam, approve plugin trust, or start a new session, then rerun setup.",
     }),
   });
+}
+
+// No session has started the daemon yet (Tightbeam's session-start hook runs
+// it), or it exited and left its socket: a later run can succeed.
+export function daemonNotRunning() {
+  return Object.freeze({
+    ok: false,
+    data: null,
+    error: Object.freeze({
+      code: "TIGHTBEAM_UNAVAILABLE",
+      message:
+        "tldr; cannot reach Tightbeam because its daemon is not running.",
+      retryable: true,
+      remediation:
+        "Start a new Claude Code or Codex session so Tightbeam starts, then rerun setup.",
+    }),
+  });
+}
+
+function socketConnectError(error) {
+  const code = error?.code;
+  const message = String(error?.message ?? "");
+  return (
+    (code === "ECONNREFUSED" || code === "ENOENT") &&
+    new RegExp(`\\bconnect ${code}\\b`, "u").test(message)
+  );
 }
 
 export function identityInvalid() {
@@ -184,7 +257,7 @@ export async function productionRun({
       admin &&
       args[0] === "app" &&
       args[1] === "register" &&
-      [APPLICATION, WELCOME_APPLICATION].includes(registeredApplication) &&
+      registeredApplication === APPLICATION &&
       /identity_conflict/.test(output) &&
       output.includes(
         `application named "${registeredApplication}" is already registered`,
@@ -208,7 +281,25 @@ export async function productionRun({
     }
     if (typeof error?.stdout === "string" && error.stdout.trim().length > 0) {
       try {
-        return JSON.parse(error.stdout);
+        const parsed = JSON.parse(error.stdout);
+        if (socketConnectError(parsed?.error)) {
+          process.stderr.write(
+            `${JSON.stringify({
+              ts: new Date().toISOString(),
+              level: "warn",
+              event: "tightbeam.daemon_not_running",
+              status: "unavailable",
+              params: {
+                operation: args
+                  .slice(0, 2)
+                  .filter((arg) => !arg.startsWith("-"))
+                  .join(" "),
+              },
+            })}\n`,
+          );
+          return daemonNotRunning();
+        }
+        return parsed;
       } catch {
         // A launched command that emits malformed data is not a missing launcher.
       }
@@ -218,12 +309,28 @@ export async function productionRun({
       (error?.errno && !error?.stdout)
     )
       return null;
+    const stderr = String(error?.stderr ?? "");
+    if (/^error (ENOENT|ECONNREFUSED): connect \1 /mu.test(stderr)) {
+      process.stderr.write(
+        `${JSON.stringify({
+          ts: new Date().toISOString(),
+          level: "warn",
+          event: "tightbeam.daemon_not_running",
+          status: "unavailable",
+          params: {
+            operation: args
+              .slice(0, 2)
+              .filter((arg) => !arg.startsWith("-"))
+              .join(" "),
+          },
+        })}\n`,
+      );
+      return daemonNotRunning();
+    }
     // The CLI reports a daemon refusal only on stderr (`error <code>: ...`,
     // exit 1). Keep that code so a caller can tell an expected refusal, such
     // as the idle `claim_held` of delivery.claim, from a real failure (item 49).
-    const refusal = /^error ([a-z][a-z_]{0,63}): /mu.exec(
-      String(error?.stderr ?? ""),
-    );
+    const refusal = /^error ([a-z][a-z_]{0,63}): /mu.exec(stderr);
     return {
       ok: false,
       data: null,

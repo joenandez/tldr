@@ -30,8 +30,8 @@ assert.equal(
 );
 assert.equal(packageJson.publishConfig.access, "public");
 assert.equal(packageJson.publishConfig.provenance, true);
-assert.deepEqual(packageJson.os, ["darwin"]);
-assert.deepEqual(packageJson.cpu, ["arm64"]);
+assert.deepEqual(packageJson.os, ["darwin", "linux"]);
+assert.equal(packageJson.cpu, undefined);
 // The unified package installs exactly one command.
 assert.deepEqual(packageJson.bin, { "tldr-agents": "./bin/tldr-agents" });
 assert.equal(plugin.name, "tldr");

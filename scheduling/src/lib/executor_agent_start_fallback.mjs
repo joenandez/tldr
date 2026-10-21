@@ -84,6 +84,7 @@ export async function launchManagedAgentUntilStartedWithFallback({
   const primary = classifiedResult(agent, primaryRaw);
   if (
     primaryRaw.status === "started" ||
+    primaryRaw.status === "skipped" ||
     defaults.fallback_policy === "never" ||
     !fallbackAgent ||
     fallbackAgent === agent ||
@@ -98,9 +99,11 @@ export async function launchManagedAgentUntilStartedWithFallback({
         primary,
         fallback: null,
         fallbackMode:
-          !prompt && primaryRaw.status !== "started"
-            ? "ineligible:no_prompt"
-            : null,
+          primaryRaw.status === "skipped"
+            ? "not_needed:provider_skip"
+            : !prompt && primaryRaw.status !== "started"
+              ? "ineligible:no_prompt"
+              : null,
       }),
     };
   }

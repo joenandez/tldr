@@ -61,6 +61,45 @@ export function tightbeamRecipeCommand(packageRoot = defaultPackageRoot) {
   return unifiedMessagingRecipe(packageRoot);
 }
 
+// The exact commands that answer a pending delegation offer. Every surface
+// that tells a delegate about an offer (notification, resume brief, receive,
+// threads, status) builds them here so they read the same. `prefix` is the
+// recipe prefix, or the bare command name where the package path is not the
+// agent's launcher (the daemon's resume brief).
+export function offerActionCommands(delegationId, prefix = tightbeamRecipeCommand()) {
+  return {
+    accept: `${prefix} agent accept --work ${delegationId} --body "<note>"`,
+    decline: `${prefix} agent decline --work ${delegationId} --body "<reason>"`,
+  };
+}
+
+// F23: the exact commands the holder of tracked work runs with its work id.
+// Every surface that presents a request to its holder (notification, resume
+// and spawn briefs, receive, threads, thread) builds them here so they read
+// the same. `ack` applies only to work that arrived as a user message.
+export function workActionCommands(workId, prefix = tightbeamRecipeCommand()) {
+  return {
+    ack: `${prefix} agent ack --work ${workId} --body "<progress>"`,
+    update: `${prefix} agent update --work ${workId} --body "<progress>"`,
+    complete: `${prefix} agent complete --work ${workId} --body "<result>"`,
+    delegate: `${prefix} agent delegate --work ${workId} --to session:<session-id> --body "<instructions>"`,
+  };
+}
+
+// The text lines for held work, in one fixed order: the work id, then update,
+// complete, delegate, and (only when owed) ack. `commandSuffix` turns `Update`
+// into `Update command`, as the notification block words its other commands.
+export function workActionLines(work, { prefix = tightbeamRecipeCommand(), indent = '', workLabel = 'Work', commandSuffix = '' } = {}) {
+  const commands = workActionCommands(work.work_id, prefix);
+  return [
+    `${indent}${workLabel}: ${work.work_id} · you hold this request`,
+    `${indent}Update${commandSuffix}: ${commands.update}`,
+    `${indent}Complete${commandSuffix}: ${commands.complete}`,
+    `${indent}Delegate${commandSuffix}: ${commands.delegate}`,
+    ...(work.ack_pending ? [`${indent}Ack${commandSuffix}: ${commands.ack}`] : []),
+  ];
+}
+
 // The command name for prose and for text built where the package's own
 // path is not the agent's launcher (the daemon's resume brief and safe
 // actions, doctor and bootstrap remediation). Tracker item 36 removes the

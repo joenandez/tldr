@@ -9,13 +9,33 @@ function isTerminalHistoryEvent(event) {
   );
 }
 
+// A handoff closes the ledger attempt as succeeded because the launch
+// succeeded. That is not the work's outcome, so the ledger never sets a
+// handoff run's status: the history event keeps the status it recorded
+// (`started` since the provider-run outcome contract), and a ledger-only row
+// reads `started`. The session exit is recorded as its own history event.
+function isHandoffLedgerEvent(event) {
+  return event?.payload?.terminal_source === "skyhook-handoff";
+}
+
+function publicLedgerEvent(event) {
+  if (!isHandoffLedgerEvent(event)) return event;
+  return { ...event, status: "started", error: null };
+}
+
+// The session-exit record is the run's final outcome; the ledger's launch
+// terminal must not overwrite it.
+function isSessionExitEvent(event) {
+  return event?.payload?.session_exit === true;
+}
+
 export function mergeLedgerTerminalHistory(scope, jobId, events, limit) {
   const ledgerEvents = listSkyhookTerminalHistoryEvents({
     home: helmHome(),
     scopeId: scope?.scope_id,
     jobId,
     limit,
-  });
+  }).map(publicLedgerEvent);
   if (ledgerEvents.length === 0) return events;
 
   const ledgerByRun = new Map(
@@ -23,14 +43,22 @@ export function mergeLedgerTerminalHistory(scope, jobId, events, limit) {
   );
   const seen = new Set();
   const merged = events.map((event) => {
-    if (!isTerminalHistoryEvent(event) || !ledgerByRun.has(event.run_id)) {
+    if (
+      !isTerminalHistoryEvent(event) ||
+      isSessionExitEvent(event) ||
+      !ledgerByRun.has(event.run_id)
+    ) {
       return event;
     }
     const ledger = ledgerByRun.get(event.run_id);
     seen.add(event.run_id);
+    const recorded = isHandoffLedgerEvent(ledger)
+      ? { status: event.status, error: event.error ?? null }
+      : {};
     return {
       ...event,
       ...ledger,
+      ...recorded,
       source_scope_id:
         event.source_scope_id ??
         event.scope_id ??

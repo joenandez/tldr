@@ -2,6 +2,9 @@
 // A listener presentation is transport evidence only; a watermark peek is
 // the other truthful notification surface.  Both use this one CAS helper.
 
+import { receiveOrderBy } from './message_shared.mjs';
+import { notificationContext } from './notification_context.mjs';
+
 function sameOwner(delivery, endpoint) {
   return (
     delivery.admission_process_generation === endpoint.process_generation &&
@@ -19,14 +22,14 @@ export function openOldestUnreadAdmission(db, { endpoint, now = new Date().toISO
               , m.origin = 'inbound' AND m.origin_channel_route_id IS NOT NULL AS has_external_origin
          FROM deliveries d JOIN messages m ON m.id = d.message_id
         WHERE d.endpoint_id = ? AND d.state != 'failed' AND d.read_at IS NULL AND d.admitted_at IS NULL
-        ORDER BY d.created_at ASC, d.id ASC
+        ORDER BY ${receiveOrderBy('d')}
         LIMIT 1`,
     )
     .get(endpoint.id);
   if (!delivery) return null;
 
   if (delivery.admission_opened_at && sameOwner(delivery, endpoint)) {
-    return { delivery_id: delivery.id, message_id: delivery.message_id, attempt: delivery.retry_armed_at ? 'retry' : 'initial', has_external_origin: Boolean(delivery.has_external_origin) };
+    return { delivery_id: delivery.id, message_id: delivery.message_id, attempt: delivery.retry_armed_at ? 'retry' : 'initial', has_external_origin: Boolean(delivery.has_external_origin), ...notificationContext(db, delivery.message_id, { deliveryId: delivery.id }) };
   }
 
   // An ownership change invalidates a predecessor's clock.  The update is
@@ -61,5 +64,5 @@ export function openOldestUnreadAdmission(db, { endpoint, now = new Date().toISO
       endpoint.owner_launch_token,
     );
   if (opened.changes !== 1) return null;
-  return { delivery_id: delivery.id, message_id: delivery.message_id, attempt: 'initial', has_external_origin: Boolean(delivery.has_external_origin) };
+  return { delivery_id: delivery.id, message_id: delivery.message_id, attempt: 'initial', has_external_origin: Boolean(delivery.has_external_origin), ...notificationContext(db, delivery.message_id, { deliveryId: delivery.id }) };
 }

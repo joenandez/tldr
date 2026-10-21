@@ -55,6 +55,28 @@
           }
         ]
       }
+    ],
+    "SubagentStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/bin/tldr-agents\" messaging hook subagent-start",
+            "_tightbeam": "tightbeam-managed:runtime-hooks-v2"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/bin/tldr-agents\" messaging hook subagent-stop",
+            "_tightbeam": "tightbeam-managed:runtime-hooks-v2"
+          }
+        ]
+      }
     ]
   }
 }

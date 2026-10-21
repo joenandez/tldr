@@ -76,13 +76,21 @@ export function runReportCommand({
         pretty,
       );
     }
+    // Still exit 0 (unmanaged callers report best-effort), but never in a
+    // shape an agent can mistake for a recorded outcome.
+    const message =
+      "helm-tasks report: not recorded — no --run flag and no HELM_RUN_ID env. " +
+      "If this is a Helm assignment, rerun with --run <run_id> --job <job_id> from your job context.";
+    process.stderr.write(`${message}\n`);
     output(
       "report",
-      true,
+      false,
       {
+        recorded: false,
         warning: "no_run_id",
-        message:
-          "helm-tasks report: no --run flag and no HELM_RUN_ID env; skipping (best-effort)",
+        message,
+        next_action:
+          "tldr-agents tasks report --run <run_id> --job <job_id> --status <ok|fail> --summary <text>",
       },
       [],
       pretty,

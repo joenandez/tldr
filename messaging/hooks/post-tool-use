@@ -9,9 +9,26 @@
 # the rendering reads the staged file and nothing else.
 _TIGHTBEAM_MARKER=tightbeam-managed:runtime-hooks-v2
 
+# TIGHTBEAM_PLUTIL is a test seam; macOS keeps /usr/bin/plutil. Without it
+# (Linux, WSL) one node process reads the dotted path as plutil's raw output does.
 payload_field() {
-  [ -x /usr/bin/plutil ] || return 0
-  printf '%s' "$1" | /usr/bin/plutil -extract "$2" raw -o - - 2>/dev/null || true
+  _plutil=${TIGHTBEAM_PLUTIL:-/usr/bin/plutil}
+  if [ -x "${_plutil}" ]; then
+    printf '%s' "$1" | "${_plutil}" -extract "$2" raw -o - - 2>/dev/null || true
+  else
+    printf '%s' "$1" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{let v=JSON.parse(s);for(const k of process.argv[1].split("."))v=v?.[k];if(["string","number","boolean"].includes(typeof v))process.stdout.write(String(v))}catch{}})' "$2" 2>/dev/null || true
+  fi
+}
+
+# pre-tool-use records each Codex parent Bash call in pending-bg for the Stop
+# hold; this hook removes it in shell, starting no Node. "turn_id" is a key only
+# Codex sends: a Claude call pays one string match and nothing more.
+codex_parent_bash() {
+  case "${payload}" in
+    *'"agent_id"'*) return 1 ;;
+    *'"turn_id"'*) [ "$(payload_field "${payload}" tool_name)" = Bash ] ;;
+    *) return 1 ;;
+  esac
 }
 
 main() {
@@ -46,6 +63,10 @@ main() {
     /bin/rm -f "${action}"
   fi
 
+  case "${action_id}" in
+    */*|*..*|.*|"") ;;
+    *) codex_parent_bash && /bin/rm -f "${dir}/pending-bg/bash-${action_id}" ;;
+  esac
   [ -s "${pending}" ] || return 0
 
   # The CLI is the package's own launcher. Every installed hook command

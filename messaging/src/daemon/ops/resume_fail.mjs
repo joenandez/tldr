@@ -16,6 +16,15 @@ export const MAX_RESUME_ATTEMPTS = 8;
 // Closed adapter taxonomy. This is positive adapter evidence, never a
 // free-form child-process error string.
 export const EXACT_SESSION_UNAVAILABLE = 'exact_session_unavailable';
+// F34: why the daemon ended a resume of an existing Codex session on purpose
+// rather than start a second writer beside the app that holds it. The session
+// is fine and its message stays unread; the reason is how the requester is told.
+export const CODEX_HOST_UNKNOWN = 'codex_host_unknown';
+export const CODEX_QUEUE_REFUSED = 'codex_queue_refused';
+export const CODEX_QUEUE_FAILED = 'codex_queue_failed';
+export const HOSTED_LAUNCH_FAILURE_REASONS = Object.freeze([CODEX_HOST_UNKNOWN, CODEX_QUEUE_REFUSED, CODEX_QUEUE_FAILED]);
+/** The attention source the resumer marks a root with for a daemon-ended hosted resume. */
+export const hostedAttentionSource = (reason) => `resume.${reason}`;
 
 export const resumeFailOp = {
   name: 'resume.fail',

@@ -6,8 +6,10 @@
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
 import { openOldestUnreadAdmission } from './delivery_admission.mjs';
+import { pendingOfferDelegationId, requesterCancelNotice, returnedWorkNotice, returnedWorkRouteReasons } from './notification_context.mjs';
+import { heldWork } from './thread_list.mjs';
 import { markExactDeliveryRead } from './message_read.mjs';
-import { refreshSessionWatermark } from './message_shared.mjs';
+import { receiveOrderBy, receivedBeforeSql, refreshSessionWatermark } from './message_shared.mjs';
 import { completeResumeRequestsForMessage } from './resume_shared.mjs';
 
 function malformed(field) {
@@ -77,14 +79,11 @@ function exactCurrentOwnerReceipt(db, input, appId) {
                 SELECT 1 FROM deliveries earlier
                  WHERE earlier.endpoint_id = e.id AND earlier.state != 'failed'
                    AND earlier.read_at IS NULL
-                   AND (
-                     earlier.created_at < d.created_at
-                     OR (earlier.created_at = d.created_at AND earlier.id < d.id)
-                   )
+                   AND ${receivedBeforeSql('earlier', 'd')}
               )
             )
           )
-        ORDER BY d.created_at ASC, d.id ASC
+        ORDER BY ${receiveOrderBy('d')}
         LIMIT 1`,
     )
     .get(input.message_id, input.endpoint_id, input.process_generation, input.provider_session_id, appId);
@@ -314,6 +313,87 @@ function exactOrdinaryReceipt(db, input, appId) {
     .get(input.message_id, input.endpoint_id, input.process_generation, input.provider_session_id, appId);
 }
 
+// Receipt is oldest-first. When the caller's own exact endpoint holds this
+// message unread behind an older unread one, the refusal names that older
+// message, the one it must receive first. Read-only.
+function olderUnreadAhead(db, input, appId) {
+  return db
+    .prepare(
+      `SELECT earlier.message_id
+         FROM endpoints e
+         JOIN deliveries d ON d.endpoint_id = e.id AND d.message_id = ? AND d.state != 'failed' AND d.read_at IS NULL
+         JOIN deliveries earlier
+           ON earlier.endpoint_id = e.id AND earlier.state != 'failed' AND earlier.read_at IS NULL
+          AND ${receivedBeforeSql('earlier', 'd')}
+        WHERE e.id = ? AND e.process_generation = ? AND e.provider_session_id = ? AND e.created_by_app_id = ?
+        ORDER BY ${receiveOrderBy('earlier')}
+        LIMIT 1`,
+    )
+    .get(input.message_id, input.endpoint_id, input.process_generation, input.provider_session_id, appId)?.message_id ?? null;
+}
+
+function receiveRefusal(context, input, appId) {
+  const oldestMessageId = olderUnreadAhead(context.db, input, appId);
+  const message = 'message.receive is not granted for this exact listener presentation';
+  if (!oldestMessageId) {
+    const endpoint = context.db.prepare('SELECT state, process_generation FROM endpoints WHERE id = ?').get(input.endpoint_id);
+    const reason = !endpoint ? 'endpoint_unknown'
+      : endpoint.state === 'takeover_pending' ? 'endpoint_takeover_pending'
+        : endpoint.process_generation !== input.process_generation ? 'process_generation_stale'
+          : 'no_receipt_path';
+    context.logger?.warn?.({
+      event: 'message_receive_refused',
+      params: { message_id: input.message_id, endpoint_id: input.endpoint_id },
+      result: { reason, endpoint_state: endpoint?.state ?? null },
+      status: 'refused',
+    });
+    return new TightbeamError('permission_denied', message);
+  }
+  context.logger?.info?.({
+    event: 'message_receive_refused',
+    params: { message_id: input.message_id, endpoint_id: input.endpoint_id },
+    result: { reason: 'older_message_first', oldest_message_id: oldestMessageId },
+    status: 'refused',
+  });
+  return new TightbeamError('permission_denied', message, { reason: 'older_message_first', oldest_message_id: oldestMessageId });
+}
+
+// The additive `notice` object for a received delivery that returns offered
+// work to its offerer, or null. It never carries the body.
+function returnedWorkReceipt(context, messageId, endpointId) {
+  const marks = returnedWorkRouteReasons().map(() => '?').join(', ');
+  const delivery = context.db
+    .prepare(`SELECT id FROM deliveries WHERE message_id = ? AND endpoint_id = ? AND route_reason IN (${marks}) ORDER BY created_at DESC, id DESC LIMIT 1`)
+    .get(messageId, endpointId, ...returnedWorkRouteReasons());
+  if (!delivery) return null;
+  const notice = returnedWorkNotice(context.db, { messageId, deliveryId: delivery.id });
+  context.logger?.debug?.({
+    event: 'message_receive_returned_work_notice',
+    params: { message_id: messageId, endpoint_id: endpointId, delivery_id: delivery.id },
+    result: { kind: notice?.detail.kind ?? null },
+    status: notice ? 'ok' : 'unresolved',
+  });
+  return notice ? { ...notice.detail, text: notice.text } : null;
+}
+
+// The additive `notice` object for a received copy of a requester's cancel
+// (typed or ordinary), or null. It never carries the body.
+function requesterCancelReceipt(context, messageId, endpointId) {
+  const delivery = context.db
+    .prepare('SELECT id FROM deliveries WHERE message_id = ? AND endpoint_id = ? ORDER BY created_at DESC, id DESC LIMIT 1')
+    .get(messageId, endpointId);
+  const notice = requesterCancelNotice(context.db, { messageId, deliveryId: delivery?.id ?? null });
+  if (notice) {
+    context.logger?.debug?.({
+      event: 'message_receive_requester_cancel_notice',
+      params: { message_id: messageId, endpoint_id: endpointId, delivery_id: delivery?.id ?? null },
+      result: { kind: notice.detail.kind },
+      status: 'ok',
+    });
+  }
+  return notice ? { ...notice.detail, text: notice.text } : null;
+}
+
 export const messageReceiveOp = {
   name: 'message.receive',
   allowedScopes: ['agent'],
@@ -331,7 +411,7 @@ export const messageReceiveOp = {
       const successor = presentation || current || availability ? null : exactSuccessorReceipt(context.db, input, connection.appId);
       const ordinary = presentation || current || availability || successor ? null : exactOrdinaryReceipt(context.db, input, connection.appId);
       if (!presentation && !current && !availability && !successor && !ordinary) {
-        throw new TightbeamError('permission_denied', 'message.receive is not granted for this exact listener presentation');
+        throw receiveRefusal(context, input, connection.appId);
       }
       if (current) {
         if (current.read_at) {
@@ -538,6 +618,25 @@ export const messageReceiveOp = {
         logger: context.logger,
       });
     }
-    return { result: outcome.result };
+    // The expiry or custody-loss wake re-delivers the offerer's own offer
+    // message; the notice says what actually happened (proof F39).
+    // A requester's cancel, typed or ordinary, is likewise a notice that asks nothing.
+    const returned = returnedWorkReceipt(context, outcome.result.message_id, input.endpoint_id)
+      ?? requesterCancelReceipt(context, outcome.result.message_id, input.endpoint_id);
+    // A pending delegation offer names its delegation: the only agent-facing
+    // place a delegate can learn the id that accept and decline need.
+    const delegationId = pendingOfferDelegationId(context.db, outcome.result.message_id, input.endpoint_id, { logger: context.logger });
+    if (delegationId) return { result: { ...outcome.result, delegation_id: delegationId } };
+    // Tracked work the receiver holds names its work id (F23): the id that
+    // update, complete, and delegate need is otherwise never shown in text.
+    // The message selects its own root when the conversation holds several.
+    const work = heldWork(context.db, outcome.result.conversation_id, input.endpoint_id, { messageId: outcome.result.message_id });
+    context.logger?.debug?.({
+      event: 'message_receive_work',
+      params: { message_id: outcome.result.message_id, endpoint_id: input.endpoint_id },
+      result: { work_id: work?.work_id ?? null },
+      status: 'ok',
+    });
+    return { result: { ...(returned ? { notice: returned } : {}), ...outcome.result, ...(work ?? {}) } };
   },
 };

@@ -2,8 +2,12 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-
 import { requestAegisStatusSafe } from "./aegis_client.mjs";
+import {
+  captureActiveRuntimePointer,
+  publishActiveRuntimePointer,
+  restoreActiveRuntimePointer,
+} from "./tldr_agent_active_runtime.mjs";
 import { bootstrapHooks } from "./bootstrap_hooks.mjs";
 import { waitForTldrAgentHealth } from "./tldr_agent_daemon_health.mjs";
 import {
@@ -14,11 +18,7 @@ import {
   tldrAgentSourceIdentity,
   readTldrAgentRuntimeSchemaVersion,
 } from "./tldr_agent_runtime_identity.mjs";
-import {
-  assertStateRootsCreatable,
-  helmHome as getHelmHome,
-  helmStateRootFor,
-} from "./store.mjs";
+import { helmHome as getHelmHome, helmStateRootFor } from "./store.mjs";
 import {
   LifecycleStoreError,
   initializeLifecycleStore,
@@ -34,14 +34,17 @@ import {
   readVerifiedInstalledPreSplitSource,
 } from "./tldr_agent_presplit_evidence.mjs";
 import {
+  HELM_LAUNCHD_LABELS,
+  createProductStateRemoval,
+} from "./tldr_agent_product_removal.mjs";
+import {
   SOURCE_ROOT,
   TLDR_AGENT_STATUS_PORT,
+  assertSourceLifecycleRootsCreatable,
+  defaultDaemonTightbeamBin,
   defaultTightbeamStateRoot,
   productionPlist,
 } from "./tldr_agent_source_plist.mjs";
-
-// The pre-split replacement evidence and the production launchd definition
-// live in their own modules; re-exported so importers keep one path.
 export {
   VERIFIED_PRE_SPLIT_RELEASE,
   lifecycleMigrationEvidencePath,
@@ -52,33 +55,18 @@ export {
   defaultTightbeamStateRoot,
   productionPlist,
 } from "./tldr_agent_source_plist.mjs";
-
 const ACTIVATABLE_AEGIS_STATES = new Set([
   "ready",
   "pending_verification",
   "unconfigured",
 ]);
-// Helm's sentinel install bootstraps and then kickstarts -k the job, so launchd
-// holds the restart for its 30 s ThrottleInterval. Allow one full window.
 const HELM_SERVICE_START_TIMEOUT_MS = 45_000;
 const HELM_SERVICE_POLL_INTERVAL_MS = 1_000;
-const HELM_LAUNCHD_LABELS = Object.freeze([
-  {
-    label: "ai.helm.scheduler",
-    script: "scheduling/src/helm-daemon.mjs",
-  },
-  {
-    label: "ai.helm.sentinel",
-    script: "scheduling/src/sentinel.mjs",
-  },
-]);
 
 function logLifecycle(level, event, params) {
-  process.stderr.write(
-    `${JSON.stringify({ ts: new Date().toISOString(), level, event, params })}\n`,
-  );
+  const ts = new Date().toISOString();
+  process.stderr.write(`${JSON.stringify({ ts, level, event, params })}\n`);
 }
-
 export function requiresFreshPollForAegisStatus(status, override = null) {
   if (!ACTIVATABLE_AEGIS_STATES.has(status)) {
     throw new Error(
@@ -88,16 +76,12 @@ export function requiresFreshPollForAegisStatus(status, override = null) {
   if (typeof override === "boolean") return override;
   return status === "ready";
 }
-
-// This boundary contains source activation, historic hook removal, daemon
-// quiescence/reload, and exact runtime-identity verification. Native Aegis
-// setup remains responsible for owner identity and provider authority.
 export function createTldrAgentSourceInstallLifecycle({
   home = getHelmHome(),
+  activeRuntimePath = join(dirname(home), "active-runtime.json"),
   helmHome = helmStateRootFor(),
   nodePath = process.execPath,
-  tightbeamBin = process.env.TIGHTBEAM_BIN ||
-    join(SOURCE_ROOT, "libexec", "tightbeam"),
+  tightbeamBin = defaultDaemonTightbeamBin(),
   tightbeamStateRoot = defaultTightbeamStateRoot(),
   requireFreshPoll = null,
   releaseOwnership = null,
@@ -128,23 +112,13 @@ export function createTldrAgentSourceInstallLifecycle({
         tightbeamStateRoot,
       }),
   });
-  // install and update create the agent root (lifecycle store, launchd
-  // plist), so they refuse while ~/.tldr-agent is still a real directory and
-  // the new root is missing. Helm and Tightbeam create their own roots behind
-  // their own guards; the whole-product entry points (Starport setup/repair,
-  // local:update, the bootstrap script) check all three before they start.
   const assertRootsCreatable = (operation) =>
-    assertStateRootsCreatable({
-      roots: {
-        agent: { path: home, source: "lifecycle" },
-        helm: { path: helmHome, source: "lifecycle" },
-        tightbeam: { path: tightbeamStateRoot, source: "lifecycle" },
-      },
-      guarded: ["agent"],
-      operation: `source_lifecycle_${operation}`,
+    assertSourceLifecycleRootsCreatable({
+      operation,
+      home,
+      helmHome,
+      tightbeamStateRoot,
     });
-  // A replacement over a ready store leaves post-split evidence that nothing
-  // migrates; consume it so the next runtime swap is not refused as unresolved.
   const consumeReadyReplacementEvidence = (captured, action) => {
     if (!captured?.captured) return false;
     if (!captured.validReplacementEvidence) {
@@ -252,7 +226,6 @@ export function createTldrAgentSourceInstallLifecycle({
       },
     );
     if (Number(result?.status ?? 1) !== 0) {
-      // Helm reports refusals (active runs, desired state) as JSON on stdout.
       let refusal = null;
       try {
         refusal = JSON.parse(String(result?.stdout || ""))?.error || null;
@@ -275,6 +248,11 @@ export function createTldrAgentSourceInstallLifecycle({
       throw error;
     }
   };
+  const productRemoval = createProductStateRemoval({
+    roots: { agent: home, helm: helmHome, tightbeam: tightbeamStateRoot },
+    commandRunner,
+    sleep,
+  });
   const lifecycle = createInstallLifecycle({
     manageHooks,
     launchd,
@@ -309,6 +287,9 @@ export function createTldrAgentSourceInstallLifecycle({
       }
       try {
         runHelmLifecycleCommand(["service", "update"]);
+        // launchctl often reports a freshly bootstrapped service before the
+        // ThrottleInterval restart loop has settled, so the source lifecycle
+        // waits across the retained service window before accepting Helm.
         const deadline = now() + HELM_SERVICE_START_TIMEOUT_MS;
         for (const { label, script } of HELM_LAUNCHD_LABELS) {
           const target = `gui/${process.getuid()}/${label}`;
@@ -350,7 +331,7 @@ export function createTldrAgentSourceInstallLifecycle({
                 `Helm launchd service ${label} is not running from the active source and packaged Node`,
               );
             }
-            // eslint-disable-next-line no-await-in-loop -- Poll launchd sequentially until the throttled restart lands or the deadline passes.
+            // eslint-disable-next-line no-await-in-loop -- launchd restart polling is sequential.
             await sleep(HELM_SERVICE_POLL_INTERVAL_MS);
           }
         }
@@ -362,7 +343,11 @@ export function createTldrAgentSourceInstallLifecycle({
       return health;
     },
     releaseOwnership,
-    cleanupOwnedState,
+    // Full uninstall only: runs after hooks and the agent daemon are removed.
+    cleanupOwnedState:
+      cleanupOwnedState ??
+      (() =>
+        productRemoval.removeProductState({ agentDaemon: launchd.status?.() })),
   });
   return Object.freeze({
     ...lifecycle,
@@ -370,7 +355,11 @@ export function createTldrAgentSourceInstallLifecycle({
     async install(...args) {
       assertRootsCreatable("install");
       helmServiceUpdateRefused = false;
-      return lifecycle.install(...args);
+      const result = await lifecycle.install(...args);
+      if (result?.ok === true) {
+        publishActiveRuntimePointer(activeRuntimePath, SOURCE_ROOT);
+      }
+      return result;
     },
     async prepareUpdate(...args) {
       assertRootsCreatable("prepare_update");
@@ -378,16 +367,50 @@ export function createTldrAgentSourceInstallLifecycle({
       return lifecycle.prepareUpdate(...args);
     },
     async uninstall(...args) {
+      productRemoval.assertRemovable();
+      const removed = productRemoval.confirmAlreadyRemoved();
+      if (removed) {
+        restoreActiveRuntimePointer(activeRuntimePath, null);
+        return removed;
+      }
       runHelmLifecycleCommand(["service", "uninstall"]);
       runHelmLifecycleCommand(["sentinel", "uninstall"]);
-      return lifecycle.uninstall(...args);
+      productRemoval.verifyHelmServicesAbsent();
+      const result = await lifecycle.uninstall(...args);
+      const daemonRemoved =
+        result?.daemon?.installed === false &&
+        result?.daemon?.loaded !== true &&
+        result?.daemon?.running !== true;
+      if (result?.ok === true || daemonRemoved) {
+        restoreActiveRuntimePointer(activeRuntimePath, null);
+      }
+      return productRemoval.assertComplete(result);
     },
-    // update() runs this.prepareUpdate(), which checks the roots.
     async update(options) {
-      return lifecycle.update.call(this, options);
+      const previousPointer = captureActiveRuntimePointer(activeRuntimePath);
+      try {
+        return await lifecycle.update.call(this, options);
+      } catch (error) {
+        try {
+          restoreActiveRuntimePointer(activeRuntimePath, previousPointer);
+        } catch (restoreError) {
+          throw new AggregateError(
+            [error, restoreError],
+            "tldr; update failed and active runtime pointer rollback failed",
+          );
+        }
+        throw error;
+      }
     },
     async activatePreparedUpdate(prepared) {
-      return lifecycle.activatePreparedUpdate.call(this, prepared);
+      const result = await lifecycle.activatePreparedUpdate.call(
+        this,
+        prepared,
+      );
+      if (result?.ok === true) {
+        publishActiveRuntimePointer(activeRuntimePath, SOURCE_ROOT);
+      }
+      return result;
     },
   });
 }

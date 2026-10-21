@@ -75,7 +75,7 @@ export function findInvalidImportedTachyonArming(records) {
   return null;
 }
 
-export function endUnsupportedTachyonListeners(db, { endpointId, processGeneration, now }) {
+export function endUnsupportedTachyonListeners(db, { endpointId, processGeneration, now, reason = UNSUPPORTED_TACHYON_ARMING_REASON }) {
   const listeners = db.prepare(
     `SELECT id, listener_generation
        FROM listeners
@@ -96,8 +96,8 @@ export function endUnsupportedTachyonListeners(db, { endpointId, processGenerati
   );
   let ended = 0;
   for (const listener of listeners) {
-    miss.run(now, UNSUPPORTED_TACHYON_ARMING_REASON, now, listener.id, listener.listener_generation);
-    ended += end.run(UNSUPPORTED_TACHYON_ARMING_REASON, now, now, listener.id, listener.listener_generation).changes;
+    miss.run(now, reason, now, listener.id, listener.listener_generation);
+    ended += end.run(reason, now, now, listener.id, listener.listener_generation).changes;
   }
   return ended;
 }

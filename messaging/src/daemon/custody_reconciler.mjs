@@ -87,7 +87,7 @@
 // rejects generation-less dead asserts from driving reconciliation.
 
 import { withTransaction } from './db.mjs';
-import { createParentResultDelivery, pushLiveDeliveryEvents } from './ops/message_shared.mjs';
+import { createParentResultDelivery, newestLineageEndpointId, pushLiveDeliveryEvents } from './ops/message_shared.mjs';
 import { findOfferMessageId } from './watch_reconciler.mjs';
 
 export const CUSTODY_LOST_ROUTE_REASON = 'endpoint.custody_lost';
@@ -162,7 +162,8 @@ function routeCustodyLossToParent(db, context, node) {
   }
   if (!offerMessageId) return null;
 
-  const parentEndpointId = db.prepare('SELECT custodian_endpoint_id AS id FROM obligations WHERE id = ?').get(node.parent_id)?.id ?? null;
+  // A replaced parent custodian is reached through its newest replacement.
+  const parentEndpointId = newestLineageEndpointId(db, db.prepare('SELECT custodian_endpoint_id AS id FROM obligations WHERE id = ?').get(node.parent_id)?.id ?? null);
   if (!parentEndpointId) return null;
 
   const routed = createParentResultDelivery(db, {

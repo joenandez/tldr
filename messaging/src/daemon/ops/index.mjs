@@ -19,7 +19,9 @@ import { endpointStateSetOp } from './endpoint_state_set.mjs';
 import { endpointCloseOp } from './endpoint_close.mjs';
 import { endpointRetirementGetOp } from './endpoint_retirement_get.mjs';
 import { endpointListOp } from './endpoint_list.mjs';
-import { channelRouteListOp, channelRouteRegisterOp, channelRouteRetireOp } from './channel_route.mjs';
+import { threadListOp } from './thread_list.mjs';
+import { threadHistoryOp } from './thread_history.mjs';
+import { channelRouteImpactOp, channelRouteListOp, channelRouteRegisterOp, channelRouteRetireOp } from './channel_route.mjs';
 import { conversationCreateOp } from './conversation_create.mjs';
 import { conversationCloseOp } from './conversation_close.mjs';
 import { messageCommitOp } from './message_commit.mjs';
@@ -38,6 +40,8 @@ import { deliveryClaimOp } from './delivery_claim.mjs';
 import { deliveryCompleteOp } from './delivery_complete.mjs';
 import { deliveryReleaseOp } from './delivery_release.mjs';
 import { inboxSubscribeOp } from './inbox_subscribe.mjs';
+import { hostSubscribeOp } from './host_subscribe.mjs';
+import { hostWakeResultOp } from './host_wake_result.mjs';
 import { resumeListOp } from './resume_list.mjs';
 import { resumeClaimOp } from './resume_claim.mjs';
 import { resumeCompleteOp } from './resume_complete.mjs';
@@ -113,9 +117,15 @@ export function buildOpTable() {
   // The caller-scoped session read: Helm gets session facts here, through
   // the CLI, instead of from its own session hooks.
   registerOp(table, endpointListOp);
+  // The participant-gated thread read: a validated session sees the threads
+  // it (and the sessions it replaced) belongs to, never another session's.
+  registerOp(table, threadListOp);
+  // One thread's ordered history, gated the same way and read-only.
+  registerOp(table, threadHistoryOp);
   registerOp(table, channelRouteRegisterOp);
   registerOp(table, channelRouteListOp);
   registerOp(table, channelRouteRetireOp);
+  registerOp(table, channelRouteImpactOp);
   // Contract registrations keep the new planes narrow while their durable
   // authorization and listener state transitions arrive in later parents.
   registerOp(table, channelReplyPublishOp);
@@ -157,6 +167,8 @@ export function buildOpTable() {
   registerOp(table, deliveryCompleteOp);
   registerOp(table, deliveryReleaseOp);
   registerOp(table, inboxSubscribeOp);
+  registerOp(table, hostSubscribeOp);
+  registerOp(table, hostWakeResultOp);
   registerOp(table, resumeListOp);
   registerOp(table, resumeClaimOp);
   registerOp(table, resumeCompleteOp);

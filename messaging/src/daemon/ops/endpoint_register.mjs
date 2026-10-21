@@ -90,9 +90,12 @@
 
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { generateId } from '../../protocol/ids.mjs';
+import { HOST_NAME_PATTERN, HOST_REF_PATTERN } from '../../protocol/host_binding.mjs';
 import { withTransaction } from '../db.mjs';
 import { authorityIsAllowed, isUniqueConstraintError } from './authority_scope.mjs';
-import { refreshWatermarkForAdoptedSession } from './message_shared.mjs';
+import { pushLiveDeliveryEvents, refreshWatermarkForAdoptedSession } from './message_shared.mjs';
+import { publishPresentation } from './listener_operations.mjs';
+import { discloseReplacement } from './replacement_disclosure.mjs';
 import { expandStoredRuntimeIds, runtimeContract, runtimeIdEquals } from './resume_shared.mjs';
 import { MAX_OWNER_START_IDENTITY_LENGTH, MAX_PROCESS_ID, normalizeStartIdentity, ownerCaptureSourceForRuntime } from '../owner_process_contract.mjs';
 
@@ -205,7 +208,39 @@ const ADOPTABLE_PLACEHOLDER = `SELECT e.id AS id
       AND e.state NOT IN ('closed', 'retiring', 'takeover_pending')
       AND e.created_by_app_id = ?
       AND EXISTS (SELECT 1 FROM resume_requests r WHERE r.endpoint_id = e.id AND r.state IN ('pending', 'claimed'))
+      __EXACT_PLACEHOLDER__
     ORDER BY e.created_at ASC, e.id ASC`;
+
+// A daemon cold start names the exact placeholder it launched for
+// (`placeholder_endpoint_id`, resumer.mjs childEnv): that row is adopted
+// under every guard above, or none is. Two concurrent placeholders of one
+// principal must never swap sessions, so a hint that no longer matches never
+// falls back to another placeholder. Only an unhinted registration (another
+// spawner) keeps the oldest-first rule.
+function adoptablePlaceholders(db, { principalId, authorityName, storedSpellings, appId, hint }) {
+  const sql = ADOPTABLE_PLACEHOLDER
+    .replace('__RUNTIME_PLACEHOLDERS__', storedSpellings.map(() => '?').join(','))
+    .replace('__EXACT_PLACEHOLDER__', hint ? 'AND e.id = ?' : '');
+  return db.prepare(sql).all(principalId, authorityName, ...storedSpellings, appId, ...(hint ? [hint] : []));
+}
+
+function adoptionDecision({ hint, adopted }) {
+  if (hint) return adopted ? 'exact' : 'hint_unmatched';
+  return adopted ? 'oldest' : 'none';
+}
+
+function logAdoption(logger, { hint, adopted, endpointId, principalId, candidateCount }) {
+  const decision = adoptionDecision({ hint, adopted });
+  const fields = {
+    event: 'endpoint.register.adoption',
+    params: { hint_present: hint !== null, placeholder_endpoint_id: hint, principal_id: principalId },
+    result: { decision, endpoint_id: adopted ?? endpointId, candidates: candidateCount },
+    status: decision === 'hint_unmatched' ? 'refused' : 'ok',
+  };
+  if (decision === 'none') logger?.debug?.(fields);
+  else if (decision === 'hint_unmatched') logger?.warn?.(fields);
+  else logger?.info?.(fields);
+}
 
 // Everything except launch_mode: a replay must match the prior binding on
 // each of these or it is a conflicting claim (docs/security-model.md).
@@ -216,7 +251,11 @@ const IDENTITY_FIELDS = ['principal_id', 'authority_name', 'authority_reference'
 // The availability decision already owns the new epoch/token.  SessionStart
 // is allowed to advance only the process generation under that durable
 // decision; it must not look at process evidence or mint a second regime.
-function adoptAvailabilityTakeover(db, { endpoint, providerSessionId, launchToken, ownerProcess, now }) {
+//
+// The successor is the daemon's headless child, a new owner: it replaces the
+// host binding with whatever it sent (nothing, since the resumer strips
+// TIGHTBEAM_HOST*), so a headless takeover is never hosted.
+function adoptAvailabilityTakeover(db, { endpoint, providerSessionId, launchToken, ownerProcess, hostName, hostRef, now }) {
   if (endpoint.state !== 'takeover_pending' || launchToken !== endpoint.owner_launch_token) return null;
   const request = db.prepare(
     `SELECT r.id, d.admission_process_generation
@@ -250,7 +289,7 @@ function adoptAvailabilityTakeover(db, { endpoint, providerSessionId, launchToke
   const changed = db.prepare(
     `UPDATE endpoints
         SET state = 'idle', process_generation = process_generation + 1,
-            launch_mode = 'non_interactive',
+            launch_mode = 'non_interactive', host_name = ?, host_ref = ?,
             owner_process_pid = ?, owner_process_start_identity = ?, owner_process_group_id = ?, owner_process_capture_source = ?,
             owner_process_generation = CASE WHEN ? IS NULL THEN NULL ELSE process_generation + 1 END,
             owner_process_exited_at = NULL,
@@ -258,6 +297,7 @@ function adoptAvailabilityTakeover(db, { endpoint, providerSessionId, launchToke
       WHERE id = ? AND state = 'takeover_pending' AND process_generation = ?
         AND provider_session_id IS ? AND owner_epoch = ? AND owner_launch_token = ?`,
   ).run(
+    hostName, hostRef,
     ownerProcess?.pid ?? null, ownerProcess?.start_identity ?? null, ownerProcess?.process_group_id ?? null, ownerProcess?.capture_source ?? null,
     ownerProcess?.pid ?? null, now, endpoint.id, endpoint.process_generation, providerSessionId, endpoint.owner_epoch, launchToken,
   );
@@ -297,7 +337,7 @@ export const endpointRegisterOp = {
     if (typeof principalId !== 'string' || principalId.length === 0) {
       throw new TightbeamError('malformed_request', 'principal_id is required and must be a string', { field: 'principal_id' });
     }
-    for (const field of ['provider_session_id', 'authority_reference', 'launch_token', 'academy_agent_name']) {
+    for (const field of ['provider_session_id', 'authority_reference', 'launch_token', 'academy_agent_name', 'placeholder_endpoint_id', 'host_name', 'host_ref']) {
       const value = payload[field];
       if (value !== undefined && value !== null && typeof value !== 'string') {
         throw new TightbeamError('malformed_request', `${field} must be a string when present`, { field });
@@ -346,9 +386,18 @@ export const endpointRegisterOp = {
     const providerSessionId = payload.provider_session_id ?? null;
     const authorityReference = payload.authority_reference ?? null;
     const launchToken = payload.launch_token ?? null;
+    const placeholderHint = payload.placeholder_endpoint_id || null;
     const academyAgentName = payload.academy_agent_name ?? null;
     if (academyAgentName !== null && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(academyAgentName)) {
       throw new TightbeamError('malformed_request', 'academy_agent_name must be a valid Academy specialist name when present', { field: 'academy_agent_name' });
+    }
+    const hostName = payload.host_name ?? null;
+    const hostRef = payload.host_ref ?? null;
+    if (hostName !== null && !HOST_NAME_PATTERN.test(hostName)) {
+      throw new TightbeamError('malformed_request', 'host_name must be a valid host name when present', { field: 'host_name' });
+    }
+    if (hostRef !== null && !HOST_REF_PATTERN.test(hostRef)) {
+      throw new TightbeamError('malformed_request', 'host_ref must be at most 128 of [A-Za-z0-9._:-] when present', { field: 'host_ref' });
     }
     // The canonicalization contract is injected from the registry snapshot
     // on the context (plan W1 «Canonical ids and legacy equivalence»).
@@ -366,6 +415,7 @@ export const endpointRegisterOp = {
     let candidateCount = 0;
     let watermarkDeliveryId = null;
     let recoveryResumeRequestId = null;
+    let disclosure = null;
     // A takeover token is not a general launch credential.  Before the
     // ordinary insert path can run, fence a SessionStart that presents the
     // rotated token under any identity other than the durable takeover it
@@ -401,12 +451,10 @@ export const endpointRegisterOp = {
         const candidates =
           providerSessionId === null
             ? []
-            : (() => {
-                const storedSpellings = expandStoredRuntimeIds([storedRuntime], acceptedStoredIds);
-                return context.db
-                  .prepare(ADOPTABLE_PLACEHOLDER.replace('__RUNTIME_PLACEHOLDERS__', storedSpellings.map(() => '?').join(',')))
-                  .all(principalId, authorityName, ...storedSpellings, connection.appId);
-              })();
+            : adoptablePlaceholders(context.db, {
+                principalId, authorityName, appId: connection.appId, hint: placeholderHint,
+                storedSpellings: expandStoredRuntimeIds([storedRuntime], acceptedStoredIds),
+              });
         candidateCount = candidates.length;
         if (candidates.length > 0) {
           // The UPDATE re-asserts the two clauses a concurrent writer
@@ -418,6 +466,7 @@ export const endpointRegisterOp = {
           const changed = context.db
             .prepare(
               `UPDATE endpoints SET provider_session_id = ?, state = 'idle', launch_mode = ?, academy_agent_name = COALESCE(academy_agent_name, ?),
+                    host_name = ?, host_ref = ?,
                     process_generation = COALESCE(process_generation, 0) + 1,
                     owner_epoch = owner_epoch + 1, owner_launch_token = ?,
                     owner_process_pid = ?, owner_process_start_identity = ?, owner_process_group_id = ?, owner_process_capture_source = ?,
@@ -426,7 +475,7 @@ export const endpointRegisterOp = {
                 WHERE id = ? AND provider_session_id IS NULL AND state NOT IN ('closed', 'retiring', 'takeover_pending')`,
             )
             .run(
-              providerSessionId, launchMode, academyAgentName, launchToken,
+              providerSessionId, launchMode, academyAgentName, hostName, hostRef, launchToken,
               ownerProcess?.pid ?? null, ownerProcess?.start_identity ?? null, ownerProcess?.process_group_id ?? null, ownerProcess?.capture_source ?? null,
               ownerProcess?.pid ?? null, now, candidates[0].id,
             );
@@ -457,6 +506,32 @@ export const endpointRegisterOp = {
                 .prepare('UPDATE resume_requests SET replacement_session_id = ?, replacement_admitted_at = ?, updated_at = ? WHERE id = ? AND replacement_session_id IS NULL')
                 .run(providerSessionId, now, now, replacement.replacement_for_request_id);
               recoveryResumeRequestId = replacement.id;
+              // Disclosure shares this transaction: a notice-write failure
+              // rolls adoption and lineage back, leaving the same identity
+              // retryable, and a replay never reaches this branch.
+              const disclosureStartedAt = performance.now();
+              try {
+                disclosure = discloseReplacement(context.db, {
+                  appId: connection.appId,
+                  replacementRequestId: replacement.id,
+                  replacementEndpointId: candidates[0].id,
+                  replacementSessionId: providerSessionId,
+                  stateRoot: context.stateRoot,
+                  logger: context.logger,
+                });
+                disclosure.latencyMs = Math.round(performance.now() - disclosureStartedAt);
+              } catch (error) {
+                context.logger?.warn({
+                  event: 'replacement_disclosure',
+                  params: { replacement_endpoint_id: candidates[0].id, replacement_request_id: replacement.id },
+                  status: 'error',
+                  code: error?.code ?? 'internal_error',
+                  error: error?.message,
+                  stack: error?.stack,
+                  latency_ms: Math.round(performance.now() - disclosureStartedAt),
+                });
+                throw error;
+              }
             }
             // Adoption is the first moment a session id exists for this
             // durable row, so refresh its compatibility notification in the
@@ -474,9 +549,9 @@ export const endpointRegisterOp = {
         context.db
           .prepare(
             `INSERT INTO endpoints
-              (id, principal_id, authority_name, provider_session_id, state, runtime, launch_mode, authority_reference, academy_agent_name, created_by_app_id, process_generation, owner_epoch, owner_launch_token,
+              (id, principal_id, authority_name, provider_session_id, state, runtime, launch_mode, authority_reference, academy_agent_name, host_name, host_ref, created_by_app_id, process_generation, owner_epoch, owner_launch_token,
                owner_process_pid, owner_process_start_identity, owner_process_group_id, owner_process_capture_source, owner_process_generation, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           // A session-backed first registration is a live runtime taking
           // ownership: generation 1 and epoch 1. A sessionless placeholder
@@ -485,13 +560,14 @@ export const endpointRegisterOp = {
           // A sessionless placeholder is nobody's launch yet, so it carries
           // no owner token either; the adoption seam above stamps one.
           .run(
-            endpointId, principalId, authorityName, providerSessionId, initialState, storedRuntime, launchMode, authorityReference, academyAgentName, connection.appId,
+            endpointId, principalId, authorityName, providerSessionId, initialState, storedRuntime, launchMode, authorityReference, academyAgentName, hostName, hostRef, connection.appId,
             providerSessionId === null ? null : 1, providerSessionId === null ? 0 : 1, providerSessionId === null ? null : launchToken,
             ownerProcess?.pid ?? null, ownerProcess?.start_identity ?? null, ownerProcess?.process_group_id ?? null, ownerProcess?.capture_source ?? null, ownerProcess ? 1 : null,
             now, now,
           );
         return null;
       });
+      if (providerSessionId !== null) logAdoption(context.logger, { hint: placeholderHint, adopted, endpointId, principalId, candidateCount });
     } catch (err) {
       if (!isUniqueConstraintError(err)) throw err;
       const existing = context.db
@@ -527,6 +603,8 @@ export const endpointRegisterOp = {
         providerSessionId,
         launchToken,
         ownerProcess,
+        hostName,
+        hostRef,
         now,
       }));
       if (takeover) {
@@ -564,6 +642,10 @@ export const endpointRegisterOp = {
         );
       }
       let replayState = existing.state;
+      // A new owner or process generation (revival of a dead row, a different
+      // owner process) replaces the host binding with what it sent, NULL when
+      // nothing; a same-owner replay only fills an absent binding.
+      let bindingReplaced = false;
       if (existing.state === 'dead') {
         const superseded = context.db.prepare(
           `SELECT 1 FROM resume_requests
@@ -593,17 +675,18 @@ export const endpointRegisterOp = {
         context.db
           .prepare(
             `UPDATE endpoints SET state = 'idle', process_generation = COALESCE(process_generation, 0) + 1, owner_epoch = owner_epoch + 1, owner_launch_token = ?,
-                 launch_mode = CASE WHEN ? IS NOT NULL THEN launch_mode ELSE COALESCE(?, launch_mode) END,
+                 launch_mode = CASE WHEN ? IS NOT NULL THEN launch_mode ELSE COALESCE(?, launch_mode) END, host_name = ?, host_ref = ?,
                  owner_process_pid = ?, owner_process_start_identity = ?, owner_process_group_id = ?, owner_process_capture_source = ?,
                  owner_process_generation = CASE WHEN ? IS NULL THEN NULL ELSE COALESCE(process_generation, 0) + 1 END,
                  owner_process_exited_at = NULL, updated_at = ? WHERE id = ? AND state = 'dead'`,
           )
           .run(
-            launchToken, launchToken, launchMode,
+            launchToken, launchToken, launchMode, hostName, hostRef,
             ownerProcess?.pid ?? null, ownerProcess?.start_identity ?? null, ownerProcess?.process_group_id ?? null, ownerProcess?.capture_source ?? null,
             ownerProcess?.pid ?? null, now, existing.id,
           );
         replayState = 'idle';
+        bindingReplaced = true;
         context.logger?.info({
           event: 'endpoint_process_generation_advanced',
           endpoint_id: existing.id,
@@ -632,7 +715,7 @@ export const endpointRegisterOp = {
             `UPDATE endpoints
                 SET owner_process_pid = ?, owner_process_start_identity = ?, owner_process_group_id = ?, owner_process_capture_source = ?,
                     owner_process_generation = process_generation, owner_process_exited_at = NULL,
-                    owner_launch_token = ?,
+                    owner_launch_token = ?, host_name = ?, host_ref = ?,
                     launch_mode = CASE WHEN ? IS NULL OR ? IS NOT NULL THEN launch_mode ELSE ? END,
                     state = CASE WHEN state = 'retiring' THEN 'idle' ELSE state END,
                     updated_at = ?
@@ -640,8 +723,9 @@ export const endpointRegisterOp = {
           )
           .run(
             ownerProcess.pid, ownerProcess.start_identity, ownerProcess.process_group_id, ownerProcess.capture_source,
-            launchToken, launchMode, launchToken, launchMode, now, existing.id, existing.process_generation,
+            launchToken, hostName, hostRef, launchMode, launchToken, launchMode, now, existing.id, existing.process_generation,
           ).changes === 1;
+        bindingReplaced = true;
         if (restamped && existing.state === 'retiring') replayState = 'idle';
         context.logger?.info({
           event: 'endpoint_owner_process_restamped',
@@ -661,6 +745,9 @@ export const endpointRegisterOp = {
       if (academyAgentName !== null) {
         context.db.prepare('UPDATE endpoints SET academy_agent_name = COALESCE(academy_agent_name, ?) WHERE id = ?').run(academyAgentName, existing.id);
       }
+      if (!bindingReplaced && (hostName !== null || hostRef !== null)) {
+        context.db.prepare('UPDATE endpoints SET host_name = COALESCE(host_name, ?), host_ref = COALESCE(host_ref, ?) WHERE id = ?').run(hostName, hostRef, existing.id);
+      }
       const replayRecoveryRequestId = pendingRecoveryRequestForEndpoint(context.db, existing.id);
       return {
         result: {
@@ -673,6 +760,19 @@ export const endpointRegisterOp = {
       };
     }
 
+    if (disclosure !== null) {
+      context.logger?.info({
+        event: 'replacement_disclosure',
+        params: { replacement_endpoint_id: adopted, replacement_request_id: recoveryResumeRequestId },
+        result: { adopted_conversation_count: disclosure.adoptedConversationCount, notice_count: disclosure.noticeCount, delivery_count: disclosure.deliveryCount },
+        status: 'ok',
+        latency_ms: disclosure.latencyMs,
+      });
+      for (const wake of disclosure.wakes) {
+        pushLiveDeliveryEvents(context, { conversationId: wake.conversationId, liveDeliveries: wake.liveDeliveries });
+        for (const presentation of wake.presentations) publishPresentation(context, presentation);
+      }
+    }
     if (adopted !== null) {
       context.logger?.info({
         event: 'endpoint_placeholder_adopted',

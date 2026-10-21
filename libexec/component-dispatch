@@ -10,8 +10,9 @@
 #
 # The payload is verified against release/activation-manifest.json on every
 # run, including runs that reuse the extracted cache, so a package whose
-# payload is later removed or altered fails closed. There is no fallback to
-# PATH or to the lifecycle runtime under install/, which the bootstrap owns.
+# payload is later removed or altered fails closed. On macOS there is no
+# fallback to PATH or to the lifecycle runtime under install/, which the
+# bootstrap owns. Linux has no payload; it runs the system Node (>= 24.20).
 set -eu
 
 fail() {
@@ -33,12 +34,49 @@ case "$component" in
   helm-assignments) entrypoint=scheduling/src/helm-assignments.mjs ;;
   tightbeam) entrypoint=messaging/bin/tightbeam ;;
   tightbeam-daemon) entrypoint=messaging/bin/tightbeam-daemon ;;
+  # Email-intent drafts must work before any email install, so they run on
+  # this verified runtime rather than the lifecycle runtime under install/.
+  email-drafts) entrypoint=src/email-drafts.mjs ;;
+  # Cold status reads capability health before any lifecycle release exists,
+  # so its probe also runs here (install/tldr-agent-bootstrap.sh).
+  tldr-capabilities) entrypoint=src/tldr-capabilities.mjs ;;
+  # Linux setup, status, and repair (no bootstrap there).
+  tldr-linux-setup) entrypoint=src/lib/linux_setup.mjs ;;
   *) fail 64 RUNTIME_COMPONENT_UNKNOWN "unknown component: $component" ;;
 esac
 
 package_root=$(CDPATH= cd -- "$(/usr/bin/dirname -- "$0")/.." && pwd -P) || \
   fail 68 RUNTIME_MANIFEST_MISSING "cannot resolve the package root from $0"
 manifest="${package_root}/release/activation-manifest.json"
+package_root_is_git_worktree() {
+  [ -e "${package_root}/.git" ] && return 0
+  [ -x /usr/bin/git ] || return 1
+  git_top=$(/usr/bin/git -C "$package_root" rev-parse --show-toplevel 2>/dev/null) || return 1
+  git_top=$(CDPATH= cd -- "$git_top" && pwd -P) || return 1
+  [ "$git_top" = "$package_root" ]
+}
+case "$component" in
+  helm-tasks|helm-assignments)
+    if ! package_root_is_git_worktree; then
+      HELM_CANONICAL_CHECKOUT="${package_root}/scheduling"
+      export HELM_CANONICAL_CHECKOUT
+    fi
+    ;;
+esac
+
+# Linux has no release payload: run the system node, held to the engine floor.
+# The macOS payload verification below does not run there.
+if [ "$(uname -s)" = "Linux" ]; then
+  runtime_node=$(command -v node) || \
+    fail 67 RUNTIME_NODE_UNSUPPORTED "node >= 24.20 is not on PATH"
+  "$runtime_node" -e 'const [a, b] = process.versions.node.split(".").map(Number); process.exit(a > 24 || (a === 24 && b >= 20) ? 0 : 1)' || \
+    fail 67 RUNTIME_NODE_UNSUPPORTED "node >= 24.20 is required"
+  if [ "$resolve_only" = 1 ]; then
+    printf 'node=%s\nentrypoint=%s\nsha256=\n' "$runtime_node" "${package_root}/${entrypoint}"
+    exit 0
+  fi
+  exec "$runtime_node" "${package_root}/${entrypoint}" "$@"
+fi
 
 [ "$(/usr/bin/uname -s)/$(/usr/bin/uname -m)" = "Darwin/arm64" ] || \
   fail 67 RUNTIME_ARCHITECTURE_UNSUPPORTED \

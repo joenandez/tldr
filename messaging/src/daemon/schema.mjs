@@ -89,7 +89,7 @@
 import { applyMigrations, listAppliedMigrations } from './migrations.mjs';
 import { reconcileTachyonArmingFromAudit } from './tachyon_arming.mjs';
 
-export const SCHEMA_VERSION = 25;
+export const SCHEMA_VERSION = 28;
 
 // The schema version at which the guarded lifecycle cutover landed. A
 // state document stamped below this version was written by a pre-cutover
@@ -1561,6 +1561,39 @@ export const MIGRATIONS = [
                AND failed.state = 'failed'
                AND failed.failure_reason = 'owner_process_unverified'
           )`).run();
+    },
+  },
+  {
+    // Session-host binding (TIGHTBEAM_HOST / TIGHTBEAM_HOST_REF). Historical
+    // rows stay NULL: Tightbeam never guesses a host for an old session.
+    schemaVersion: 26,
+    apply(db) {
+      db.exec('ALTER TABLE endpoints ADD COLUMN host_name TEXT');
+      db.exec('ALTER TABLE endpoints ADD COLUMN host_ref TEXT');
+    },
+  },
+  {
+    // subagent-safe-delivery W2. `background_wait_at` marks a listener a
+    // headless (non_interactive) session parked only because its Stop
+    // reported background work in flight. Such a session is never tachyon
+    // armed, so the reconciler's unarmed sweep must skip it; NULL is every
+    // ordinary listener.
+    schemaVersion: 27,
+    apply(db) {
+      db.exec('ALTER TABLE listeners ADD COLUMN background_wait_at TEXT');
+    },
+  },
+  {
+    // The resumer tick, the listener reconciler and endpoint.list run
+    // correlated subqueries keyed on these columns. Without an index each
+    // one rescans the whole table per outer row, which kept the daemon's
+    // single thread saturated (557 ms of SQL per 1 s tick at 4.5k
+    // endpoints) and timed out session hooks queued behind it.
+    schemaVersion: 28,
+    apply(db) {
+      db.exec('CREATE INDEX deliveries_endpoint_unread ON deliveries(endpoint_id, read_at)');
+      db.exec('CREATE INDEX resume_requests_endpoint_state ON resume_requests(endpoint_id, state)');
+      db.exec('CREATE INDEX message_effects_obligation_effect ON message_effects(obligation_id, effect)');
     },
   },
 ];

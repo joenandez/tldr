@@ -4,6 +4,7 @@
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
 import { openOldestUnreadAdmission } from './delivery_admission.mjs';
+import { notificationContext } from './notification_context.mjs';
 
 function request(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -44,7 +45,7 @@ export const messageNotificationNextOp = {
         throw new TightbeamError('permission_denied', 'message.notification.next is not granted for this exact endpoint owner');
       }
       const next = openOldestUnreadAdmission(context.db, { endpoint });
-      return next ? { message_id: next.message_id, attempt: next.attempt, has_external_origin: next.has_external_origin } : null;
+      return next ? { message_id: next.message_id, attempt: next.attempt, has_external_origin: next.has_external_origin, ...notificationContext(context.db, next.message_id, { deliveryId: next.delivery_id }) } : null;
     });
     return { result: notification ?? {} };
   },
