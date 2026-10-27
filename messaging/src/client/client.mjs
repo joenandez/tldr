@@ -100,7 +100,8 @@ class TightbeamClient {
 
   _onSocketClosed() {
     this._closed = true;
-    this._failAllPending(this._closeError ?? new Error('connection closed'));
+    // A coded error, like a socket error's, so the CLI prints one line instead of a stack.
+    this._failAllPending(this._closeError ?? Object.assign(new Error('the Tightbeam daemon closed the connection before answering; it may be restarting'), { code: 'connection_closed' }));
   }
 
   _onSocketError(err) {
@@ -148,11 +149,12 @@ class TightbeamClient {
    * credential: { kind: 'app', app_secret } (with appId) or
    * { kind: 'admin', nonce } (appId omitted/null).
    */
-  async handshake({ appId = null, credential, client } = {}) {
+  async handshake({ appId = null, credential, client, agentWaitContext } = {}) {
     if (typeof credential !== 'object' || credential === null || typeof credential.kind !== 'string') {
       throw new Error('handshake requires a credential with a kind');
     }
     const payload = client ? { credential, client } : { credential };
+    if (agentWaitContext !== undefined) payload.agent_wait_context = agentWaitContext;
     const { result, capabilities } = await this._send('protocol.handshake', payload, appId);
     this._appId = result.app_id ?? null;
     this._scope = result.scope;

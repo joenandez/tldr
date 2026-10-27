@@ -40,6 +40,20 @@ const EMAIL = Object.freeze({
   }),
 });
 
+// Slack state is read offline from the credential file and the last observed
+// Slack health; the live check is `tldr-agents status --channel slack`.
+const SLACK = Object.freeze({
+  not_connected: Object.freeze({
+    next_action: "connect-slack",
+    remediation: "tldr-agents setup --channel slack",
+  }),
+  connected: Object.freeze({ next_action: null, remediation: null }),
+  needs_attention: Object.freeze({
+    next_action: "repair-slack",
+    remediation: "tldr-agents repair --channel slack",
+  }),
+});
+
 // The app's disconnect retired the route but the credential is still there:
 // only the app's Retry finishes it; repair would reassert the route.
 const EMAIL_DISCONNECT_UNFINISHED = Object.freeze({
@@ -100,6 +114,7 @@ export function projectCapabilities({
   emailRoutes,
   welcome,
   emailDisconnectPending = false,
+  slack = "not_connected",
 } = {}) {
   const state = emailState({
     nativeStatus,
@@ -119,6 +134,7 @@ export function projectCapabilities({
     : "not_sent";
   return Object.freeze({
     messaging: coreCapability("messaging", messaging),
+    slack: Object.freeze({ state: slack, ...SLACK[slack] }),
     tasks: coreCapability("tasks", tasks),
     email: Object.freeze({
       state,

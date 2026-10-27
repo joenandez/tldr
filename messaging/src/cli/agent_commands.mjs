@@ -13,10 +13,13 @@ import { deriveSessionState, listAgentSessions, SESSION_LIST_LIMIT, SESSION_STAT
 import { launchFailureNotice, listAgentThreads, readAgentThread } from './agent_threads.mjs';
 import { settleNewAgent } from './new_agent.mjs';
 import { resolveAgentIdentity } from './hook_identity.mjs';
+import { mutateActionStore } from './agent_action_store.mjs';
 import { LEGACY_RUNTIME_ALIASES as BUILTIN_RUNTIME_ALIASES } from '../runtimes/builtins.mjs';
 import { localTightbeamAction, offerActionCommands, tightbeamCommandHint, tightbeamRecipeCommand, workActionCommands } from './package_context.mjs';
 import { sessionPaths } from '../protocol/session_paths.mjs';
 import { deliveryStepFor } from '../protocol/delivery_step.mjs';
+import { routeOpenTo } from '../protocol/session_env.mjs';
+import { parseWaitTimeout, readActionStore, waitForAgent } from './agent_wait.mjs';
 
 export class AgentCommandError extends Error {
   constructor(code, message, { details, next_action: nextAction } = {}) {
@@ -28,7 +31,7 @@ export class AgentCommandError extends Error {
 }
 
 const RAW_FLAGS = new Set(['from', 'sender-endpoint', 'process-generation', 'key', 'conversation', 'target-principal', 'target-endpoint', 'obligation', 'generation', 'idempotency-key']);
-const COMMANDS = new Set(['send', 'request', 'reply', 'ack', 'update', 'delegate', 'accept', 'decline', 'complete', 'cancel', 'inbox', 'receive', 'status', 'sessions', 'threads', 'thread']);
+const COMMANDS = new Set(['send', 'request', 'reply', 'ack', 'update', 'delegate', 'accept', 'decline', 'complete', 'cancel', 'inbox', 'receive', 'status', 'sessions', 'threads', 'thread', 'wait']);
 
 /** The help that explains a usage error: the verb's own when it is a known agent verb. */
 function agentHelpCommand(verb) {
@@ -128,40 +131,12 @@ function actionId(value) {
   return randomUUID();
 }
 
+export function bindAgentCommand(session, command) {
+  return command.actionId ? command : { ...command, actionId: actionId(session.runtime_action_id) };
+}
+
 function actionStoreKey(command) {
   return createHash('sha256').update(`${command.command}:${command.actionId}:${invocationFingerprint(command)}`).digest('hex');
-}
-
-function readActionStore(session) {
-  if (!session.agent_action_store_path) return null;
-  try {
-    const parsed = JSON.parse(fs.readFileSync(session.agent_action_store_path, 'utf8'));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) || !parsed.envelopes || typeof parsed.envelopes !== 'object' || Array.isArray(parsed.envelopes)) {
-      throw new Error('malformed action store');
-    }
-    return parsed;
-  } catch (error) {
-    if (error?.code === 'ENOENT') return { envelopes: {} };
-    throw new AgentCommandError('action_identity_unavailable', 'the current session action identity store is unreadable; refusing to risk a duplicate send');
-  }
-}
-
-function writeActionStore(session, store) {
-  if (!session.agent_action_store_path) return;
-  const directory = path.dirname(session.agent_action_store_path);
-  const temporary = `${session.agent_action_store_path}.${process.pid}.${randomUUID()}.tmp`;
-  try {
-    fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-    fs.writeFileSync(temporary, JSON.stringify(store), { mode: 0o600 });
-    fs.renameSync(temporary, session.agent_action_store_path);
-  } catch (error) {
-    try {
-      fs.rmSync(temporary, { force: true });
-    } catch {
-      // Preserve the durable-publication failure below.
-    }
-    throw new AgentCommandError('action_identity_unavailable', `could not persist the current action identity: ${error.message}`);
-  }
 }
 
 export function parseAgentCommand(argv, options = {}) {
@@ -182,10 +157,6 @@ function parseAgentArguments(argv, { actionId: suppliedActionId } = {}) {
   for (const flag of RAW_FLAGS) {
     if (args.some((token) => token === `--${flag}` || token.startsWith(`--${flag}=`))) usage(`--${flag} is not accepted by tightbeam agent commands`);
   }
-
-  // The installed tool hook supplies its trusted action id through the exact
-  // session cache. A direct CLI invocation gets a local UUID later, so an
-  // intentional repeat cannot collide with an earlier command.
   const parsed = { command, actionId: typeof suppliedActionId === 'string' && suppliedActionId.length > 0 ? suppliedActionId : null };
   if (command === 'send' && args.some((token) => token === '--thread' || token.startsWith('--thread='))) {
     parseFollowUp(args, parsed);
@@ -269,6 +240,12 @@ function parseAgentArguments(argv, { actionId: suppliedActionId } = {}) {
     if (parsed.since !== null && Number.isNaN(Date.parse(parsed.since))) usage('--since must be an ISO-8601 time such as 2026-10-07T12:00:00Z');
   } else if (command === 'receive') {
     parsed.messageId = required(args, 'message');
+  } else if (command === 'wait') {
+    try {
+      parsed.timeoutMs = parseWaitTimeout(takeFlag(args, 'timeout'));
+    } catch (error) {
+      usage(error.message, command);
+    }
   } else if (command === 'status') {
     parsed.workId = takeFlag(args, 'work');
     parsed.messageId = takeFlag(args, 'message');
@@ -362,10 +339,9 @@ function newAgentReplay(session, command) {
   const key = actionStoreKey(command);
   return {
     recall: () => store.envelopes[key]?.new_agent ?? null,
-    remember: (placeholder) => {
-      store.envelopes[key] = { ...store.envelopes[key], new_agent: placeholder };
-      writeActionStore(session, store);
-    },
+    remember: (placeholder) => mutateActionStore(session, (current) => {
+      current.envelopes[key] = { ...current.envelopes[key], new_agent: placeholder };
+    }),
   };
 }
 
@@ -377,8 +353,13 @@ async function resolveAgent(client, session, target, { verb, command }) {
 
 async function selectedOutboundChannels(client, channels) {
   validateChannelSelection(channels);
+  // ACADEMY_AGENT_NAME is the name the session's hook registered.
+  const name = process.env.ACADEMY_AGENT_NAME;
+  if (!routeOpenTo('slack', name) && channels.includes('slack')) {
+    throw new AgentCommandError('slack_named_agents_only', 'Slack is for Academy agents. This session has no agent name.');
+  }
   const catalog = await client.request('channel.route.list', { available_only: true, required_capability: 'send' });
-  const available = (catalog.routes ?? []).map((route) => route.selector).filter((selector) => typeof selector === 'string' && selector.length > 0);
+  const available = (catalog.routes ?? []).map((route) => route.selector).filter((selector) => typeof selector === 'string' && selector.length > 0 && routeOpenTo(selector, name));
   const requested = channels.length === 0 || channels.includes('all') ? available : [...new Set(channels)].sort();
   if (requested.length === 0) {
     throw new AgentCommandError('no_outbound_channels', 'no active send-capable channel routes are available');
@@ -403,10 +384,9 @@ async function conversationFor(client, session, targetPrincipalId, command = nul
     participant_principal_ids: [...new Set([session.principal_id, targetPrincipalId])],
     metadata: { subject: command.subject, reason: command.reason },
   });
-  if (key) {
-    store.envelopes[key] = { ...store.envelopes[key], target_principal_id: targetPrincipalId, conversation_id: conversation.conversation_id };
-    writeActionStore(session, store);
-  }
+  if (key) mutateActionStore(session, (current) => {
+    current.envelopes[key] = { ...current.envelopes[key], target_principal_id: targetPrincipalId, conversation_id: conversation.conversation_id };
+  });
   return conversation;
 }
 
@@ -661,17 +641,16 @@ function selectOfferedDelegation(chain, session, requestedWorkId) {
 }
 
 function handoffDeadline(session, command) {
-  const store = readActionStore(session);
-  if (!store) return new Date(Date.now() + 5 * 60_000).toISOString();
   const key = actionStoreKey(command);
-  const existing = store.envelopes[key];
-  if (typeof existing?.acceptance_deadline_at === 'string' && !Number.isNaN(Date.parse(existing.acceptance_deadline_at))) {
-    return existing.acceptance_deadline_at;
-  }
-  const acceptanceDeadlineAt = new Date(Date.now() + 5 * 60_000).toISOString();
-  store.envelopes[key] = { acceptance_deadline_at: acceptanceDeadlineAt };
-  writeActionStore(session, store);
-  return acceptanceDeadlineAt;
+  return mutateActionStore(session, (store) => {
+    const existing = store.envelopes[key];
+    if (typeof existing?.acceptance_deadline_at === 'string' && !Number.isNaN(Date.parse(existing.acceptance_deadline_at))) {
+      return existing.acceptance_deadline_at;
+    }
+    const acceptanceDeadlineAt = new Date(Date.now() + 5 * 60_000).toISOString();
+    store.envelopes[key] = { ...existing, acceptance_deadline_at: acceptanceDeadlineAt };
+    return acceptanceDeadlineAt;
+  }) ?? new Date(Date.now() + 5 * 60_000).toISOString();
 }
 
 function shortSessionId(session) {
@@ -858,6 +837,7 @@ function receiveRefusal(error) {
 }
 
 async function runAgentCommandOnce(client, session, command) {
+  if (command.command === 'wait') return waitForAgent(client, session, { actionId: command.actionId, timeoutMs: command.timeoutMs });
   if (command.command === 'sessions') return listAgentSessions(client, session, command);
   if (command.command === 'send' && command.thread) return sendFollowUp(client, session, command);
   if (command.command === 'threads') return listAgentThreads(client, session, command);
@@ -995,16 +975,16 @@ async function runAgentCommandOnce(client, session, command) {
     } catch (error) {
       throw receiveOrderRefusal(error, command.messageId) ?? receiveRefusal(error) ?? error;
     }
-    const offer = typeof result.delegation_id === 'string' ? offerActionCommands(result.delegation_id) : null;
+    const offer = typeof result.delegation_id === 'string' ? offerActionCommands(result.delegation_id, session.recipe_prefix) : null;
     // F23: held work names its work id; these are the commands that use it.
-    const work = typeof result.work_id === 'string' ? workActionCommands(result.work_id) : null;
+    const work = typeof result.work_id === 'string' ? workActionCommands(result.work_id, session.recipe_prefix) : null;
     return {
       outcome: 'committed',
       ...result,
       ...(offer ? { accept_command: offer.accept, decline_command: offer.decline } : {}),
       ...(work ? { update_command: work.update, complete_command: work.complete, delegate_command: work.delegate } : {}),
       ...(work && result.ack_pending === true ? { ack_command: work.ack } : {}),
-      acknowledge_command: `${tightbeamRecipeCommand()} ack ${result.message_id} --endpoint ${session.endpoint_id} --generation ${session.process_generation}`,
+      acknowledge_command: `${session.recipe_prefix ?? tightbeamRecipeCommand()} ack ${result.message_id} --endpoint ${session.endpoint_id} --generation ${session.process_generation}`,
     };
   }
   if (command.command === 'ack') {
@@ -1139,7 +1119,7 @@ async function runAgentCommandOnce(client, session, command) {
  * logical commit. Other conflicts remain canonical daemon errors.
  */
 export async function runAgentCommand(client, session, command, { refreshSession } = {}) {
-  const boundCommand = command.actionId ? command : { ...command, actionId: actionId(session.runtime_action_id) };
+  const boundCommand = bindAgentCommand(session, command);
   let result;
   try {
     result = await runAgentCommandOnce(client, session, boundCommand);
@@ -1152,7 +1132,7 @@ export async function runAgentCommand(client, session, command, { refreshSession
     if (error?.code === 'permission_denied' && command.command === 'status' && command.messageId) {
       throw new AgentCommandError(error.code, 'Delivery status is available for messages sent by this application. Use the outbound message_id returned by reply/complete, or agent status --work <work-id>; an inbound message ID is not a delivery receipt.');
     }
-    if (!refreshSession || !staleGenerationConflict(error)) throw error;
+    if (command.command === 'wait' || !refreshSession || !staleGenerationConflict(error)) throw error;
     const refreshed = await refreshSession();
     result = await runAgentCommandOnce(client, refreshed, boundCommand);
   }

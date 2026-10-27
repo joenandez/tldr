@@ -65,20 +65,18 @@ function reconciliationDebug(fields) {
  * The grant set a hook-driven agent session actually needs, derived from
  * the op table (src/daemon/ops/registry.mjs) rather than guessed:
  *
- *   register_endpoints        principal.register, endpoint.register,
- *                             endpoint.state.set, session.stop  (hooks)
+ *   register_endpoints        principal.register, endpoint.register, endpoint.state.set, session.stop  (hooks)
  *   read_inbox                inbox.list, message.read          (hooks)
  *   send_as_principal         conversation.create, message.commit
  *   acknowledge_delivery      message.acknowledge
  *   manage_obligations        lifecycle.view, recovery.*
  *   read_health               daemon.status, capabilities.list, migration.status
+ *   claim_resume_requests     resume.assert-active (Academy's managed Copilot wake checks its own claim), scoped to package-bound Copilot runtimes
  *
- * The two authority-scoped grants carry an explicit allow-list because a
- * null list denies every authority (src/daemon/ops/authority_scope.mjs).
- * That fail-closed rule is correct and stays; this just stops it from
- * being a trap nobody was warned about.
+ * The two authority-scoped grants carry an explicit allow-list because a null list denies every authority (src/daemon/ops/authority_scope.mjs).
+ * That fail-closed rule is correct and stays; this just stops it from being a trap nobody was warned about.
  */
-export function agentPermissionGrants(authorityName, runtimeTypes) {
+export function agentPermissionGrants(authorityName, runtimeTypes, wakeRuntimeTypes = []) {
   return [
     { permission: 'register_endpoints', allowed_authorities: [authorityName], allowed_runtime_types: [...runtimeTypes] },
     { permission: 'send_as_principal', allowed_authorities: [authorityName] },
@@ -86,6 +84,7 @@ export function agentPermissionGrants(authorityName, runtimeTypes) {
     { permission: 'acknowledge_delivery' },
     { permission: 'manage_obligations' },
     { permission: 'read_health' },
+    ...(wakeRuntimeTypes.length > 0 ? [{ permission: 'claim_resume_requests', allowed_runtime_types: [...wakeRuntimeTypes] }] : []),
   ];
 }
 
@@ -507,6 +506,7 @@ export async function bootstrap({
   stateRoot,
   socketPath,
   runtimeTypes,
+  wakeRuntimeTypes = [],
   appName = DEFAULT_APP_NAME,
   authorityName = DEFAULT_AUTHORITY_NAME,
   force = false,
@@ -530,7 +530,7 @@ export async function bootstrap({
       const credentials = readHookCredentials(stateRoot);
       const daemon = await ensureDaemon(stateRoot, socketPath);
       const existingGrants = await existingApplicationGrants(stateRoot, credentials);
-      const requiredGrants = agentPermissionGrants(credentials.authority_name, runtimeTypes);
+      const requiredGrants = agentPermissionGrants(credentials.authority_name, runtimeTypes, wakeRuntimeTypes);
       const reconciledGrants = mergeAgentPermissionGrants(existingGrants, requiredGrants);
       const drift = !samePermissionGrants(existingGrants, reconciledGrants);
       reconciliationDebug({ event: 'grant_drift_checked', app_id: credentials.app_id, drift });
@@ -566,7 +566,7 @@ export async function bootstrap({
 
       const authorityState = await registerAuthority(client, authorityName);
       const application = await registerApplication(client, appName);
-      const grants = agentPermissionGrants(authorityName, runtimeTypes);
+      const grants = agentPermissionGrants(authorityName, runtimeTypes, wakeRuntimeTypes);
       await client.request('application.permissions.set', { app_id: application.app_id, permissions: grants });
 
       const credentialsFile = writeCredentials(stateRoot, {

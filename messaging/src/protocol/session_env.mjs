@@ -29,3 +29,7 @@ export function withoutSessionEnv(env) {
   return Object.fromEntries(Object.entries(env).filter(([name]) =>
     !SESSION_ENV_NAMES.has(name) && !SESSION_ENV_PREFIXES.some((prefix) => name.startsWith(prefix))));
 }
+
+// Slack is for Academy agents only (tldr, 2026-10-26): a session with no
+// Academy agent name neither sees nor selects the slack route.
+export const routeOpenTo = (selector, academyAgentName) => selector !== 'slack' || Boolean(academyAgentName);

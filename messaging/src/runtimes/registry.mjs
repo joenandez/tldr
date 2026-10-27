@@ -17,6 +17,7 @@
 //   views from records handed to it.
 
 import { BUILTIN_RUNTIMES, CANONICAL_RUNTIME_IDS, LEGACY_RUNTIME_ALIASES } from './builtins.mjs';
+import { admitCopilotHookContract, COPILOT_CAPABILITY_FIELDS, COPILOT_SETTINGS_PATH_RULE, isCopilotHooksPath, parseManifestCapabilities } from './copilot_contract.mjs';
 
 // ---------------------------------------------------------------------------
 // Manifest v1 parsing (strict).
@@ -67,6 +68,7 @@ export const MANIFEST_ERROR_CODES = Object.freeze([
   'array_length_limit',
   'duplicate_marker',
   'invalid_field',
+  'unsupported_settings_path',
 ]);
 
 const TOP_LEVEL_FIELDS = new Set([
@@ -227,8 +229,9 @@ export function parseRuntimeManifest(input, { registeredCount = 0, maxRegistered
   let rejection = rejectUnknownKeys(document, TOP_LEVEL_FIELDS, '');
   if (rejection !== null) return rejection;
 
-  if (document.contractVersion !== '1.0') {
-    return manifestRejection('unsupported_contract_version', `contractVersion must be exactly "1.0", got ${JSON.stringify(document.contractVersion ?? null)}`, 'contractVersion');
+  const contractVersion = document.contractVersion;
+  if (contractVersion !== '1.0' && contractVersion !== '1.1') {
+    return manifestRejection('unsupported_contract_version', `contractVersion must be "1.0" or "1.1", got ${JSON.stringify(contractVersion ?? null)}`, 'contractVersion');
   }
   if (!isSafeRuntimeId(document.id)) {
     return manifestRejection('unsafe_runtime_id', `runtime id ${JSON.stringify(document.id ?? null)} is not lowercase kebab-case within ${MANIFEST_BOUNDS.maxIdLength} characters`, 'id');
@@ -240,6 +243,9 @@ export function parseRuntimeManifest(input, { registeredCount = 0, maxRegistered
   }
   if (strategy !== 'daemon' && strategy !== 'external') {
     return manifestRejection('invalid_resume_strategy', `resumeStrategy must be "daemon" or "external", got ${JSON.stringify(strategy)}`, 'resumeStrategy');
+  }
+  if (contractVersion === '1.1' && strategy !== 'external') {
+    return manifestRejection('unsupported_contract_version', 'contractVersion "1.1" supports external runtimes only', 'contractVersion');
   }
 
   // Strategy split (plan W1 «Two integration classes, represented
@@ -300,36 +306,24 @@ export function parseRuntimeManifest(input, { registeredCount = 0, maxRegistered
     rejection = rejectBoundedString(document.hooksInstall[field], `hooksInstall.${field}`);
     if (rejection !== null) return rejection;
   }
+  if (contractVersion === '1.1' && document.hooksInstall.format !== 'copilot-json') {
+    return manifestRejection('invalid_field', 'contractVersion "1.1" requires hooksInstall.format "copilot-json"', 'hooksInstall.format');
+  }
+  if (contractVersion === '1.1' && !isCopilotHooksPath(document.hooksInstall.settingsPath)) {
+    return manifestRejection('unsupported_settings_path', COPILOT_SETTINGS_PATH_RULE, 'hooksInstall.settingsPath');
+  }
 
   if (!hasOwn(document, 'capabilities')) return manifestRejection('missing_required_field', 'capabilities is required', 'capabilities');
   if (!isPlainObject(document.capabilities)) return manifestRejection('invalid_field', 'capabilities must be an object', 'capabilities');
-  rejection = rejectUnknownKeys(document.capabilities, CAPABILITY_FIELDS, 'capabilities.');
+  rejection = rejectUnknownKeys(document.capabilities, contractVersion === '1.1' ? COPILOT_CAPABILITY_FIELDS : CAPABILITY_FIELDS, 'capabilities.');
   if (rejection !== null) return rejection;
-  if (!hasOwn(document.capabilities, 'stdoutInjection')) {
-    return manifestRejection('missing_required_field', 'capabilities.stdoutInjection is required', 'capabilities.stdoutInjection');
-  }
-  if (typeof document.capabilities.stdoutInjection !== 'boolean') {
-    return manifestRejection('invalid_field', 'capabilities.stdoutInjection must be a boolean', 'capabilities.stdoutInjection');
-  }
-  if (!hasOwn(document.capabilities, 'blockExitCodes')) {
-    return manifestRejection('missing_required_field', 'capabilities.blockExitCodes is required', 'capabilities.blockExitCodes');
-  }
-  const blockExitCodes = document.capabilities.blockExitCodes;
-  if (!Array.isArray(blockExitCodes)) {
-    return manifestRejection('invalid_field', 'capabilities.blockExitCodes must be an array of non-negative integers', 'capabilities.blockExitCodes');
-  }
-  if (blockExitCodes.length > MANIFEST_BOUNDS.maxBlockExitCodes) {
-    return manifestRejection('array_length_limit', `capabilities.blockExitCodes exceeds ${MANIFEST_BOUNDS.maxBlockExitCodes} entries`, 'capabilities.blockExitCodes');
-  }
-  for (const exitCode of blockExitCodes) {
-    if (!Number.isSafeInteger(exitCode) || exitCode < 0) {
-      return manifestRejection('invalid_field', 'capabilities.blockExitCodes entries must be non-negative integers', 'capabilities.blockExitCodes');
-    }
-  }
-  const idleWake = hasOwn(document.capabilities, 'idleWake') ? document.capabilities.idleWake : DEFAULT_IDLE_WAKE;
-  if (!IDLE_WAKE_MODES.includes(idleWake)) {
-    return manifestRejection('invalid_field', `capabilities.idleWake must be ${IDLE_WAKE_MODES.map((mode) => `"${mode}"`).join(' or ')}`, 'capabilities.idleWake');
-  }
+  const parsedCapabilities = parseManifestCapabilities(document.capabilities, contractVersion, {
+    defaultIdleWake: DEFAULT_IDLE_WAKE,
+    idleWakeModes: IDLE_WAKE_MODES,
+    maxBlockExitCodes: MANIFEST_BOUNDS.maxBlockExitCodes,
+  });
+  if (!parsedCapabilities.ok) return parsedCapabilities;
+  const { stdoutInjection, blockExitCodes, idleWake, hookEffects } = parsedCapabilities.capabilities;
 
   // Origin is loader-known metadata, mirroring builtins.mjs; it is never
   // adapter-authored (rejected above as unknown_field) and never serialized.
@@ -337,7 +331,7 @@ export function parseRuntimeManifest(input, { registeredCount = 0, maxRegistered
     ok: true,
     record: Object.freeze({
       id: document.id,
-      contractVersion: '1.0',
+      contractVersion,
       origin: 'manifest',
       resumeStrategy: strategy,
       ...(strategy === 'daemon'
@@ -357,9 +351,10 @@ export function parseRuntimeManifest(input, { registeredCount = 0, maxRegistered
         format: document.hooksInstall.format,
       }),
       capabilities: Object.freeze({
-        stdoutInjection: document.capabilities.stdoutInjection,
+        stdoutInjection,
         blockExitCodes: Object.freeze([...blockExitCodes]),
         idleWake,
+        ...(hookEffects === undefined ? {} : { hookEffects }),
       }),
     }),
   };
@@ -386,6 +381,10 @@ export const HOOK_ADMISSION_ERROR_CODES = Object.freeze([
   'unsupported_hooks_format',
   'unsupported_stdout_injection',
   'unsupported_block_exit_codes',
+  'unsupported_contract_version',
+  'unsupported_settings_path',
+  'unsupported_idle_wake',
+  'unsupported_hook_effects',
 ]);
 
 /**
@@ -396,6 +395,7 @@ export const HOOK_ADMISSION_ERROR_CODES = Object.freeze([
  * the manifest without reading our code.
  */
 export function admitHookContract(record) {
+  if (record?.contractVersion === '1.1') return admitCopilotHookContract(record);
   const format = record?.hooksInstall?.format;
   if (format !== SUPPORTED_HOOK_FORMAT) {
     return {

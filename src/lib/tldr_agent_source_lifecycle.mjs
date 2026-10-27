@@ -33,10 +33,8 @@ import {
   readCapturedPreSplitSource,
   readVerifiedInstalledPreSplitSource,
 } from "./tldr_agent_presplit_evidence.mjs";
-import {
-  HELM_LAUNCHD_LABELS,
-  createProductStateRemoval,
-} from "./tldr_agent_product_removal.mjs";
+import { createProductStateRemoval } from "./tldr_agent_product_removal.mjs";
+import { waitForHelmLaunchdServices } from "./tldr_agent_helm_service_wait.mjs";
 import {
   SOURCE_ROOT,
   TLDR_AGENT_STATUS_PORT,
@@ -60,8 +58,6 @@ const ACTIVATABLE_AEGIS_STATES = new Set([
   "pending_verification",
   "unconfigured",
 ]);
-const HELM_SERVICE_START_TIMEOUT_MS = 45_000;
-const HELM_SERVICE_POLL_INTERVAL_MS = 1_000;
 
 function logLifecycle(level, event, params) {
   const ts = new Date().toISOString();
@@ -287,54 +283,13 @@ export function createTldrAgentSourceInstallLifecycle({
       }
       try {
         runHelmLifecycleCommand(["service", "update"]);
-        // launchctl often reports a freshly bootstrapped service before the
-        // ThrottleInterval restart loop has settled, so the source lifecycle
-        // waits across the retained service window before accepting Helm.
-        const deadline = now() + HELM_SERVICE_START_TIMEOUT_MS;
-        for (const { label, script } of HELM_LAUNCHD_LABELS) {
-          const target = `gui/${process.getuid()}/${label}`;
-          const expectedScript = join(SOURCE_ROOT, script);
-          const startedAt = now();
-          let attempts = 0;
-          for (;;) {
-            attempts += 1;
-            const status = commandRunner("launchctl", ["print", target], {
-              encoding: "utf8",
-            });
-            const output = `${status?.stdout || ""}${status?.stderr || ""}`;
-            const running =
-              Number(status?.status ?? 1) === 0 &&
-              /state = running\b/u.test(output) &&
-              /pid = [1-9]\d*\b/u.test(output);
-            if (
-              running &&
-              output.includes(nodePath) &&
-              output.includes(expectedScript)
-            ) {
-              if (attempts > 1) {
-                logLifecycle("info", "helm_service_start_waited", {
-                  label,
-                  attempts,
-                  latency_ms: now() - startedAt,
-                });
-              }
-              break;
-            }
-            if (now() >= deadline) {
-              logLifecycle("error", "helm_service_start_timeout", {
-                label,
-                attempts,
-                running,
-                latency_ms: now() - startedAt,
-              });
-              throw new Error(
-                `Helm launchd service ${label} is not running from the active source and packaged Node`,
-              );
-            }
-            // eslint-disable-next-line no-await-in-loop -- launchd restart polling is sequential.
-            await sleep(HELM_SERVICE_POLL_INTERVAL_MS);
-          }
-        }
+        await waitForHelmLaunchdServices({
+          commandRunner,
+          nodePath,
+          now,
+          sleep,
+          log: logLifecycle,
+        });
       } catch (error) {
         helmServiceUpdateRefused = true;
         if (!error.code) error.code = "helm_service_update_failed";

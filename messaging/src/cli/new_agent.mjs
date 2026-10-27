@@ -32,11 +32,13 @@ function expandHome(cwd) {
 
 // The real path: the spawned runtime reports its cwd resolved, and the
 // placeholder's principal ref must be the one its SessionStart registers.
+// `.native` also returns the on-disk case on a case-insensitive volume, as
+// getcwd does; the JS realpath keeps the typed case and adoption never matches.
 function existingFolder(cwd) {
   const expanded = expandHome(cwd);
   if (!path.isAbsolute(expanded)) return null;
   try {
-    return fs.statSync(expanded).isDirectory() ? fs.realpathSync(expanded) : null;
+    return fs.statSync(expanded).isDirectory() ? fs.realpathSync.native(expanded) : null;
   } catch {
     return null;
   }

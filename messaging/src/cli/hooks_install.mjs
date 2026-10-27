@@ -34,17 +34,11 @@
 //     file's current bytes is the only way to guarantee it.
 
 import {
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
   rmSync,
-  writeFileSync,
 } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { randomBytes } from 'node:crypto';
 
 // The runtime leaf is shared truth (the architecture contract §5): every runtime
 // this installer touches — target set, settings paths, admission gates —
@@ -54,6 +48,9 @@ import { randomBytes } from 'node:crypto';
 import { admitHookContract, createRuntimeRegistry, DEFAULT_IDLE_WAKE, HOOK_ADMISSION_ERROR_CODES, IDLE_WAKE_MODES } from '../runtimes/registry.mjs';
 import { REPLY_BINDING_POLICY } from '../protocol/reply_listener_policy.mjs';
 import { unifiedPackageFrontDoorPath, unifiedPackageTightbeamPath } from './package_context.mjs';
+import { hookInstallRuntimeIds, installCopilotHooks, planCopilotHookRollback } from './copilot_hooks_install.mjs';
+import { isCopilotPluginHooksPath } from '../runtimes/copilot_contract.mjs';
+import { atomicWriteHookSettings, readHookSettings, serializeHookSettings } from './hooks_install_io.mjs';
 
 export { admitHookContract, HOOK_ADMISSION_ERROR_CODES };
 
@@ -100,15 +97,14 @@ export const HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'Stop', 'PreTool
 // Codex only: subagent lifetimes for the Stop hold's pending-bg record.
 // APPENDED, so the five entries users already trusted keep their positions.
 export const CODEX_HOOK_EVENTS = [...HOOK_EVENTS, 'SubagentStart', 'SubagentStop'];
-const STOP_TIMEOUT_SECONDS = Math.ceil(REPLY_BINDING_POLICY.maxParkMs / 1000) + 60;
+const STOP_GUARD_TIMEOUT_SECONDS = 30;
+const STOP_LISTENER_TIMEOUT_SECONDS = Math.ceil(REPLY_BINDING_POLICY.maxParkMs / 1000) + 60;
 // The background-hook gate only decides block/park/allow and hands off; it
 // is synchronous, so a long timeout would hold the host's input queue again.
-const STOP_GATE_TIMEOUT_SECONDS = 60;
 
 // How a waiting message reaches an idle session (runtime record
 // capabilities.idleWake; modes and default are the registry's). Records that
 // declare nothing hold the Stop hook.
-
 function requireIdleWake(idleWake) {
   if (IDLE_WAKE_MODES.includes(idleWake)) return idleWake;
   throw namedError(
@@ -231,13 +227,13 @@ function directHookCommand(verb, { packageRoot = path.resolve(repoRoot(), '..'),
 // behind a parked Stop hook.
 function backgroundWakeStopHooks(options) {
   return [
-    { type: 'command', command: directHookCommand('stop --handoff', options), timeout: STOP_GATE_TIMEOUT_SECONDS, _tightbeam: BACKGROUND_WAKE_MARKER },
+    { type: 'command', command: directHookCommand('stop --handoff --wait-mode explicit', options), timeout: STOP_GUARD_TIMEOUT_SECONDS, _tightbeam: BACKGROUND_WAKE_MARKER },
     {
       type: 'command',
       command: directHookCommand('wake-listen', options),
       async: true,
       asyncRewake: true,
-      timeout: STOP_TIMEOUT_SECONDS,
+      timeout: STOP_LISTENER_TIMEOUT_SECONDS,
       _tightbeam: BACKGROUND_WAKE_MARKER,
     },
   ];
@@ -246,13 +242,13 @@ function backgroundWakeStopHooks(options) {
 // Claude Code's canonical hooks structure, which Codex 0.148.0 reads
 // unchanged from ~/.codex/hooks.json:
 //   { "hooks": { "<Event>": [ { "hooks": [ { "type": "command", ... } ] } ] } }
-// Only Stop varies by `options.idleWake`; stop-hold keeps its exact
-// historical bytes (key order included), which Codex trust depends on.
+// Refreshed Stop selects explicit waiting; background-hook also keeps its
+// handoff lane; stable positions preserve sibling Codex trust, not changed commands.
 export function buildHookGroup(event, options = {}) {
   const idleWake = event === 'Stop' ? requireIdleWake(options.idleWake ?? DEFAULT_IDLE_WAKE) : null;
   if (idleWake === 'background-hook') return { hooks: backgroundWakeStopHooks(options) };
-  const hook = { type: 'command', command: hookCommandFor(event, options), _tightbeam: TIGHTBEAM_MARKER };
-  if (event === 'Stop') hook.timeout = STOP_TIMEOUT_SECONDS;
+  const hook = { type: 'command', command: event === 'Stop' ? directHookCommand('stop --wait-mode explicit', options) : hookCommandFor(event, options), _tightbeam: TIGHTBEAM_MARKER };
+  if (event === 'Stop') hook.timeout = STOP_GUARD_TIMEOUT_SECONDS;
   return { hooks: [hook] };
 }
 
@@ -309,40 +305,6 @@ export function shiftedCodexTrustKeys(file, settingsValue, { recognizedCommands 
     }
   }
   return keys;
-}
-
-function readSettings(file) {
-  if (!existsSync(file)) return { exists: false, raw: null, value: {} };
-  const raw = readFileSync(file, 'utf8');
-  try {
-    const value = JSON.parse(raw);
-    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('not a JSON object');
-    return { exists: true, raw, value };
-  } catch (err) {
-    throw new Error(`failed to parse ${file}: ${err.message}`);
-  }
-}
-
-function serialize(value) {
-  return `${JSON.stringify(value, null, 2)}\n`;
-}
-
-/**
- * Temp-then-rename inside the destination directory, so the rename is
- * atomic on the same filesystem: a crash mid-install can leave a stray
- * temp file but never a truncated settings.json, which is the user's file
- * and breaks their whole runtime if corrupted.
- */
-function atomicWrite(file, contents) {
-  mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = `${file}.${randomBytes(4).toString('hex')}.tmp`;
-  try {
-    writeFileSync(tmp, contents, 'utf8');
-    renameSync(tmp, file);
-  } catch (err) {
-    rmSync(tmp, { force: true });
-    throw err;
-  }
 }
 
 /**
@@ -459,10 +421,13 @@ export function bootstrapHooks({ action, runtime = null, dryRun = false, home = 
     if (runtime === null) {
       throw namedError('settings_file_requires_runtime', '--settings-file requires --runtime <id> to name the stranded runtime');
     }
+    if (isCopilotPluginHooksPath(settingsFile)) {
+      throw namedError('copilot_plugin_source_owned', `${settingsFile} is a source-owned Copilot plugin artifact; unregister its runtime instead of editing it`);
+    }
   }
 
   const activeRegistry = registry ?? builtinOnlyRegistry();
-  const requestedIds = settingsFile !== undefined ? [runtime] : runtime === null ? activeRegistry.names() : [runtime];
+  const requestedIds = hookInstallRuntimeIds(activeRegistry, { action, runtime, settingsFile });
 
   // Phase 1 — resolve and admit everything. Nothing below this loop writes.
   const targets = [];
@@ -493,11 +458,13 @@ export function bootstrapHooks({ action, runtime = null, dryRun = false, home = 
     }
     // Resolved here, before any write, so a mode the installer cannot shape
     // refuses the whole invocation like any other admission failure.
-    targets.push({ id: record.id, record, file, idleWake: recordIdleWake(record) });
+    targets.push({ id: record.id, record, file });
   }
 
   const report = [];
-  for (const { id, record, file, idleWake } of targets) {
+  for (const { id, record, file } of targets) {
+    if (installCopilotHooks({ action, id, record, file, packageRoot, dryRun, report })) continue;
+    const idleWake = record === null ? undefined : recordIdleWake(record);
     const options = {
       packageRoot,
       runtimeBinding: record !== null && record.origin !== 'builtin' ? id : undefined,
@@ -506,10 +473,24 @@ export function bootstrapHooks({ action, runtime = null, dryRun = false, home = 
       recognizedCommands,
       idleWake,
     };
-    const settings = readSettings(file);
+    const originalSettings = readHookSettings(file);
+    const copilotRollback = settingsFile !== undefined
+      ? planCopilotHookRollback(originalSettings)
+      : null;
+    const settings = copilotRollback === null
+      ? originalSettings
+      : { ...originalSettings, value: copilotRollback.next };
     const { next, changes } = planChanges(settings, action, options);
-    const contents = serialize(next);
-    const entry = { runtime: id, file, settings_existed: settings.exists, changes };
+    const contents = serializeHookSettings(next);
+    const entry = {
+      runtime: id,
+      file,
+      settings_existed: settings.exists,
+      changes: [
+        ...(copilotRollback?.changes.filter((change) => change.op === 'remove') ?? []),
+        ...changes,
+      ],
+    };
     if (idleWake !== undefined) entry.idle_wake = idleWake;
     if (action === 'uninstall' && id === 'codex') {
       // Codex trust records live in config.toml keyed by index; that
@@ -532,7 +513,7 @@ export function bootstrapHooks({ action, runtime = null, dryRun = false, home = 
     } else if (!settings.exists && Object.keys(next).length === 0) {
       entry.status = 'absent';
     } else {
-      atomicWrite(file, contents);
+      atomicWriteHookSettings(file, contents);
       entry.status = 'written';
     }
     report.push(entry);

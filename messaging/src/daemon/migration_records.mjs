@@ -56,6 +56,7 @@
 
 import { createHash } from 'node:crypto';
 import { validateStoredChannelRouteDescriptor } from './channel_route_contract.mjs';
+import { invalidAcademyField } from './copilot_wake.mjs';
 import { ownerProcessTupleIsAbsent, ownerProcessTupleIssue, sameOwnerProcessTuple } from './owner_process_contract.mjs';
 
 // The tables a state movement deliberately leaves behind, each with the
@@ -174,7 +175,7 @@ export const TABLE_COLUMNS = Object.freeze({
     'owner_process_exited_at',
     // Schema 26 records the session host a session was spawned under.
     'host_name',
-    'host_ref',
+    'host_ref', 'academy_permission_mode', // Schema 29: the Academy mode a Copilot owner launched under
   ],
   channel_routes: [
     'id',
@@ -1111,11 +1112,8 @@ export function findInvalidEndpointRetirement(records) {
 export function findInvalidAcademyAgentName(records, { schemaVersion }) {
   if (schemaVersion < 24) return null;
   for (const endpoint of records.endpoints ?? []) {
-    const name = endpoint.academy_agent_name;
-    if (name === null || name === undefined) continue;
-    if (typeof name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(name)) {
-      return `endpoint "${endpoint.id}" has an invalid academy_agent_name`;
-    }
+    const field = invalidAcademyField(endpoint);
+    if (field) return `endpoint "${endpoint.id}" has an invalid ${field}`;
   }
   return null;
 }

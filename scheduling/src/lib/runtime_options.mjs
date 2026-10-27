@@ -25,7 +25,7 @@ export const RUNTIME_OPTION_FIELDS = Object.freeze([
   "permission_mode",
 ]);
 
-export const ASSIGNMENTS_CONTRACT_VERSION = "1.2";
+export const ASSIGNMENTS_CONTRACT_VERSION = "1.3";
 export const ASSIGNMENTS_CAPABILITIES = Object.freeze([
   "assignments.list.all-scopes",
   "assignments.runs.all-scopes",
@@ -35,6 +35,7 @@ export const ASSIGNMENTS_CAPABILITIES = Object.freeze([
   "assignments.completion-delivery",
   "assignments.logs.json",
   "tasks.events.daemon",
+  "assignments.academy-copilot-start.v1",
 ]);
 
 export const RUNTIME_OPTION_FLAGS = Object.freeze({
@@ -52,6 +53,11 @@ const enumerated = (values, render, defaultValue = null) => ({
 
 const CLAUDE_MODELS = Object.freeze(["claude-opus-4-1", "claude-sonnet-4-5"]);
 const CODEX_MODELS = Object.freeze(["gpt-5-codex", "gpt-5.1-codex"]);
+const COPILOT_PERMISSION_MODES = Object.freeze([
+  "approve-all",
+  "approve-reads",
+  "deny-all",
+]);
 const MODEL_FLAG = (values, defaultValue) =>
   enumerated(values, (value) => ["--model", value], defaultValue);
 
@@ -95,13 +101,22 @@ const PROVIDER_SPECS = Object.freeze({
   hermes: {},
 });
 
+const ACADEMY_RUNTIME_SPECS = Object.freeze({
+  copilot: {
+    permission_mode: enumerated(
+      COPILOT_PERMISSION_MODES,
+      (value) => ["--permission-mode", value],
+    ),
+  },
+});
+
 // Academy wraps a runtime, so its applicable options are that runtime's. The
 // runtime list mirrors the runtimes the academy adapter can actually launch.
 const DELEGATING_PROVIDERS = Object.freeze({
   academy: {
     config_key: "academy_runtime",
     default: "claude",
-    runtimes: ["claude", "codex"],
+    runtimes: ["claude", "codex", "copilot"],
   },
 });
 
@@ -115,7 +130,7 @@ export function resolveOptionTarget(provider, providerConfig = null) {
     provider,
     runtime,
     spec: delegate.runtimes.includes(runtime)
-      ? PROVIDER_SPECS[runtime] || null
+      ? ACADEMY_RUNTIME_SPECS[runtime] || PROVIDER_SPECS[runtime] || null
       : null,
   };
 }
@@ -153,7 +168,9 @@ export function runtimeOptionCapabilities() {
       entries.push({
         provider,
         runtime,
-        options: describeOptions(PROVIDER_SPECS[runtime]),
+        options: describeOptions(
+          ACADEMY_RUNTIME_SPECS[runtime] || PROVIDER_SPECS[runtime],
+        ),
         delegates_via: delegate.config_key,
       });
     }
@@ -277,6 +294,33 @@ export function storedRuntimeOptions(providerConfig) {
   if (!stored || typeof stored !== "object" || Array.isArray(stored))
     return null;
   return stored;
+}
+
+export function academyCopilotOptionErrors(job) {
+  const hints = job?.execution_hints;
+  if (
+    hints?.provider !== "academy" ||
+    hints?.provider_config?.academy_runtime !== "copilot"
+  ) {
+    return [];
+  }
+  const options = hints.provider_config.runtime_options;
+  const permission = options?.permission_mode;
+  const errors = [];
+  if (hints.model !== undefined && hints.model !== null) {
+    errors.push("execution_hints_academy_copilot_model_unsupported");
+  }
+  if (permission === undefined || permission === null) {
+    errors.push("execution_hints_academy_copilot_permission_required");
+  } else if (!COPILOT_PERMISSION_MODES.includes(permission)) {
+    errors.push("execution_hints_academy_copilot_permission_invalid");
+  }
+  for (const field of ["model", "reasoning_effort"]) {
+    if (options?.[field] !== undefined) {
+      errors.push(`execution_hints_academy_copilot_${field}_unsupported`);
+    }
+  }
+  return errors;
 }
 
 // Published shape: every field always present, null when unset.

@@ -11,6 +11,7 @@ import { appendActivityEvent } from "./activity_stream.mjs";
 import { bypassesNetworkPrecondition } from "./network_precondition_policy.mjs";
 import { isSafeJobId } from "./job_id.mjs";
 import { normalizeJobRuntimeFields } from "./job_runtime_fields.mjs";
+import { academyCopilotOptionErrors } from "./runtime_options.mjs";
 import {
   carryRuntimeState,
   mergeJobDefinition,
@@ -34,7 +35,7 @@ const VALID_PROVIDERS = new Set([
   "droid",
   "hermes",
 ]);
-const VALID_ACADEMY_RUNTIMES = new Set(["claude", "codex"]);
+const VALID_ACADEMY_RUNTIMES = new Set(["claude", "codex", "copilot"]);
 
 // An agent that creates a job from inside its Academy home would otherwise get
 // plain `claude -p` or `codex`: its hooks and session registration never load.
@@ -80,11 +81,9 @@ export function academyProviderDefault(
 function nowDate() {
   return process.env.HELM_NOW ? new Date(process.env.HELM_NOW) : new Date();
 }
-
 function nowIso() {
   return nowDate().toISOString();
 }
-
 function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
@@ -506,6 +505,7 @@ export function validateJob(job, opts = {}) {
     ) {
       errors.push("execution_hints_academy_runtime_invalid");
     }
+    errors.push(...academyCopilotOptionErrors(job));
   } else if (provider === "academy") {
     errors.push("execution_hints_academy_agent_required");
   }

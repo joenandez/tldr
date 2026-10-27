@@ -1,27 +1,6 @@
-// The five `tightbeam hook <event>` verbs (plan §3, event map matching
-// helm/src/lib/bootstrap_hooks.mjs:46-50):
-//
-//   SessionStart      session-start       principal.register + endpoint.register
-//   UserPromptSubmit  user-prompt-submit  endpoint.state.set busy
-//   Stop              stop                one session.stop call (block=exit 2, allow=idle);
-//                                         without --handoff a park is held here (stop-hold)
-//   Stop (async)      wake-listen         holds a park the `stop --handoff` gate recorded
-//                                         and wakes the idle session (background-hook)
-//   PreToolUse        pre-tool-use        no automatic message consumption
-//   PostToolUse       post-tool-use       inject staged notifications only
-//   SubagentStart     subagent-start      Codex only: record pending-bg/agent-<agent_id>
-//   SubagentStop      subagent-stop       Codex only: remove that record
-//
-// Every verb resolves identity through src/cli/hook_identity.mjs and
-// nothing here re-implements it. The hooks call existing daemon
-// operations only; they hold no authority the operations do not already
-// enforce.
-//
-// PreToolUse and PostToolUse are reached through hooks/pre-tool-use and
-// hooks/post-tool-use, which perform the watermark check in shell and only
-// start this process when there is something to do. Both verbs stay
-// directly callable — that is how the conformance fixture and an operator
-// drive them.
+// Runtime hook adapters resolve exact identity through hook_identity.mjs and
+// invoke only existing daemon operations. Tool-boundary shell hooks check the
+// inbox watermark before starting PreToolUse/PostToolUse; both remain callable.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -30,6 +9,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { connect } from '../client/client.mjs';
 import { shortId } from '../protocol/ids.mjs';
 import { isSafeSessionId, sessionPaths } from '../protocol/session_paths.mjs';
+import { routeOpenTo } from '../protocol/session_env.mjs';
 import {
   captureOwnerProcess,
   classifyHookPayload,
@@ -45,16 +25,14 @@ import {
 import { hookCredentialsPath, readHookCredentials } from './hook_credentials.mjs';
 import { observeProcessRow } from './hook_process_tree.mjs';
 import { bootstrap, ensureDaemon } from './bootstrap.mjs';
-import { offerActionCommands, tightbeamCommandHint, tightbeamCommandName, tightbeamRecipeCommand, workActionLines } from './package_context.mjs';
+import { offerActionCommands, tightbeamCodexWaitRecipe, tightbeamCommandHint, tightbeamCommandName, tightbeamRecipeCommand, workActionLines } from './package_context.mjs';
 import { arrivalField, renderArrivalBlock } from '../protocol/arrival_block.mjs';
+import { readCurrentWaitOutcome, readWaitMessage } from './agent_wait_journal.mjs';
+import { decodeCopilotHookInput } from './copilot_hook.mjs';
+import { academyLaunchStamp, packageBoundCopilotRuntimeIds } from '../runtimes/copilot_wake_contract.mjs';
+import { boundCopilotRuntime, requiresExplicitCopilotRuntime, runCopilotHook } from './copilot_hook_runtime.mjs';
 
-/**
- * Chooses the SessionStart preparation that is safe for the identity
- * sources the caller supplied. Local identity may use the idempotent
- * bootstrap. A complete explicit identity may restore daemon liveness but
- * never publish local credentials. A partial explicit identity must have no
- * side effects before the normal missing-identity diagnostic is produced.
- */
+/** Choose bootstrap or daemon restoration without publishing partial credentials. */
 function sessionStartPreparation({ credentials, flags, env }) {
   const hasExplicitIdentity = Boolean(
     flags.appId ||
@@ -185,14 +163,8 @@ function sanitizedRecoveryContext(context) {
   };
 }
 
-/**
- * The identity facts a registration needs. The runtime arrives already
- * resolved and validated (see runHookVerb): the explicit escapes
- * (`--runtime`, `TIGHTBEAM_RUNTIME`, the credential file) bind it named,
- * otherwise registry evidence resolved it or this function is never
- * reached.
- */
-export function resolveIdentity({ payload, env, flags, credentials, sessionId, runtime, verb }) {
+/** Identity is already resolved and validated against this runtime's registry. */
+export function resolveIdentity({ payload, env, flags, credentials, sessionId, runtime, verb, copilotRecord = null }) {
   const authorityName = flags.authority || env.TIGHTBEAM_AUTHORITY || credentials?.authority_name;
   if (!authorityName) {
     throw new HookError(
@@ -201,9 +173,7 @@ export function resolveIdentity({ payload, env, flags, credentials, sessionId, r
     );
   }
   const cwd = resolveWorkingDirectory({ payload, env });
-  const academyAgentName = typeof env.ACADEMY_AGENT_NAME === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(env.ACADEMY_AGENT_NAME)
-    ? env.ACADEMY_AGENT_NAME
-    : null;
+  const log = verb === 'session-start' ? (fields) => debugLog({ ...fields, session_id: sessionId, runtime }) : undefined;
   return {
     session_id: sessionId,
     runtime,
@@ -211,7 +181,7 @@ export function resolveIdentity({ payload, env, flags, credentials, sessionId, r
     cwd,
     // Logged once per session (SessionStart); the tool-boundary verbs also
     // re-resolve identity and must stay out of the log.
-    launch_mode: resolveLaunchMode({ payload, env, runtime, log: verb === 'session-start' ? (fields) => debugLog({ ...fields, session_id: sessionId, runtime }) : undefined }),
+    launch_mode: resolveLaunchMode({ payload, env, runtime, log }),
     // Set only by the daemon on a session it started (src/daemon/resumer.mjs
     // childEnv): the token of THAT launch. Forwarded verbatim so the
     // registration this session performs stamps which launch owns the
@@ -222,19 +192,13 @@ export function resolveIdentity({ payload, env, flags, credentials, sessionId, r
     // Set only by the daemon on a cold start (resumer.mjs childEnv): the
     // exact placeholder this session was launched to adopt.
     placeholder_endpoint_id: env.TIGHTBEAM_PLACEHOLDER_ENDPOINT_ID || null,
-    academy_agent_name: academyAgentName,
-    ...resolveHostBinding(env, { log: verb === 'session-start' ? (fields) => debugLog({ ...fields, session_id: sessionId, runtime }) : undefined }),
+    ...academyLaunchStamp(env, { record: copilotRecord, log }),
+    ...resolveHostBinding(env, { log }),
     principal_ref: flags.principalRef || env.TIGHTBEAM_PRINCIPAL_REF || credentials?.principal_ref || defaultPrincipalRef({ runtime, cwd }),
   };
 }
 
-/**
- * Registers (or idempotently re-registers) this session's principal and
- * endpoint and caches the result. `principal.register` and
- * `endpoint.register` both replay on an identical repeat, which is exactly
- * what lets a stateless hook run this on every SessionStart — and lets any
- * later verb rebuild a lost cache without a second code path.
- */
+/** Idempotently register the session identity and cache the returned endpoint. */
 async function registerSession(client, { paths, identity, app_id: appId }) {
   // The owning runtime process (item 42 C), observed only where the
   // endpoint is registered: the tool-boundary verbs never pay for a ps
@@ -243,7 +207,7 @@ async function registerSession(client, { paths, identity, app_id: appId }) {
   // own; a caller-supplied snapshot (tests) is forwarded as given.
   const ownerProcess = identity.owner_process !== undefined
     ? identity.owner_process
-    : captureOwnerProcess({ runtime: identity.runtime, sessionId: identity.session_id, cwd: identity.cwd, log: (fields) => debugLog({ ...fields, session_id: identity.session_id }) });
+    : captureOwnerProcess({ runtime: identity.runtime, copilot: identity.copilot_hook_bound, sessionId: identity.session_id, cwd: identity.cwd, log: (fields) => debugLog({ ...fields, session_id: identity.session_id }) });
   const principal = await client.request('principal.register', {
     authority_name: identity.authority_name,
     external_principal_ref: identity.principal_ref,
@@ -257,6 +221,7 @@ async function registerSession(client, { paths, identity, app_id: appId }) {
     authority_reference: identity.cwd,
     launch_token: identity.launch_token,
     academy_agent_name: identity.academy_agent_name,
+    academy_permission_mode: identity.academy_permission_mode,
     ...(identity.host_name ? { host_name: identity.host_name, ...(identity.host_ref ? { host_ref: identity.host_ref } : {}) } : {}),
     ...(identity.placeholder_endpoint_id ? { placeholder_endpoint_id: identity.placeholder_endpoint_id } : {}),
     ...(ownerProcess ? { owner_process: ownerProcess } : {}),
@@ -341,44 +306,44 @@ function renderContextLines(entry) {
 // the daemon derived from the canonical effect and its route reason. It asks
 // for no reply, so it offers only the receive command (plus the held work's
 // commands when the notice returns offered work to its offerer).
-function renderNoticeLines(entry) {
+function renderNoticeLines(entry, prefix) {
   return [
     'tldr notice · received',
     arrivalField(entry.notice),
     `Message: ${entry.message_id}`,
-    `Receive command: ${tightbeamCommandHint()} agent receive --message ${entry.message_id}`,
+    `Receive command: ${prefix} agent receive --message ${entry.message_id}`,
     // Offered work that came back (expired or lost) is still held: its work id and commands.
-    ...(typeof entry.work_id === 'string' ? workActionLines({ work_id: entry.work_id, ack_pending: entry.ack_pending === true }, { prefix: tightbeamCommandHint(), commandSuffix: ' command' }) : []),
+    ...(typeof entry.work_id === 'string' ? workActionLines({ work_id: entry.work_id, ack_pending: entry.ack_pending === true }, { prefix, commandSuffix: ' command' }) : []),
   ];
 }
 
-export function renderInjection(entries) {
+export function renderInjection(entries, { prefix = tightbeamCommandHint() } = {}) {
   const lines = [];
   for (const entry of entries) {
     if (lines.length > 0) lines.push('');
     if (typeof entry.notice === 'string') {
-      lines.push(...renderNoticeLines(entry));
+      lines.push(...renderNoticeLines(entry, prefix));
       continue;
     }
     lines.push('tldr message · received');
     lines.push(...renderContextLines(entry));
     lines.push(`Message: ${entry.message_id}`);
-    lines.push(`Receive command: ${tightbeamCommandHint()} agent receive --message ${entry.message_id}`);
+    lines.push(`Receive command: ${prefix} agent receive --message ${entry.message_id}`);
     if (typeof entry.delegation_id === 'string') {
       // A delegate answers an offer with accept or decline; a reply is not one.
-      const offer = offerActionCommands(entry.delegation_id, tightbeamCommandHint());
+      const offer = offerActionCommands(entry.delegation_id, prefix);
       lines.push(`Delegation: ${entry.delegation_id} · offered to you; receive it, then accept or decline`);
       lines.push(`Accept command: ${offer.accept}`);
       lines.push(`Decline command: ${offer.decline}`);
     } else {
-      lines.push(`Reply command: ${tightbeamCommandHint()} agent reply --message ${entry.message_id} --body "<reply>" --wait-delivery 30s`);
+      lines.push(`Reply command: ${prefix} agent reply --message ${entry.message_id} --body "<reply>" --wait-delivery 30s`);
     }
     // Tracked work this session holds: the id `--work` takes (F23).
     if (typeof entry.work_id === 'string') {
-      lines.push(...workActionLines({ work_id: entry.work_id, ack_pending: entry.ack_pending === true }, { prefix: tightbeamCommandHint(), commandSuffix: ' command' }));
+      lines.push(...workActionLines({ work_id: entry.work_id, ack_pending: entry.ack_pending === true }, { prefix, commandSuffix: ' command' }));
     }
     if (entry.has_external_origin) {
-      lines.push(`For this external user message, within 120 seconds send ${tightbeamRecipeCommand()} agent ack saying it was received and work is underway, or send ${tightbeamRecipeCommand()} agent complete if the full answer is ready. A complete answer inside 120 seconds satisfies ACK; after a progress ACK, send the terminal response within 300 seconds of inbound acceptance.`);
+      lines.push(`For this external user message, within 120 seconds send ${prefix} agent ack saying it was received and work is underway, or send ${prefix} agent complete if the full answer is ready. A complete answer inside 120 seconds satisfies ACK; after a progress ACK, send the terminal response within 300 seconds of inbound acceptance.`);
     }
   }
   const text = lines.join('\n');
@@ -397,8 +362,7 @@ export function renderInjection(entries) {
 }
 
 function renderOutboundChannelCatalog(routes) {
-  const catalog = routes
-    .map(({ selector, label }) => ({ selector, label }))
+  const catalog = routes.map(({ selector, label }) => ({ selector, label }))
     .sort((a, b) => (a.selector < b.selector ? -1 : a.selector > b.selector ? 1 : 0));
   return `<tightbeam_outbound_channels>\n${JSON.stringify(catalog)}\n</tightbeam_outbound_channels>`;
 }
@@ -608,7 +572,7 @@ export function stagedNotificationEntry(attempt, source) {
   return entry;
 }
 
-function stagedPresentationNotification(presentation, endpoint) {
+function stagedPresentationNotification(presentation) {
   return stagedNotificationEntry('initial', presentation);
 }
 
@@ -688,28 +652,11 @@ function quarantineTornLines(paths, lines) {
   );
 }
 
-// ---------------------------------------------------------------------
-// The Stop gate (Project Relay parent 3.2; plan «Technical Approach 4»).
-//
-// One daemon call replaces the retired obligation.list + endpoint.state.set
-// sequencing: `session.stop` authenticates this exact endpoint (+observed
-// process generation), evaluates owned work, and returns ONLY block or
-// allow — the daemon records the bounded escape evidence, marks the
-// endpoint idle after an allow, and replays idempotently. Launch mode is
-// NOT an input: the adapter owns everything after allow (REQ-04).
-//
-// Outward behavior is preserved: exit 2 IS the block (stderr feeds the
-// model), exit 0 allows, and the bounded force-allow — after the daemon's
-// anti-wedge budget is exhausted — still leaves the work open, still says
-// so on stderr, and still appends this session's unresolved diagnostic.
+// Stop delegates the owner-fenced decision to session.stop. Exit 2 blocks;
+// allow idles the endpoint. Explicit waits use a brief guard and exact action
+// outcome handoff; the legacy and background lanes retain their old contract.
 
-/**
- * The force-allow's durable local evidence. Appended, never rewritten:
- * each force-allow is its own line, so an earlier unresolved escape cannot
- * be erased by a later one. The canonical evidence lives in the daemon's
- * root_attention table; this file is the per-session diagnostic the legacy
- * gate wrote and operators grep for.
- */
+// Keep each force-allow as a separate local diagnostic record.
 function writeUnresolvedDiagnostic(ctx, endpoint, decision) {
   const record = {
     event: 'obligation_unresolved',
@@ -763,17 +710,7 @@ function continuationFor(entry) {
   };
 }
 
-/**
- * Holds one daemon-admitted Stop park: attach → heartbeat → presentation →
- * stage → ACK → emit. The daemon, not this adapter, owns eligibility, the
- * lease, presentation deadline, and fallback selection. This only attaches
- * the connection it already authenticated, renews that exact fence, stages
- * the presented notification, ACKs it, and only then hands the staged entry
- * to `emit` — so no wake is ever emitted for an entry that is not durable
- * and ACKed. `hostProbe`, when given, is consulted on every heartbeat and
- * (strictly) immediately before staging: a host that is gone cannot receive
- * the wake, so the presentation is left to the daemon's miss path instead.
- */
+/** Attach the admitted park, stage and ACK presentations, then emit. */
 function holdParkedListener(client, { endpoint, decision, ctx, append, timers, emit, hostProbe = null, alreadyWoke = null, backgroundItems = null, logPrefix }) {
   const fence = listenerFence(endpoint, decision);
   const deadlineMs = Date.parse(decision.park_deadline_at);
@@ -836,6 +773,7 @@ function holdParkedListener(client, { endpoint, decision, ctx, append, timers, e
       typeof presentation.presentation_id !== 'string' || typeof presentation.message_id !== 'string'
     ) return;
     presenting = true;
+    let staged = null;
     try {
       if (alreadyWoke?.(presentation.message_id)) {
         await acknowledgeDuplicate(presentation);
@@ -845,8 +783,9 @@ function holdParkedListener(client, { endpoint, decision, ctx, append, timers, e
         await hostLost('before_stage');
         return;
       }
-      const entry = stagedPresentationNotification(presentation, endpoint);
+      const entry = stagedPresentationNotification(presentation);
       append(ctx.paths, entry);
+      staged = entry;
       await client.acknowledgeListener({ ...fence, presentation_id: presentation.presentation_id });
       // A heartbeat failure, host loss, or park expiry may have ended this
       // listener while the ACK was in flight; an ended listener never wakes.
@@ -857,9 +796,13 @@ function holdParkedListener(client, { endpoint, decision, ctx, append, timers, e
       log('presented', { message_id: entry.message_id, presentation_id: presentation.presentation_id });
       finish(emit(entry));
     } catch (error) {
-      log('delivery_failed', { error: error.code || error.message });
+      log('delivery_failed', { error: error.code || error.message, woke: staged !== null && !settled, status: 'warn' });
       await end('presentation_failed');
-      finish(null);
+      // A refused ACK (usually past the daemon's 1.5 s deadline under load) leaves
+      // the daemon's miss path with nothing that wakes an idle session. The entry
+      // is durable, so wake anyway: a spurious wake is cheap and `agent receive`
+      // still owns delivery.
+      finish(staged && !settled ? emit(staged) : null);
     }
   });
 
@@ -1266,7 +1209,7 @@ export const HANDLERS = {
       output: {
         hookSpecificOutput: {
           hookEventName: 'SessionStart',
-          additionalContext: `${recovery}${renderOutboundChannelCatalog(catalog.routes)}`,
+          additionalContext: `${recovery}${renderOutboundChannelCatalog(catalog.routes.filter(({ selector }) => routeOpenTo(selector, ctx.identity?.academy_agent_name)))}`,
         },
       },
     };
@@ -1329,6 +1272,43 @@ async function requestSessionStop(client, request, { backgroundWait, sessionId }
   }
 }
 
+function currentActionId(ctx) {
+  try {
+    return fs.readFileSync(ctx.paths.action, 'utf8').trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function currentWaitOutcome(ctx, endpoint) {
+  const actionId = currentActionId(ctx);
+  const session = {
+    endpoint_id: endpoint.endpoint_id,
+    process_generation: endpoint.process_generation,
+    session_id: ctx.identity.session_id,
+    agent_action_store_path: path.join(ctx.paths.dir, 'agent-actions.json'),
+    pending_reply_guard: readCache(ctx.paths)?.pending_reply_guard,
+  };
+  return readCurrentWaitOutcome(session, actionId);
+}
+
+function setPendingReplyGuard(ctx, endpoint, decision) {
+  const cached = readCache(ctx.paths);
+  if (!cached || cached.endpoint_id !== endpoint.endpoint_id) return;
+  const guard = decision?.wait_mode === 'explicit' && Array.isArray(decision.pending_references)
+    ? {
+        endpoint_id: endpoint.endpoint_id,
+        provider_session_id: ctx.identity.session_id,
+        process_generation: endpoint.process_generation,
+        guard_stop_key: decision.guard_stop_key,
+        pending_references: [...decision.pending_references].sort(),
+      }
+    : null;
+  if (guard?.pending_references.length && typeof guard.guard_stop_key === 'string') cached.pending_reply_guard = guard;
+  else delete cached.pending_reply_guard;
+  writeFilePrivate(ctx.paths.endpoint, `${JSON.stringify(cached, null, 2)}\n`);
+}
+
 // An unreadable pending-bg must never skip the Stop gate: the Stop proceeds
 // unflagged, exactly as it did before background_wait existed.
 function readStopPendingBackground(ctx) {
@@ -1353,24 +1333,34 @@ async function gateStop(client, ctx) {
   // with the endpoint already idled inside the same transaction. The key
   // makes THIS attempt replayable without burning the anti-wedge budget
   // twice; the cached process generation fences a stale process out.
-  // Claude lists in-flight background work on Stop; any entry, of any
-  // type, asks the daemon to keep a headless session parked meanwhile.
+  // Claude Stop entries of any type ask the daemon to keep a headless session parked.
   // Handoff only: the synchronous stop-hold has no way to end when the
   // background work does, so a flagged hold would sit to the park deadline.
-  // Codex has no background_tasks: its plain Stop waits on this session's
-  // pending-bg items instead, and only a headless run (an interactive park
-  // stays armed-only). stop_hook_active is not consulted: with no pending
-  // work there is no hold, so no second finished block.
-  const codexPending = !handoff && ctx.identity.runtime === 'codex' && endpoint.launch_mode === 'non_interactive' ? readStopPendingBackground(ctx) : null;
+  // Codex plain Stop waits on pending-bg items only for headless runs.
+  // Interactive parks stay armed-only; no pending work means no second block.
+  // Explicit Stop never holds: agents wait for messages with `agent wait`.
+  const codexPending = !handoff && ctx.waitMode !== 'explicit' && ctx.identity.runtime === 'codex' && endpoint.launch_mode === 'non_interactive' ? readStopPendingBackground(ctx) : null;
   const backgroundWait = handoff
     ? Array.isArray(ctx.payload?.background_tasks) && ctx.payload.background_tasks.length > 0
     : codexPending?.items.length > 0;
+  const waitOutcome = ctx.waitMode === 'explicit' ? currentWaitOutcome(ctx, endpoint) : null;
   const request = {
     endpoint_id: endpoint.endpoint_id,
     process_generation: endpoint.process_generation,
     idempotency_key: randomUUID(),
+    ...(ctx.waitMode === 'explicit' ? { wait_mode: 'explicit' } : {}),
+    ...(waitOutcome ? { wait_outcome: waitOutcome } : {}),
   };
   const decision = await requestSessionStop(client, request, { backgroundWait, sessionId: ctx.identity.session_id });
+  if (ctx.waitMode === 'explicit') setPendingReplyGuard(ctx, endpoint, decision);
+  if (ctx.waitMode === 'explicit' && decision.pending_references?.length) {
+    decision.reason = ctx.identity.runtime === 'codex'
+      ? decision.reason.replace(/Run .* agent wait and stop again after it returns\./u, tightbeamCodexWaitRecipe())
+      : decision.reason.replace(
+        `${tightbeamCommandName()} agent wait`,
+        `${tightbeamRecipeCommand()} agent wait`,
+      );
+  }
   debugLog({
     event: 'stop_gate',
     session_id: ctx.identity.session_id,
@@ -1589,8 +1579,22 @@ function trackCodexSubagent(verb, ctx) {
   return { tracked: true };
 }
 
-// PostToolUse touches no socket at all — it renders what PreToolUse
-// already staged locally, so an inject costs zero IPC.
+function currentWaitMessage(ctx, cached, actionId) {
+  if (!cached || !actionId) return null;
+  try {
+    return readWaitMessage({
+      endpoint_id: cached.endpoint_id,
+      process_generation: cached.process_generation,
+      session_id: ctx.identity.session_id,
+      agent_action_store_path: path.join(ctx.paths.dir, 'agent-actions.json'),
+    }, actionId);
+  } catch (error) {
+    debugLog({ event: 'wait_message_lookup_failed', session_id: ctx.identity.session_id, error: error.code || error.message });
+    return null;
+  }
+}
+const toolActionId = (ctx) => (ctx.payload.tool_use_id === undefined ? currentActionId(ctx) : isSafeSessionId(ctx.payload.tool_use_id) ? ctx.payload.tool_use_id : null);
+// PostToolUse touches no socket at all — it renders what PreToolUse already staged locally (zero IPC).
 async function runPostToolUse(ctx) {
   // A subagent's tool call carries the parent's session_id plus agent_id.
   // Its PostToolUse must not claim the parent's staged messages: the main
@@ -1605,6 +1609,9 @@ async function runPostToolUse(ctx) {
     return { injected: 0, quarantined: 0, output: null };
   }
   const { entries, torn } = readStagedEntries(ctx.paths, claimed);
+  const cached = readCache(ctx.paths);
+  const waitedMessage = currentWaitMessage(ctx, cached, toolActionId(ctx));
+  const visibleEntries = waitedMessage ? entries.filter((entry) => entry.message_id !== waitedMessage) : entries;
   if (entries.length === 0 && torn.length === 0) {
     fs.rmSync(claimed, { force: true });
     debugLog({ event: 'inject_skipped', session_id: ctx.identity.session_id });
@@ -1617,17 +1624,19 @@ async function runPostToolUse(ctx) {
     debugLog({ event: 'inject_quarantined', session_id: ctx.identity.session_id, lines: torn.length });
   }
   const output =
-    entries.length === 0
+    visibleEntries.length === 0
       ? null
-      : { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: renderInjection(entries) } };
+      : { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: renderInjection(visibleEntries, { prefix: ctx.recipePrefix }) } };
   // Truncate only after rendering succeeded, so a crash mid-render leaves
   // the staged messages to be injected at the next tool boundary.
-  fs.rmSync(claimed, { force: true });
-  // Create only when PreToolUse did not already open its fresh successor
-  // file; append mode cannot truncate a notification staged meanwhile.
-  ensurePendingScratch(ctx.paths);
-  debugLog({ event: 'inject_emitted', session_id: ctx.identity.session_id, messages: entries.length, quarantined: torn.length });
-  return { injected: entries.length, quarantined: torn.length, output };
+  const commitOutput = () => {
+    fs.rmSync(claimed, { force: true });
+    // Create only if PreToolUse did not open the successor file; append mode cannot truncate a notification staged meanwhile.
+    ensurePendingScratch(ctx.paths);
+  };
+  if (!ctx.deferOutputCommit || output === null) commitOutput();
+  debugLog({ event: 'inject_emitted', session_id: ctx.identity.session_id, messages: visibleEntries.length, suppressed_wait_message: Boolean(waitedMessage), quarantined: torn.length });
+  return { injected: visibleEntries.length, quarantined: torn.length, output, ...(ctx.deferOutputCommit && output !== null ? { commitOutput } : {}) };
 }
 
 /**
@@ -1701,31 +1710,27 @@ async function runResolvedHookVerb(verb, { stateRoot, flags = {}, env = process.
         "session is the PARENT's",
     );
   }
-  // Runtime first, and fail closed named: an explicit binding is validated
-  // against this state root's registry (an unknown value is a refusal
-  // BEFORE any endpoint registration write), and evidence matching two
-  // registered runtimes is refused rather than first-matched — a Grok or
-  // Muse hook reading Claude-shaped config must never become claude-code.
-  // The named refusals from resolveRuntime carry their codes through to
-  // the CLI's `error <code>: <message>` reporting.
-  // Lazily bootstrap a fresh install. The plugin manifests wire these
-  // hooks at install time but nothing in the plugin model runs a script,
-  // so before this existed every SessionStart on a new machine died with
-  // "no authority to register under" and the product was inert until
-  // somebody ran three admin commands and hand-wrote a credential file.
-  //
-  // SessionStart always restores daemon liveness for a usable identity.
-  // Local identity goes through idempotent bootstrap so an existing
-  // credential is preserved and a missing one is provisioned. Complete
-  // explicit identity starts only the daemon; partial explicit identity has
-  // no side effects and fails later with the precise missing-identity error.
-  // Later verbs run inside a live session whose SessionStart has passed.
+  const explicitRuntime = flags.runtime || env.TIGHTBEAM_RUNTIME;
+  const copilotRuntime = boundCopilotRuntime({ explicitRuntime, registry });
+  const isCopilot = copilotRuntime !== null;
+  const copilotInput = isCopilot ? decodeCopilotHookInput(verb, payload) : null;
+  if (copilotInput?.child) return { skipped: true, subagent: true };
+  if (copilotInput?.streamEvent) throw new HookError(`Copilot stream event ${copilotInput.event} cannot be handled as callback ${verb}`);
+  if (copilotInput && copilotInput.sessionId === undefined) throw new HookError(`Copilot ${copilotInput.event} requires its actual session UUID`);
+  if (copilotInput && !copilotInput.streamEvent && copilotInput.event !== ({
+    'session-start': 'sessionStart',
+    'user-prompt-submit': 'userPromptSubmitted',
+    'post-tool-use': 'postToolUse',
+  })[verb]) throw new HookError(`Copilot callback event does not match hook verb ${verb}`);
+  const hookPayload = copilotInput?.payload ?? payload;
+  // Copilot callbacks validate their own identity before this incumbent bootstrap path.
   let credentials = readHookCredentials(stateRoot);
+  if (requiresExplicitCopilotRuntime({ explicitRuntime, credentials, payload: hookPayload, env, registry })) throw new HookError('Copilot hook requires an explicit --runtime binding; pass --runtime instead of relying on runtime inference or credentials');
   if (verb === 'session-start' && socketPath && registry) {
     const preparation = sessionStartPreparation({ credentials, flags, env });
     if (preparation === 'bootstrap') {
       try {
-        const report = await bootstrap({ stateRoot, socketPath, runtimeTypes: [...registry.names()] });
+        const report = await bootstrap({ stateRoot, socketPath, runtimeTypes: [...registry.names()], wakeRuntimeTypes: packageBoundCopilotRuntimeIds(registry) });
         debugLog({ event: 'auto_bootstrap', status: report.status, app_id: report.app_id, daemon: report.daemon });
         credentials = readHookCredentials(stateRoot);
       } catch (err) {
@@ -1739,20 +1744,20 @@ async function runResolvedHookVerb(verb, { stateRoot, flags = {}, env = process.
   }
 
   const runtime = resolveRuntime({
-    payload,
+    payload: hookPayload,
     env,
     registry,
     explicit: flags.runtime || env.TIGHTBEAM_RUNTIME || credentials?.runtime,
   });
-  if (!runtime) {
-    throw new HookError('could not determine the runtime for this session; pass --runtime or set TIGHTBEAM_RUNTIME');
+  if (!runtime || (!explicitRuntime && registry?.get(runtime)?.hooksInstall?.format === 'copilot-json')) {
+    throw new HookError(runtime ? 'Copilot hook requires an explicit --runtime binding' : 'could not determine the runtime for this session; pass --runtime or set TIGHTBEAM_RUNTIME');
   }
   debugLog({ event: 'runtime_resolved', verb, runtime, bound: Boolean(flags.runtime || env.TIGHTBEAM_RUNTIME || credentials?.runtime) });
 
   // With the runtime known, the session-id fallback chain can be scoped to
   // that record's declared vars (manifest bindings), so another runtime's
   // session variable cannot leak into this session's identity.
-  const sessionId = resolveSessionId({ payload, env, registry, runtime });
+  const sessionId = isCopilot ? copilotInput.sessionId : resolveSessionId({ payload: hookPayload, env, registry, runtime });
   if (!sessionId) {
     throw new HookError(
       'could not resolve a session id from the hook payload or the environment ' +
@@ -1762,12 +1767,12 @@ async function runResolvedHookVerb(verb, { stateRoot, flags = {}, env = process.
 
   // From here the session directory is known, so a failing handoff gate
   // can tell its listener; identity is filled in once it resolves.
-  const ctx = { paths: sessionPaths(stateRoot, sessionId), identity: { session_id: sessionId }, payload, handoff: flags.handoff === true, stdinKey };
+  const ctx = { paths: sessionPaths(stateRoot, sessionId), identity: { session_id: sessionId }, payload: hookPayload, handoff: flags.handoff === true, waitMode: flags.waitMode, stdinKey, copilotInput, deferOutputCommit: isCopilot };
   let client;
   try {
-    ctx.identity = resolveIdentity({ payload, env, flags, credentials, sessionId, runtime, verb });
+    ctx.identity = resolveIdentity({ payload: hookPayload, env, flags, credentials, sessionId, runtime, verb, copilotRecord: copilotRuntime });
 
-    if (verb === 'post-tool-use') return runPostToolUse(ctx);
+    if (verb === 'post-tool-use' && !isCopilot) return runPostToolUse(ctx);
     if (verb === 'subagent-start' || verb === 'subagent-stop') return trackCodexSubagent(verb, ctx);
     if (verb === 'wake-listen') {
       // The record decides whether this listener has anything to hold, so it
@@ -1786,6 +1791,7 @@ async function runResolvedHookVerb(verb, { stateRoot, flags = {}, env = process.
     throw error;
   }
   try {
+    if (isCopilot) return await runCopilotHook({ client, verb, ctx, handlers: HANDLERS, render: runPostToolUse });
     return await HANDLERS[verb](client, ctx);
   } finally {
     await client.close();

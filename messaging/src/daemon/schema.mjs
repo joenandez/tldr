@@ -89,7 +89,7 @@
 import { applyMigrations, listAppliedMigrations } from './migrations.mjs';
 import { reconcileTachyonArmingFromAudit } from './tachyon_arming.mjs';
 
-export const SCHEMA_VERSION = 28;
+export const SCHEMA_VERSION = 29;
 
 // The schema version at which the guarded lifecycle cutover landed. A
 // state document stamped below this version was written by a pre-cutover
@@ -1523,8 +1523,7 @@ export const MIGRATIONS = [
     },
   },
   {
-    // Forward-only launcher identity. Historical rows intentionally stay
-    // NULL so Tightbeam never guesses Academy ownership.
+    // Forward-only launcher identity; historical rows stay NULL (Academy ownership is never guessed).
     schemaVersion: 24,
     apply(db) {
       db.exec('ALTER TABLE endpoints ADD COLUMN academy_agent_name TEXT');
@@ -1564,8 +1563,7 @@ export const MIGRATIONS = [
     },
   },
   {
-    // Session-host binding (TIGHTBEAM_HOST / TIGHTBEAM_HOST_REF). Historical
-    // rows stay NULL: Tightbeam never guesses a host for an old session.
+    // Session-host binding (TIGHTBEAM_HOST / TIGHTBEAM_HOST_REF); historical rows stay NULL (a host is never guessed).
     schemaVersion: 26,
     apply(db) {
       db.exec('ALTER TABLE endpoints ADD COLUMN host_name TEXT');
@@ -1596,6 +1594,8 @@ export const MIGRATIONS = [
       db.exec('CREATE INDEX message_effects_obligation_effect ON message_effects(obligation_id, effect)');
     },
   },
+  // The Academy permission mode a Copilot owner was launched under; it follows the owner. NULL: unknown, never inferred.
+  { schemaVersion: 29, apply: (db) => db.exec("ALTER TABLE endpoints ADD COLUMN academy_permission_mode TEXT CHECK (academy_permission_mode IS NULL OR academy_permission_mode IN ('approve-all', 'approve-reads', 'deny-all'))") },
 ];
 
 /**

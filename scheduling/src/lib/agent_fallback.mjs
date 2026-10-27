@@ -6,8 +6,10 @@ export {
   managedAgentProcessDescriptor,
 } from "./agent_process_descriptor.mjs";
 
-const SUPPORTED_AGENTS = new Set(["claude", "codex"]);
+const SUPPORTED_AGENTS = new Set(["claude", "codex", "copilot"]);
 const FALLBACK_POLICIES = new Set(["always", "never"]);
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const CODEX_TOOL_ITEM_TYPES = new Set([
   "command_execution",
@@ -43,13 +45,32 @@ function parseJsonLines(text) {
   return out;
 }
 
+function copilotSessionId(event) {
+  if (
+    JSON.stringify([event.type, event.version, event.provider]) !==
+    '["academy.session.started",1,"copilot"]'
+  )
+    return null;
+  if (
+    typeof event.session_id !== "string" ||
+    !UUID_PATTERN.test(event.session_id)
+  )
+    return null;
+  return event.session_id;
+}
+
+const SESSION_ID_EXTRACTORS = {
+  claude: (event) => event.session_id,
+  codex: (event) => event.thread_id,
+  copilot: copilotSessionId,
+};
+
 export function extractAgentSessionId(agent, text) {
-  const events = parseJsonLines(text);
-  for (const event of events) {
-    if (agent === "claude" && event.session_id) return event.session_id;
-    if (agent === "codex" && event.thread_id) return event.thread_id;
-  }
-  return null;
+  return (
+    parseJsonLines(text)
+      .map((event) => SESSION_ID_EXTRACTORS[agent]?.(event))
+      .find(Boolean) || null
+  );
 }
 
 function summarizeError(value) {

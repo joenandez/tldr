@@ -19,7 +19,31 @@ const TERMINAL_STATES = new Set(['completed', 'failed']);
 
 const RESUME_REQUEST_FIELDS = `r.id AS id, r.endpoint_id AS endpoint_id, r.principal_id AS principal_id, r.session_id AS session_id,
        r.conversation_id AS conversation_id, r.message_id AS message_id, r.reason AS reason,
-       r.authority_reference AS authority_reference, r.state AS state, e.runtime AS runtime_type`;
+       r.authority_reference AS authority_reference, r.state AS state, e.runtime AS runtime_type,
+       e.provider_session_id AS provider_session_id, e.process_generation AS process_generation,
+       e.owner_epoch AS owner_epoch, e.owner_launch_token AS owner_launch_token`;
+
+/**
+ * The nine-field payload `resume.assert-active` verifies for one claimed
+ * request. `row` carries the request id, its endpoint id and the endpoint's
+ * current provider session, process generation, owner epoch and launch token.
+ */
+export function buildAssertActivePayload(db, row, token) {
+  const latestListener = db.prepare(
+    'SELECT id, listener_generation FROM listeners WHERE endpoint_id = ? ORDER BY process_generation DESC, listener_generation DESC, rowid DESC LIMIT 1',
+  ).get(row.endpoint_id);
+  return {
+    resume_request_id: row.id,
+    token,
+    endpoint_id: row.endpoint_id,
+    provider_session_id: row.provider_session_id,
+    process_generation: row.process_generation,
+    owner_epoch: row.owner_epoch,
+    owner_launch_token: row.owner_launch_token,
+    listener_id: latestListener?.id ?? null,
+    listener_generation: latestListener?.listener_generation ?? null,
+  };
+}
 
 export const resumeClaimOp = {
   name: 'resume.claim',
@@ -100,7 +124,6 @@ export const resumeClaimOp = {
 
       const claim = acquireClaim(context.db, { resourceType: 'resume_request', resourceId: row.id, leaseMs, now });
       context.db.prepare("UPDATE resume_requests SET state = 'claimed', updated_at = ? WHERE id = ?").run(now.toISOString(), row.id);
-
       return {
         resume_request_id: row.id,
         endpoint_id: row.endpoint_id,
@@ -114,6 +137,7 @@ export const resumeClaimOp = {
         state: 'claimed',
         token: claim.token,
         lease_expires_at: claim.leaseExpiresAt,
+        assert_active_payload: buildAssertActivePayload(context.db, row, claim.token),
       };
     });
 

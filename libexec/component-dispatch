@@ -42,6 +42,10 @@ case "$component" in
   tldr-capabilities) entrypoint=src/tldr-capabilities.mjs ;;
   # Linux setup, status, and repair (no bootstrap there).
   tldr-linux-setup) entrypoint=src/lib/linux_setup.mjs ;;
+  # Slack setup, status, repair, and disconnect (macOS and Linux alike).
+  tldr-slack-setup) entrypoint=src/lib/slack_setup_entry.mjs ;;
+  # Slack per-agent channels (`slack channels add`).
+  tldr-slack-channels) entrypoint=src/lib/slack_channels_entry.mjs ;;
   *) fail 64 RUNTIME_COMPONENT_UNKNOWN "unknown component: $component" ;;
 esac
 

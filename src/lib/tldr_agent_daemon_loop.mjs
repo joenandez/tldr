@@ -17,6 +17,11 @@ import {
 } from "./daemon_mail_child_phases.mjs";
 import { createInboxPollScheduler } from "./daemon_inbox_poll_scheduler.mjs";
 import { helmHome } from "./store.mjs";
+import {
+  createSlackLane,
+  createSlackListenerSupervisor,
+  runSlackLanesOnce,
+} from "./daemon_slack_lane.mjs";
 
 function defaultEmailConfigPath() {
   return (
@@ -154,6 +159,8 @@ export async function runTldrAgentDaemonLoop({
   runMailSequence = runDaemonMailSequence,
   runOutboundSequence = runDaemonOutboundSequence,
   maintainDiagnostics = maintainTldrAgentDiagnostics,
+  runSlackTick = runSlackLanesOnce,
+  slackListener = createSlackListenerSupervisor({ home }),
   waitFn = wait,
   outboundTimeoutMs = Number(
     process.env.HELM_DAEMON_OUTBOUND_TIMEOUT_MS ||
@@ -261,18 +268,35 @@ export async function runTldrAgentDaemonLoop({
       }
     } while (!once && !stopped && homeExists(home));
   };
+  const slackLane = createSlackLane({
+    home,
+    once,
+    daemonInstanceId,
+    slackListener,
+    runSlackTick,
+    runPhase,
+    phaseTimeoutMs,
+    sleepInterval,
+    homeExists,
+    isStopped: () => stopped,
+  });
   try {
     if (once) {
       // Both lanes write one shared admin nonce file, so a --once run keeps them apart.
       try {
         await inboundLane();
       } finally {
-        await outboundLane();
+        try {
+          await outboundLane();
+        } finally {
+          await slackLane();
+        }
       }
     } else {
-      await Promise.all([inboundLane(), outboundLane()]);
+      await Promise.all([inboundLane(), outboundLane(), slackLane()]);
     }
   } finally {
+    slackListener.stop();
     process.removeListener("SIGINT", stop);
     process.removeListener("SIGTERM", stop);
   }

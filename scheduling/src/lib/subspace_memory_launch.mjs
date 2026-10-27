@@ -39,6 +39,8 @@ function effectiveClaudeSettings(path) {
   }
 }
 
+const isClaude = (runtime) => /^claude/.test(runtime ?? "");
+
 function withSubspaceClaudeSettings(command, args, env) {
   const settings = join(
     env.SUBSPACE_HOME || "",
@@ -71,12 +73,17 @@ function withSubspaceClaudeSettings(command, args, env) {
 
   const separator = args.indexOf("--");
   const academyArgs = separator === -1 ? args : args.slice(0, separator);
-  const usesCodex = academyArgs.some(
-    (arg, index) =>
-      arg === "--agent=codex" ||
-      (arg === "--agent" && academyArgs[index + 1] === "codex"),
+  // Claude-only --settings: skip when Academy args name another runtime.
+  // shortcut: a bare `academy run <agent>` (stored runtime) is treated as Claude;
+  // pass the job's academy_runtime down if a non-Claude job ever runs bare.
+  const usesOtherRuntime = academyArgs.some((arg, index) =>
+    ["--agent", "--runtime-once"].some(
+      (flag) =>
+        (arg === flag && !isClaude(academyArgs[index + 1])) ||
+        (arg.startsWith(`${flag}=`) && !isClaude(arg.slice(flag.length + 1))),
+    ),
   );
-  if (usesCodex || args.includes("--settings")) return { command, args };
+  if (usesOtherRuntime || args.includes("--settings")) return { command, args };
   if (separator === -1) {
     return {
       command,

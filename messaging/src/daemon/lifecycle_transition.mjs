@@ -39,7 +39,9 @@ import { withTransaction } from './db.mjs';
 import { REPLY_BINDING_POLICY } from './reply_listener_policy.mjs';
 import { replyContinuityDiagnostic } from './reply_continuity_diagnostics.mjs';
 import { createPendingPresentation, publishPresentation } from './ops/listener_operations.mjs';
-import { isUniqueConstraintError } from './ops/authority_scope.mjs';
+import { isUniqueConstraintError, requireInboundAuthor } from './ops/authority_scope.mjs';
+import { callerActionForPendingOffer, pendingReplyExpectations, untrackedOffers } from './pending_reply_expectations.mjs';
+import { explicitWaitGuard, validateWaitOutcome } from './explicit_wait_guard.mjs';
 import { armTachyonFromCommittedEffect, endUnsupportedTachyonListeners, isTachyonArmedForGeneration } from './tachyon_arming.mjs';
 import {
   createDeliveriesForChannelRoutes,
@@ -1511,10 +1513,10 @@ function validateInboundOrigin(db, { appId, senderPrincipalId, originChannelRout
     throw new TightbeamError('malformed_request', 'origin_channel_route_id must be a non-empty string when present', { field: 'origin_channel_route_id' });
   }
   const route = db
-    .prepare('SELECT r.id FROM channel_routes r JOIN endpoints e ON e.id = r.endpoint_id WHERE r.id = ? AND r.app_id = ? AND r.principal_id = ? AND e.created_by_app_id = ? AND e.principal_id = r.principal_id')
+    .prepare("SELECT r.id FROM channel_routes r JOIN endpoints e ON e.id = r.endpoint_id WHERE r.id = ? AND r.app_id = ? AND r.principal_id = ? AND r.state = 'active' AND e.created_by_app_id = ? AND e.principal_id = r.principal_id")
     .get(originChannelRouteId, appId, senderPrincipalId, appId);
   if (!route) {
-    throw new TightbeamError('permission_denied', 'origin_channel_route_id must belong to the authenticated application and sender principal', { field: 'origin_channel_route_id' });
+    throw new TightbeamError('permission_denied', 'origin_channel_route_id must be an active route of the authenticated application and sender principal', { field: 'origin_channel_route_id' });
   }
   return route.id;
 }
@@ -1837,10 +1839,9 @@ export function commitMessageWithEffect(context, connection, request) {
       let conversationId;
       if (hasConversationId) {
         const conversation = loadConversationOrUnknown(context.db, request.conversation_id);
-        requireParticipant(context.db, conversation.id, senderPrincipalId);
-        if (conversation.closed_at !== null) {
-          throw new TightbeamError('conversation_closed', 'conversation is closed');
-        }
+        if (sendBranch === 'inbound' && effect.type === 'none') requireInboundAuthor(context.db, { appId: connection.appId, routeId: requestedOriginChannelRouteId, principalId: senderPrincipalId, conversationId: conversation.id });
+        else requireParticipant(context.db, conversation.id, senderPrincipalId);
+        if (conversation.closed_at !== null) throw new TightbeamError('conversation_closed', 'conversation is closed');
         conversationId = conversation.id;
       } else {
         validateConversationMetadata(request.conversation_metadata, 'conversation_metadata');
@@ -2586,7 +2587,13 @@ const STOP_BLOCK_CAP = 3;
 // {...request, park:true} would admit as the original command and forbidden
 // concepts would be accepted-and-ignored. The same strict extra-field
 // convention validateEffect enforces per effect family.
-const SESSION_STOP_FIELDS = ['endpoint_id', 'process_generation', 'idempotency_key', 'background_wait'];
+const SESSION_STOP_FIELDS = ['endpoint_id', 'process_generation', 'idempotency_key', 'background_wait', 'wait_mode', 'wait_outcome'];
+
+function validateStopWaitOutcome(request) {
+  const outcome = request.wait_outcome === undefined ? null : validateWaitOutcome(request.wait_outcome);
+  if (request.wait_outcome !== undefined && (!outcome || request.wait_mode !== 'explicit')) throw new TightbeamError('malformed_request', 'session.stop wait_outcome must be a valid explicit-wait outcome', { field: 'wait_outcome' });
+  return outcome;
+}
 
 function validateSessionStopRequest(request) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) {
@@ -2600,6 +2607,8 @@ function validateSessionStopRequest(request) {
   if (request.background_wait !== undefined && typeof request.background_wait !== 'boolean') {
     throw new TightbeamError('malformed_request', 'session.stop background_wait must be a boolean', { field: 'background_wait' });
   }
+  if (request.wait_mode !== undefined && request.wait_mode !== 'explicit') throw new TightbeamError('malformed_request', 'session.stop wait_mode must be explicit', { field: 'wait_mode' });
+  const waitOutcome = validateStopWaitOutcome(request);
   const processGeneration =
     request.process_generation === undefined || request.process_generation === null
       ? null
@@ -2609,6 +2618,8 @@ function validateSessionStopRequest(request) {
     process_generation: processGeneration,
     idempotency_key: requireRecoveryString(request, 'idempotency_key'),
     background_wait: request.background_wait === true,
+    wait_mode: request.wait_mode ?? null,
+    wait_outcome: waitOutcome,
   };
 }
 
@@ -2636,18 +2647,6 @@ function requireStopEndpoint(db, { appId, endpointId, processGeneration }) {
   return endpoint;
 }
 
-/** True when ANY ancestor of `parentId` sits in this endpoint's custody. */
-function ancestryHoldsCustodian(db, parentId, endpointId) {
-  let current = parentId;
-  for (let depth = 0; current && depth < 64; depth += 1) {
-    const node = db.prepare('SELECT parent_id, custodian_endpoint_id FROM obligations WHERE id = ?').get(current);
-    if (!node) return false;
-    if (node.custodian_endpoint_id === endpointId) return true;
-    current = node.parent_id;
-  }
-  return false;
-}
-
 function chainRootOf(db, obligationId) {
   let current = obligationId;
   for (let depth = 0; depth < 64; depth += 1) {
@@ -2663,19 +2662,6 @@ function chainRootOf(db, obligationId) {
  * awaiting_acceptance watch — the only unsafe shape the forward graph can
  * hold (STOP-BLOCK-UNOWNED).
  */
-function findUntrackedOffers(db, endpointId) {
-  const offers = db
-    .prepare("SELECT id, conversation_id, parent_id FROM obligations WHERE role = 'delegation' AND status = 'open' AND custodian_endpoint_id IS NULL")
-    .all();
-  const untracked = [];
-  for (const offer of offers) {
-    if (!ancestryHoldsCustodian(db, offer.parent_id, endpointId)) continue;
-    const watched = db.prepare("SELECT 1 FROM handoff_watches WHERE delegation_id = ? AND state = 'awaiting_acceptance'").get(offer.id);
-    if (!watched) untracked.push({ id: offer.id, conversation_id: offer.conversation_id });
-  }
-  return untracked;
-}
-
 /** Bounded diagnostic naming what blocks the stop; the hook feeds stderr to the model. */
 function renderUnsafeReason(untracked) {
   const listed = untracked
@@ -2881,6 +2867,17 @@ function unreadStopBlock(db, { endpoint, processGeneration, trace }) {
   };
 }
 
+function explicitWaitStop(db, { appId, endpoint, processGeneration, request, now, trace, obligationIds = [] }) {
+  if (request.wait_mode !== 'explicit' || endpoint.state === 'retiring' || !Number.isInteger(processGeneration)) return null;
+  const headless = endpoint.launch_mode === 'non_interactive' || isHeadlessDaemonProcess(endpoint); // the resumer restarts it when a reply lands
+  const result = unreadStopBlock(db, { endpoint, processGeneration, trace }) ?? explicitWaitGuard(db, { appId, endpoint, processGeneration, request, pending: headless ? [] : pendingReplyExpectations(db, endpoint, now), callerAction: callerActionForPendingOffer(db, endpoint, endpoint.principal_id) }, tightbeamCommandName());
+  if (result) trace.reason ??= result.decision === 'allow' ? 'explicit_allow' : 'pending_reply';
+  if (result?.decision !== 'allow') return result;
+  trace.ended_listeners = endUnsupportedTachyonListeners(db, { endpointId: endpoint.id, processGeneration, now, ...(headless ? { reason: 'background_wait_ended' } : {}) });
+  markEndpointIdle(db, { endpointId: endpoint.id, processGeneration, now });
+  return { ...result, obligation_ids: obligationIds };
+}
+
 // `trace` collects the decision branch for the post-commit session_stop_decided log.
 function parkEligibleEndpoint(db, { endpoint, processGeneration, now, obligationIds = [], backgroundWait = false, trace = {} }) {
   if (endpoint.state === 'retiring') return { decision: 'allow', obligation_ids: obligationIds };
@@ -2935,6 +2932,8 @@ function runSessionStop(context, connection, rawRequest) {
     process_generation: request.process_generation,
     // Only a set flag enters the hash, so unflagged ledger rows replay as before.
     ...(request.background_wait ? { background_wait: true } : {}),
+    ...(request.wait_mode ? { wait_mode: request.wait_mode } : {}),
+    ...(request.wait_outcome ? { wait_outcome: request.wait_outcome } : {}),
   });
   const replayed = findCommandReplay(context.db, { appId: connection.appId, operation: SESSION_STOP_OPERATION, idempotencyKey: request.idempotency_key, hash });
   if (replayed) {
@@ -2954,12 +2953,12 @@ function runSessionStop(context, connection, rawRequest) {
         processGeneration: request.process_generation,
       });
       launchMode = endpoint.launch_mode ?? null;
-      const untracked = findUntrackedOffers(context.db, endpoint.id);
+      const untracked = untrackedOffers(context.db, endpoint.id);
       const now = new Date().toISOString();
 
       let resultPayload;
       if (untracked.length === 0) {
-        resultPayload = parkEligibleEndpoint(context.db, { endpoint, processGeneration: request.process_generation, now, backgroundWait: request.background_wait, trace });
+        resultPayload = explicitWaitStop(context.db, { appId: connection.appId, endpoint, processGeneration: request.process_generation, request, now, trace }) ?? parkEligibleEndpoint(context.db, { endpoint, processGeneration: request.process_generation, now, backgroundWait: request.background_wait, trace });
         replyDiagnosticOutcomes.push(
           resultPayload.decision === 'park'
             ? 'parked'
@@ -2983,7 +2982,7 @@ function runSessionStop(context, connection, rawRequest) {
           for (const entry of counts) {
             context.db.prepare('UPDATE root_attention SET last_block_at = ?, updated_at = ? WHERE root_obligation_id = ?').run(now, now, entry.rootId);
           }
-          resultPayload = parkEligibleEndpoint(context.db, {
+          resultPayload = explicitWaitStop(context.db, { appId: connection.appId, endpoint, processGeneration: request.process_generation, request, now, trace, obligationIds: untracked.map((offer) => offer.id) }) ?? parkEligibleEndpoint(context.db, {
             endpoint,
             processGeneration: request.process_generation,
             now,

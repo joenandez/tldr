@@ -97,6 +97,7 @@ import { pushLiveDeliveryEvents, refreshWatermarkForAdoptedSession } from './mes
 import { publishPresentation } from './listener_operations.mjs';
 import { discloseReplacement } from './replacement_disclosure.mjs';
 import { expandStoredRuntimeIds, runtimeContract, runtimeIdEquals } from './resume_shared.mjs';
+import { clearUnprovenPermissionMode, isCopilotWakeRuntime, normalizeAcademyAgentName, normalizeAcademyPermissionMode } from '../copilot_wake.mjs';
 import { MAX_OWNER_START_IDENTITY_LENGTH, MAX_PROCESS_ID, normalizeStartIdentity, ownerCaptureSourceForRuntime } from '../owner_process_contract.mjs';
 
 const LAUNCH_MODES = new Set(['interactive', 'non_interactive']);
@@ -104,7 +105,7 @@ const LAUNCH_MODES = new Set(['interactive', 'non_interactive']);
 // The resumer mints 32 hex characters (src/daemon/resumer.mjs). The bound
 // is generous enough for any future minting shape and still a bound.
 const MAX_LAUNCH_TOKEN_LENGTH = 128;
-function normalizeOwnerProcess(ownerProcess, storedRuntime, providerSessionId) {
+function normalizeOwnerProcess(ownerProcess, expectedSource, providerSessionId) {
   if (ownerProcess === undefined || ownerProcess === null) return null;
   if (!ownerProcess || typeof ownerProcess !== 'object' || Array.isArray(ownerProcess) || providerSessionId === null) {
     throw new TightbeamError('malformed_request', 'owner_process requires a session-backed complete proven owner snapshot', { field: 'owner_process' });
@@ -113,7 +114,6 @@ function normalizeOwnerProcess(ownerProcess, storedRuntime, providerSessionId) {
   if (Object.keys(ownerProcess).length !== fields.length || Object.keys(ownerProcess).some((field) => !fields.includes(field))) {
     throw new TightbeamError('malformed_request', 'owner_process contains unsupported or partial facts', { field: 'owner_process' });
   }
-  const expectedSource = ownerCaptureSourceForRuntime(storedRuntime);
   if (
     expectedSource === null ||
     ownerProcess.capture_source !== expectedSource ||
@@ -289,7 +289,7 @@ function adoptAvailabilityTakeover(db, { endpoint, providerSessionId, launchToke
   const changed = db.prepare(
     `UPDATE endpoints
         SET state = 'idle', process_generation = process_generation + 1,
-            launch_mode = 'non_interactive', host_name = ?, host_ref = ?,
+            launch_mode = 'non_interactive', host_name = ?, host_ref = ?, academy_permission_mode = NULL,
             owner_process_pid = ?, owner_process_start_identity = ?, owner_process_group_id = ?, owner_process_capture_source = ?,
             owner_process_generation = CASE WHEN ? IS NULL THEN NULL ELSE process_generation + 1 END,
             owner_process_exited_at = NULL,
@@ -337,7 +337,7 @@ export const endpointRegisterOp = {
     if (typeof principalId !== 'string' || principalId.length === 0) {
       throw new TightbeamError('malformed_request', 'principal_id is required and must be a string', { field: 'principal_id' });
     }
-    for (const field of ['provider_session_id', 'authority_reference', 'launch_token', 'academy_agent_name', 'placeholder_endpoint_id', 'host_name', 'host_ref']) {
+    for (const field of ['provider_session_id', 'authority_reference', 'launch_token', 'academy_agent_name', 'academy_permission_mode', 'placeholder_endpoint_id', 'host_name', 'host_ref']) {
       const value = payload[field];
       if (value !== undefined && value !== null && typeof value !== 'string') {
         throw new TightbeamError('malformed_request', `${field} must be a string when present`, { field });
@@ -387,10 +387,7 @@ export const endpointRegisterOp = {
     const authorityReference = payload.authority_reference ?? null;
     const launchToken = payload.launch_token ?? null;
     const placeholderHint = payload.placeholder_endpoint_id || null;
-    const academyAgentName = payload.academy_agent_name ?? null;
-    if (academyAgentName !== null && !/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(academyAgentName)) {
-      throw new TightbeamError('malformed_request', 'academy_agent_name must be a valid Academy specialist name when present', { field: 'academy_agent_name' });
-    }
+    const academyAgentName = normalizeAcademyAgentName(payload.academy_agent_name);
     const hostName = payload.host_name ?? null;
     const hostRef = payload.host_ref ?? null;
     if (hostName !== null && !HOST_NAME_PATTERN.test(hostName)) {
@@ -406,7 +403,9 @@ export const endpointRegisterOp = {
     // and it must fail loudly at resume time instead (header comment).
     const { canonicalize, acceptedStoredIds } = runtimeContract(context);
     const storedRuntime = canonicalize(runtime) ?? runtime;
-    const ownerProcess = normalizeOwnerProcess(payload.owner_process, storedRuntime, providerSessionId);
+    const copilotWake = isCopilotWakeRuntime(context.runtimeRegistry, storedRuntime);
+    const academyPermissionMode = normalizeAcademyPermissionMode(payload, { wakeRuntime: copilotWake, academyAgentName });
+    const ownerProcess = normalizeOwnerProcess(payload.owner_process, ownerCaptureSourceForRuntime(storedRuntime, copilotWake), providerSessionId);
     const initialState = providerSessionId === null ? 'dead' : 'idle';
     const endpointId = generateId('endpoint');
     const now = new Date().toISOString();
@@ -465,7 +464,7 @@ export const endpointRegisterOp = {
           // exactly as an insert would.
           const changed = context.db
             .prepare(
-              `UPDATE endpoints SET provider_session_id = ?, state = 'idle', launch_mode = ?, academy_agent_name = COALESCE(academy_agent_name, ?),
+              `UPDATE endpoints SET provider_session_id = ?, state = 'idle', launch_mode = ?, academy_agent_name = COALESCE(academy_agent_name, ?), academy_permission_mode = ?,
                     host_name = ?, host_ref = ?,
                     process_generation = COALESCE(process_generation, 0) + 1,
                     owner_epoch = owner_epoch + 1, owner_launch_token = ?,
@@ -475,7 +474,7 @@ export const endpointRegisterOp = {
                 WHERE id = ? AND provider_session_id IS NULL AND state NOT IN ('closed', 'retiring', 'takeover_pending')`,
             )
             .run(
-              providerSessionId, launchMode, academyAgentName, hostName, hostRef, launchToken,
+              providerSessionId, launchMode, academyAgentName, academyPermissionMode, hostName, hostRef, launchToken,
               ownerProcess?.pid ?? null, ownerProcess?.start_identity ?? null, ownerProcess?.process_group_id ?? null, ownerProcess?.capture_source ?? null,
               ownerProcess?.pid ?? null, now, candidates[0].id,
             );
@@ -549,9 +548,9 @@ export const endpointRegisterOp = {
         context.db
           .prepare(
             `INSERT INTO endpoints
-              (id, principal_id, authority_name, provider_session_id, state, runtime, launch_mode, authority_reference, academy_agent_name, host_name, host_ref, created_by_app_id, process_generation, owner_epoch, owner_launch_token,
+              (id, principal_id, authority_name, provider_session_id, state, runtime, launch_mode, authority_reference, academy_agent_name, academy_permission_mode, host_name, host_ref, created_by_app_id, process_generation, owner_epoch, owner_launch_token,
                owner_process_pid, owner_process_start_identity, owner_process_group_id, owner_process_capture_source, owner_process_generation, created_at, updated_at)
-              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
           // A session-backed first registration is a live runtime taking
           // ownership: generation 1 and epoch 1. A sessionless placeholder
@@ -560,7 +559,7 @@ export const endpointRegisterOp = {
           // A sessionless placeholder is nobody's launch yet, so it carries
           // no owner token either; the adoption seam above stamps one.
           .run(
-            endpointId, principalId, authorityName, providerSessionId, initialState, storedRuntime, launchMode, authorityReference, academyAgentName, hostName, hostRef, connection.appId,
+            endpointId, principalId, authorityName, providerSessionId, initialState, storedRuntime, launchMode, authorityReference, academyAgentName, academyPermissionMode, hostName, hostRef, connection.appId,
             providerSessionId === null ? null : 1, providerSessionId === null ? 0 : 1, providerSessionId === null ? null : launchToken,
             ownerProcess?.pid ?? null, ownerProcess?.start_identity ?? null, ownerProcess?.process_group_id ?? null, ownerProcess?.capture_source ?? null, ownerProcess ? 1 : null,
             now, now,
@@ -675,13 +674,13 @@ export const endpointRegisterOp = {
         context.db
           .prepare(
             `UPDATE endpoints SET state = 'idle', process_generation = COALESCE(process_generation, 0) + 1, owner_epoch = owner_epoch + 1, owner_launch_token = ?,
-                 launch_mode = CASE WHEN ? IS NOT NULL THEN launch_mode ELSE COALESCE(?, launch_mode) END, host_name = ?, host_ref = ?,
+                 launch_mode = CASE WHEN ? IS NOT NULL THEN launch_mode ELSE COALESCE(?, launch_mode) END, host_name = ?, host_ref = ?, academy_permission_mode = ?,
                  owner_process_pid = ?, owner_process_start_identity = ?, owner_process_group_id = ?, owner_process_capture_source = ?,
                  owner_process_generation = CASE WHEN ? IS NULL THEN NULL ELSE COALESCE(process_generation, 0) + 1 END,
                  owner_process_exited_at = NULL, updated_at = ? WHERE id = ? AND state = 'dead'`,
           )
           .run(
-            launchToken, launchToken, launchMode, hostName, hostRef,
+            launchToken, launchToken, launchMode, hostName, hostRef, academyPermissionMode,
             ownerProcess?.pid ?? null, ownerProcess?.start_identity ?? null, ownerProcess?.process_group_id ?? null, ownerProcess?.capture_source ?? null,
             ownerProcess?.pid ?? null, now, existing.id,
           );
@@ -715,7 +714,7 @@ export const endpointRegisterOp = {
             `UPDATE endpoints
                 SET owner_process_pid = ?, owner_process_start_identity = ?, owner_process_group_id = ?, owner_process_capture_source = ?,
                     owner_process_generation = process_generation, owner_process_exited_at = NULL,
-                    owner_launch_token = ?, host_name = ?, host_ref = ?,
+                    owner_launch_token = ?, host_name = ?, host_ref = ?, academy_permission_mode = ?,
                     launch_mode = CASE WHEN ? IS NULL OR ? IS NOT NULL THEN launch_mode ELSE ? END,
                     state = CASE WHEN state = 'retiring' THEN 'idle' ELSE state END,
                     updated_at = ?
@@ -723,7 +722,7 @@ export const endpointRegisterOp = {
           )
           .run(
             ownerProcess.pid, ownerProcess.start_identity, ownerProcess.process_group_id, ownerProcess.capture_source,
-            launchToken, hostName, hostRef, launchMode, launchToken, launchMode, now, existing.id, existing.process_generation,
+            launchToken, hostName, hostRef, academyPermissionMode, launchMode, launchToken, launchMode, now, existing.id, existing.process_generation,
           ).changes === 1;
         bindingReplaced = true;
         if (restamped && existing.state === 'retiring') replayState = 'idle';
@@ -742,6 +741,7 @@ export const endpointRegisterOp = {
       } else if (launchMode !== null && launchToken === null) {
         context.db.prepare('UPDATE endpoints SET launch_mode = ?, updated_at = ? WHERE id = ?').run(launchMode, now, existing.id);
       }
+      if (!bindingReplaced && ownerProcess === null) clearUnprovenPermissionMode(context, existing.id, academyPermissionMode);
       if (academyAgentName !== null) {
         context.db.prepare('UPDATE endpoints SET academy_agent_name = COALESCE(academy_agent_name, ?) WHERE id = ?').run(academyAgentName, existing.id);
       }

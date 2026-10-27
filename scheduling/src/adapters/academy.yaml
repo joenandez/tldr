@@ -67,6 +67,32 @@ variants:
         parse: jsonl
         match: { type: thread.started }
         path: $.thread_id
+  copilot:
+    command:
+      argv:
+        [
+          academy,
+          run,
+          "{{provider_config.academy_agent}}",
+          --agent,
+          copilot,
+          --,
+          --output-format,
+          stream-json,
+          "--prompt={{prompt}}",
+        ]
+      env: {}
+    session_id:
+      capture:
+        strategy: stdout_parse
+        from: stdout
+        parse: jsonl
+        match:
+          type: academy.session.started
+          version: 1
+          provider: copilot
+        path: $.session_id
+        value_pattern: "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 
 resume:
   command: "academy resume {{session_id}}"

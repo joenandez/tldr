@@ -1,4 +1,4 @@
-const SUPPORTED_AGENTS = new Set(["claude", "codex"]);
+const SUPPORTED_AGENTS = new Set(["claude", "codex", "copilot"]);
 const SHELL_COMMANDS = new Set(["sh", "bash", "zsh"]);
 
 function basename(command) {

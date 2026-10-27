@@ -45,14 +45,15 @@ it reports read-only status.
 
 Commands:
   configure  Open the app to change owner or replace the API key, or
-             disconnect email.
+             disconnect email; --channel slack disconnect removes Slack.
   setup      Connect email in the signed tldr; app, installing it if
-             needed; messaging and tasks work without it. Refuses to
-             replace a newer release or another product line unless
-             --force-downgrade is given.
-  status     Show messaging, scheduled tasks, and email status.
-  repair     Repair messaging, scheduled tasks, or email; each names its
-             own fix.
+             needed, or Slack with --channel slack; messaging and tasks
+             work without either. Refuses to replace a newer release or
+             another product line unless --force-downgrade is given.
+  status     Show messaging, scheduled tasks, and email status, plus
+             Slack (--channel slack checks it live).
+  repair     Repair messaging, scheduled tasks, or email, or Slack with
+             --channel slack; each names its own fix.
   uninstall  Open the app to confirm removing tldr; from this Mac.
   version    Print the active public or local development version.
 

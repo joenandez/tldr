@@ -6,7 +6,10 @@ import {
   parseCapturedSessionId,
   resolveSidecarDiff,
 } from "./capture.mjs";
-import { insertRuntimeOptionArgv } from "../runtime_options.mjs";
+import {
+  academyCopilotOptionErrors,
+  insertRuntimeOptionArgv,
+} from "../runtime_options.mjs";
 
 const VALID_CAPTURE_STRATEGIES = new Set(["stdout_parse", "sidecar_diff"]);
 const VALID_PARSE_FORMATS = new Set(["json", "jsonl", "regex"]);
@@ -70,6 +73,16 @@ function validateSessionIdBlock(sid) {
         throw new Error(
           "manifest: capture.snapshot.id_path required for sidecar_diff",
         );
+      }
+    }
+    if (sid.capture.value_pattern !== undefined) {
+      if (typeof sid.capture.value_pattern !== "string") {
+        throw new Error("manifest: capture.value_pattern must be a string");
+      }
+      try {
+        new RegExp(sid.capture.value_pattern);
+      } catch {
+        throw new Error("manifest: capture.value_pattern must be valid regex");
       }
     }
   }
@@ -216,6 +229,12 @@ function resolveSessionIdSpec(doc, variant) {
 
 function compilePrepare(doc) {
   return function prepare({ job, run, prompt, model } = {}) {
+    const optionErrors = academyCopilotOptionErrors(job);
+    if (optionErrors.length > 0) {
+      throw new Error(
+        `manifest: invalid Academy Copilot runtime options: ${optionErrors.join(", ")}`,
+      );
+    }
     const variant = selectVariant(doc, job);
     const command = resolveCommandSpec(doc, variant);
     const sid = resolveSessionIdSpec(doc, variant);

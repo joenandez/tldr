@@ -82,6 +82,7 @@ function projection(row) {
     state: row.state,
     launch_mode: row.launch_mode ?? null,
     authority_reference: row.authority_reference ?? null,
+    academy_agent_name: row.academy_agent_name ?? null,
     owner_process_pid: row.owner_process_pid ?? null,
     owner_process_exited_at: row.owner_process_exited_at ?? null,
     tachyon_armed: isTachyonArmedForGeneration(row, row.process_generation),
@@ -148,7 +149,7 @@ export const endpointListOp = {
     const rows = context.db
       .prepare(
         `SELECT id, principal_id, authority_name, runtime, provider_session_id, state, launch_mode,
-                authority_reference, owner_process_pid, owner_process_exited_at, process_generation,
+                authority_reference, academy_agent_name, owner_process_pid, owner_process_exited_at, process_generation,
                 tachyon_armed_process_generation, created_at, updated_at, closed_at,
                 (SELECT original.replacement_endpoint_id FROM resume_requests original
                   WHERE original.endpoint_id = endpoints.id

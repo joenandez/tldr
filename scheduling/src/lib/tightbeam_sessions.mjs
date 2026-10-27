@@ -96,9 +96,11 @@ export function sessionFromEndpoint(row) {
     state_since: Number.isFinite(updated) ? updated : null,
     session_started_at: row.created_at || null,
     cwd: row.authority_reference || null,
+    academy_agent_name: row.academy_agent_name || null,
     launch_mode: row.launch_mode || null,
     pid: Number.isInteger(row.owner_process_pid) ? row.owner_process_pid : null,
     endpoint_id: row.endpoint_id || null,
+    principal_id: row.principal_id || null,
     source: "tightbeam",
   };
 }

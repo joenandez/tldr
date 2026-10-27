@@ -12,6 +12,7 @@ import { refreshSessionWatermark } from './ops/message_shared.mjs';
 import { observeRetirementProcess, runEndpointRetirementExecutor, runOwnerProcessReconciliation } from './retirement_executor.mjs';
 import { endUnsupportedTachyonListeners, isTachyonArmedForGeneration } from './tachyon_arming.mjs';
 import { liveResumeChildFor } from './resumer.mjs';
+import { maybeRequestHostWake } from './session_host.mjs';
 import { closedWorkNoticeSql, endpointHasWakingUnreadSql } from './lifecycle_transition.mjs';
 import { threadHostObserverFor } from './codex_thread_host.mjs';
 import { observeOwnerLiveness, readOwnerFence } from './owner_liveness.mjs';
@@ -357,6 +358,7 @@ export function runListenerReconciliation(context, { now = new Date(), startup =
   const nowMs = now.getTime();
   const disconnectedKeys = new Set(disconnected.map(({ listenerId, listenerGeneration }) => `${listenerId}\u0000${listenerGeneration}`));
   const summary = { ended: 0, missed: 0, retirements: 0, reparks: 0, retries: 0, takeovers: 0, takeover_deferrals: 0 };
+  const missedDeliveries = [];
 
   withTransaction(context.db, () => {
     const listeners = context.db
@@ -391,6 +393,7 @@ export function runListenerReconciliation(context, { now = new Date(), startup =
             const outcome = missPresentation(context, listener, presentation, reason, timestamp);
             if (outcome.missed) {
               summary.missed += 1;
+              missedDeliveries.push({ endpointId: listener.endpoint_id, deliveryId: presentation.target_delivery_id });
               if (outcome.retirement?.admitted) summary.retirements += 1;
               if (outcome.retirement?.recoverable) restoreSameOwnerAvailability(context.db, presentation, timestamp);
               replyContinuityDiagnostic(context.logger, reason === 'connection_lost' ? 'disconnect' : 'deadline');
@@ -457,6 +460,12 @@ export function runListenerReconciliation(context, { now = new Date(), startup =
     }
     pruneAdmissionDeferrals(context, candidateIds);
   });
+  // A miss ends the listener and queues no resume request, so an idle hosted
+  // session would sit on its unread reply. Wake pushes run after the commit;
+  // requestWake still checks that the session is idle, has waking unread mail, and has a connected host.
+  for (const { endpointId, deliveryId } of missedDeliveries) {
+    maybeRequestHostWake(context, { endpointId, wakeId: deliveryId, now });
+  }
   return summary;
 }
 

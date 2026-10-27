@@ -42,6 +42,10 @@ import { reconcileCustodyLoss } from './custody_reconciler.mjs';
 import { acquireClaim, reapExpired, releaseClaim, resolveLeaseMs, DEFAULT_LEASE_MS } from './ops/claims_shared.mjs';
 import { MAX_RESUME_ATTEMPTS, EXACT_SESSION_UNAVAILABLE, CODEX_HOST_UNKNOWN, CODEX_QUEUE_REFUSED, CODEX_QUEUE_FAILED, hostedAttentionSource } from './ops/resume_fail.mjs';
 import { expandStoredRuntimeIds } from './ops/resume_shared.mjs';
+import { prepareResumeDebugLog } from './resume_debug_log.mjs';
+export { RESUME_DEBUG_RETAINED_BYTES, RESUME_DEBUG_RETAINED_LOGS } from './resume_debug_log.mjs';
+import { COPILOT_SESSION_UNAVAILABLE, copilotLoadFailed, copilotWakeScopeSql, planCopilotWake, refuseCopilotWake, wakeStdin } from './copilot_wake.mjs';
+import { isPackageBoundCopilotRecord, WAKE_MESSAGE_ID } from '../runtimes/copilot_wake_contract.mjs';
 import { createRuntimeRegistry } from '../runtimes/registry.mjs';
 import { generateId } from '../protocol/ids.mjs';
 import { validateRecoveryContextState } from './ops/recovery_context.mjs';
@@ -925,12 +929,6 @@ function forgetDeferral(context, requestId) {
   loggedChildDeferrals.get(context)?.delete(requestId);
 }
 
-// What <state-root>/resume-debug keeps of Claude's debug logs: the newest
-// 20, at most 64 MiB between them, none older than a week.
-export const RESUME_DEBUG_RETAINED_LOGS = 20;
-export const RESUME_DEBUG_RETAINED_BYTES = 64 * 1024 * 1024;
-const RESUME_DEBUG_RETAINED_MS = 7 * 24 * 60 * 60 * 1000;
-
 // A captured stdout larger than this is trimmed on the next tick.
 export const CHILD_OUTPUT_TRIM_BYTES = 4 * 1024 * 1024;
 
@@ -1070,7 +1068,7 @@ export function buildChildInvocation({ record, sessionId, messageId, messageIds 
     return {
       form: 'resume',
       command: academyAgentName ? 'academy' : record.command,
-      args: academyAgentName ? ['run', academyAgentName, '--agent', record.id, '--', ...runtimeArgs] : runtimeArgs,
+      args: academyAgentName ? ['run', academyAgentName, '--runtime-once', record.id, '--', ...runtimeArgs] : runtimeArgs, // --runtime-once pins the session's own provider without persisting it; --agent would rewrite agent.yaml and re-register Helm jobs
       prompt: resumeBrief({ messageId, messageIds, form: 'resume', externalMessageIds, pendingContext }),
       debugFile: debug.length > 0 ? debugFile : null,
     };
@@ -1085,7 +1083,7 @@ export function buildChildInvocation({ record, sessionId, messageId, messageIds 
 }
 
 // Only well-formed, daemon-minted ids may be spliced into an argument vector.
-const QUEUE_MESSAGE_ID = /^msg_[0-9A-Za-z_-]{1,64}$/;
+const QUEUE_MESSAGE_ID = WAKE_MESSAGE_ID;
 const QUEUE_SESSION_ID = /^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$/;
 
 /**
@@ -1112,52 +1110,6 @@ export function buildHostedQueueInvocation({ record, sessionId, messageIds, exte
     prompt: null,
     debugFile: null,
   };
-}
-
-/**
- * Makes room for one more Claude debug log in a private directory, oldest
- * removed first, inside the count, byte, and age bounds above. Only regular
- * files are counted or removed (Claude keeps a `latest` symlink there). A
- * log is diagnostic evidence, never state, so nothing here blocks a launch.
- */
-function prepareResumeDebugLog(debugFile, logger, requestId) {
-  const dir = path.dirname(debugFile);
-  let names;
-  try {
-    fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
-    fs.chmodSync(dir, 0o700);
-    names = fs.readdirSync(dir);
-  } catch (err) {
-    logger?.warn({ event: 'resume_debug_log_prune_failed', resume_request_id: requestId, message: err.message });
-    return;
-  }
-  const logs = [];
-  for (const name of names) {
-    if (!name.endsWith('.log')) continue;
-    const file = path.join(dir, name);
-    try {
-      const stat = fs.lstatSync(file);
-      if (stat.isFile()) logs.push({ file, mtimeMs: stat.mtimeMs, size: stat.size });
-    } catch {
-      // removed since the listing
-    }
-  }
-  logs.sort((a, b) => b.mtimeMs - a.mtimeMs);
-  const oldestKeptMs = Date.now() - RESUME_DEBUG_RETAINED_MS;
-  let kept = 0;
-  let bytes = 0;
-  for (const log of logs) {
-    bytes += log.size;
-    if (kept < RESUME_DEBUG_RETAINED_LOGS - 1 && bytes <= RESUME_DEBUG_RETAINED_BYTES && log.mtimeMs >= oldestKeptMs) {
-      kept += 1;
-      continue;
-    }
-    try {
-      fs.rmSync(log.file, { force: true });
-    } catch (err) {
-      logger?.warn({ event: 'resume_debug_log_prune_failed', resume_request_id: requestId, message: err.message });
-    }
-  }
 }
 
 /**
@@ -1511,7 +1463,7 @@ function launchExitReason(diagnostic) {
 
 // A child may exit after its lease was reclaimed or its message was read.
 // Only that launch's still-held claim may decide transport failure.
-function failSupervisedAttempt(db, { requestId, token, unavailable = false, authenticationFailed = false, rateLimited = false, now = new Date() }) {
+function failSupervisedAttempt(db, { requestId, token, unavailable = false, authenticationFailed = false, rateLimited = false, terminalReason = null, now = new Date() }) {
   return withTransaction(db, () => {
     const row = db.prepare(
       `SELECT c.* FROM claims c JOIN resume_requests r ON r.id = c.resource_id
@@ -1532,13 +1484,13 @@ function failSupervisedAttempt(db, { requestId, token, unavailable = false, auth
       db.prepare("UPDATE claims SET lease_expires_at = ?, outcome = 'backoff' WHERE id = ?").run(retryAt, row.id);
       return { state: 'backoff', attempt: row.attempt_count, delay_ms: delayMs, retry_at: retryAt };
     }
-    const state = unavailable || authenticationFailed || row.attempt_count >= MAX_RESUME_ATTEMPTS ? 'failed' : 'pending';
+    const state = unavailable || authenticationFailed || terminalReason || row.attempt_count >= MAX_RESUME_ATTEMPTS ? 'failed' : 'pending';
     releaseClaim(db, { row, outcome: 'failed', now });
     db.prepare(
       `UPDATE resume_requests SET state = ?, updated_at = ?,
-         replacement_failure_reason = CASE WHEN ? THEN ? ELSE replacement_failure_reason END
+         replacement_failure_reason = CASE WHEN ? THEN ? ELSE COALESCE(?, replacement_failure_reason) END
         WHERE id = ? AND state = 'claimed'`,
-    ).run(state, now.toISOString(), unavailable ? 1 : 0, EXACT_SESSION_UNAVAILABLE, requestId);
+    ).run(state, now.toISOString(), unavailable ? 1 : 0, EXACT_SESSION_UNAVAILABLE, terminalReason, requestId);
     const replacement = unavailable ? admitReplacement(db, { requestId, now: now.toISOString() }) : null;
     return { state, attempt: row.attempt_count, ...(replacement ? { replacement } : {}) };
   });
@@ -1775,6 +1727,7 @@ function takeChildOutputResult(context, capture, requestId) {
 // Persist a bounded allowlisted diagnostic, never arbitrary stderr text.
 function childExitDiagnostic(stderr, unavailable, providerResult = null) {
   if (unavailable) return EXACT_SESSION_UNAVAILABLE;
+  if (copilotLoadFailed(stderr)) return COPILOT_SESSION_UNAVAILABLE;
   if (providerResult?.error === 'authentication_failed') return 'authentication_failed';
   if (providerResult?.error === 'rate_limit') return 'rate_limited';
   if (/unexpected argument|unknown option|unrecognized (?:argument|option)|invalid argument/i.test(stderr)) return 'invalid_arguments';
@@ -2075,6 +2028,7 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
   // the same state root; the daemon always wires the real snapshot.
   const registry = context.runtimeRegistry ?? createRuntimeRegistry({ stateRoot: context.stateRoot });
   const daemonRecords = registry.list().filter((record) => record.resumeStrategy === 'daemon');
+  const wakeRecords = registry.list().filter((record) => isPackageBoundCopilotRecord(record));
 
   // A delivery that predates the old owner's retirement or exit could not
   // use the normal resume route. Materialize precisely one wake only here,
@@ -2145,7 +2099,7 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
   // stay eligible for managed resume without being rewritten) plus the
   // exact manifest ids. External-strategy records are never selected.
   const selectableRuntimeIds = expandStoredRuntimeIds(
-    daemonRecords.map((record) => record.id),
+    [...daemonRecords, ...wakeRecords].map((record) => record.id),
     registry.acceptedStoredIds,
   );
   const runtimePlaceholders = selectableRuntimeIds.map(() => '?').join(',');
@@ -2194,7 +2148,8 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
       // resumes that adopted session: a placeholder is cold-started at most
       // once, never beside the session it became (capture adaptation A2).
       `SELECT r.id AS id, COALESCE(r.session_id, e.provider_session_id) AS session_id, r.message_id AS message_id, r.endpoint_id AS endpoint_id, r.reason AS reason,
-              r.principal_id AS principal_id, r.authority_reference AS authority_reference, e.runtime AS runtime, e.academy_agent_name AS academy_agent_name
+              r.principal_id AS principal_id, r.authority_reference AS authority_reference, e.runtime AS runtime, e.academy_agent_name AS academy_agent_name,
+              e.academy_permission_mode AS academy_permission_mode, e.provider_session_id AS endpoint_session_id
          FROM resume_requests r
          JOIN endpoints e ON e.id = r.endpoint_id
         WHERE r.state = 'pending'
@@ -2202,6 +2157,7 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
           AND ${NOT_SUPERSEDED_ENDPOINT}
           AND ${endpointHasWakingUnreadSql('e.id')}
           AND e.runtime IN (${runtimePlaceholders})
+          AND ${copilotWakeScopeSql(wakeRecords)}
           -- One representative per endpoint keeps a large sibling backlog
           -- from consuming the materialisation bound and starving unrelated
           -- endpoints. Per-message request rows remain durable and pending.
@@ -2297,15 +2253,20 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
     const externalMessageIds = new Set(db.prepare(`SELECT m.id FROM deliveries d JOIN messages m ON m.id = d.message_id
       WHERE d.endpoint_id = ? AND d.state != 'failed' AND d.read_at IS NULL AND m.origin = 'inbound' AND m.origin_channel_route_id IS NOT NULL`).all(request.endpoint_id).map((row) => row.id));
     const runtimeRecord = registry.get(request.runtime);
-    let invocation = buildChildInvocation({
+    const pendingContext = new Map(unread.map((row) => [row.message_id, notificationContext(db, row.message_id, { deliveryId: row.id })]));
+    const wake = planCopilotWake({ record: runtimeRecord, request, messageIds, externalMessageIds, pendingContext, briefFor: resumeBrief });
+    if (wake?.refusal) {
+      summary.failed += refuseCopilotWake({ context, request, refusal: wake.refusal, now, ops: { failRequest, stageTerminalFailureNotice } });
+      continue;
+    }
+    let invocation = wake?.invocation ?? buildChildInvocation({
       record: runtimeRecord,
       sessionId: request.session_id,
       messageId: messageIds[0] ?? request.message_id,
       messageIds,
       academyAgentName: request.academy_agent_name,
       externalMessageIds,
-      // The endpoint's own delivery lets a typed notice brief as its S11 line.
-      pendingContext: new Map(unread.map((row) => [row.message_id, notificationContext(db, row.message_id, { deliveryId: row.id })])),
+      pendingContext,
       // Named by a fresh nonce, never a stored id: no database column may
       // reach an argument vector (test/unit/no_child_process.test.mjs), and
       // an imported request id could otherwise walk out of the directory.
@@ -2511,6 +2472,7 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
     }
     const custodyCapture = captureLaunchCustody(db, request.endpoint_id, launchToken);
     if (invocation.debugFile) prepareResumeDebugLog(invocation.debugFile, logger, request.id);
+    if (wake) invocation = { ...invocation, prompt: wakeStdin(db, request, claim) };
     const output = openChildOutputCapture(context, request.id);
     let child;
     try {
@@ -2711,7 +2673,7 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
         }
         if (failed) {
           const authenticationFailed = diagnostic === 'authentication_failed';
-          const failure = failSupervisedAttempt(db, { requestId: request.id, token: claim.token, unavailable, authenticationFailed, rateLimited: diagnostic === 'rate_limited' });
+          const failure = failSupervisedAttempt(db, { requestId: request.id, token: claim.token, unavailable, authenticationFailed, rateLimited: diagnostic === 'rate_limited', terminalReason: diagnostic === COPILOT_SESSION_UNAVAILABLE ? diagnostic : null });
           if (failure) {
             if (failure.state === 'failed') summary.failed += 1;
             if (failure.state === 'backoff') {

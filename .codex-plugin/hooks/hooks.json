@@ -27,8 +27,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${PLUGIN_ROOT}/bin/tldr-agents\" messaging hook stop",
-            "timeout": 14460,
+            "command": "\"${PLUGIN_ROOT}/bin/tldr-agents\" messaging hook stop --wait-mode explicit",
+            "timeout": 30,
             "_tightbeam": "tightbeam-managed:runtime-hooks-v2"
           }
         ]

@@ -241,6 +241,67 @@ install share one app credential and the same OS user, so this is not a boundary
 against a process that bypasses the CLI; per-session credentials are planned as
 the next feature.
 
+## Wait for a known reply
+
+When a tracked request, delegation, or channel reply is expected, wait in one
+CLI command:
+
+```sh
+"$TLDR_BIN" messaging agent wait
+```
+
+Optional wait syntax is `agent wait [--timeout <duration>] [--json]`.
+
+The wait checks immediately, then polls every five seconds in the same process
+and connection. Its timeout defaults to four hours. JSON outcomes are
+`message`, `timeout`, or `cancelled`; only `message` includes a message ID and
+the exact `agent receive --message <message-id>` action. The notification is
+bodyless and does not mark the message read. Run `receive` separately to read
+the content. Timeout or cancellation ends only this wait; it leaves the message
+and reply obligation in place. After a wait ends with no reply, decide from
+context whether to wait again or stop; Stop does not force another wait for
+the same replies. A headless session can simply stop: it is resumed when the
+reply arrives.
+
+In Codex CodeMode, the outer `functions.exec` yield is separate from the
+nested shell's initial `exec_command` yield. Use the absolute package front
+door path printed by the Stop hook in place of `<package-front-door>`. For a
+345-second arrival probe, run the 350-second CLI wait and its blocking
+continuation within one CodeMode call:
+
+```js
+// @exec: {"yield_time_ms": 360000}
+let result = await tools.exec_command({
+  cmd: '"<package-front-door>" messaging agent wait --timeout 350s --json',
+  yield_time_ms: 30000,
+});
+while (result.session_id) {
+  result = await tools.write_stdin({
+    session_id: result.session_id,
+    chars: "",
+    yield_time_ms: 300000,
+  });
+}
+text(result.output);
+```
+
+The 350-second CLI timeout is an explicit client bound with startup and
+handling time inside the 360-second outer window; the four-hour CLI default/max
+describes product policy, not the host's maximum outer-call duration. This
+recipe shape still requires native Codex proof. If the host cannot provide
+that window or resumable `write_stdin`, state the shorter timeout explicitly
+and report its outcome; do not silently shorten the wait or issue recurring
+model-side `functions.wait` calls. See
+[`agent-wait.md`](../../messaging/docs/agent-wait.md) for the complete behavior
+and limits.
+
+Refreshed Codex and Claude Stop hooks use the brief guard selector
+`messaging hook stop --wait-mode explicit` and have a 30-second host timeout.
+The retained background hook selector is
+`messaging hook stop --handoff --wait-mode explicit`; its existing
+`wake-listen` step remains. Legacy Stop hooks without the selector keep their
+existing long-wait behavior until refreshed.
+
 ## Start an external user message
 
 To start a new external user message, use the registered channel routes:

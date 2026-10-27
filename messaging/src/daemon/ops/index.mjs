@@ -44,6 +44,7 @@ import { hostSubscribeOp } from './host_subscribe.mjs';
 import { hostWakeResultOp } from './host_wake_result.mjs';
 import { resumeListOp } from './resume_list.mjs';
 import { resumeClaimOp } from './resume_claim.mjs';
+import { resumeAssertActiveOp } from './resume_assert_active.mjs';
 import { resumeCompleteOp } from './resume_complete.mjs';
 import { resumeFailOp } from './resume_fail.mjs';
 import { stateExportOp } from './state_export.mjs';
@@ -171,6 +172,7 @@ export function buildOpTable() {
   registerOp(table, hostWakeResultOp);
   registerOp(table, resumeListOp);
   registerOp(table, resumeClaimOp);
+  registerOp(table, resumeAssertActiveOp);
   registerOp(table, resumeCompleteOp);
   registerOp(table, resumeFailOp);
   registerOp(table, stateExportOp);

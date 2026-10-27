@@ -15,6 +15,10 @@ import {
   productionRun,
   tightbeamInvocation,
 } from "./tightbeam_channel_runtime.mjs";
+import {
+  readSlackCredentials,
+  slackHealthProblems,
+} from "./slack_credentials.mjs";
 import { projectCapabilities } from "./tldr_capabilities.mjs";
 
 // Helm's scheduler status port (scheduling/src/lib/service.mjs
@@ -115,6 +119,21 @@ export function createTasksLivenessReader({
     });
 }
 
+// Cheap and offline: credentials with an owner and no last-observed problem
+// (dead token or missing route, from the daemon, listener or
+// `status --channel slack`) mean connected; anything else needs attention.
+export function readSlackCapabilityState() {
+  try {
+    const credentials = readSlackCredentials();
+    if (!credentials) return "not_connected";
+    return credentials.ownerUserId && slackHealthProblems().length === 0
+      ? "connected"
+      : "needs_attention";
+  } catch {
+    return "needs_attention";
+  }
+}
+
 // Boundary logs on stderr: failures always, results only when asked.
 function logProbeEvent(level, event, fields) {
   if (level === "info" && process.env.TLDR_AGENT_DEBUG_CAPABILITIES !== "1") {
@@ -161,6 +180,7 @@ export async function probeColdCapabilities({
     tasks,
     nativeStatus: "unavailable",
     appInstalled: false,
+    slack: readSlackCapabilityState(),
   });
   logProbeEvent("info", "cold_capability_probe_result", {
     messaging: capabilities.messaging.state,

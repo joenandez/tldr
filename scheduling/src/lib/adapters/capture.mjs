@@ -22,6 +22,15 @@ function matchesPredicate(record, match) {
   return Object.entries(match).every(([k, v]) => record?.[k] === v);
 }
 
+function formatValue(value, spec) {
+  if (value === undefined || value === null) return null;
+  const text = String(value);
+  if (spec.value_pattern && !new RegExp(spec.value_pattern).test(text)) {
+    return null;
+  }
+  return text;
+}
+
 export function parseCapturedSessionId(spec, { stdout = '', stderr = '' } = {}) {
   const source = spec.from === 'stderr' ? stderr : stdout;
   if (!source) return null;
@@ -29,7 +38,7 @@ export function parseCapturedSessionId(spec, { stdout = '', stderr = '' } = {}) 
     try {
       const obj = JSON.parse(source);
       const v = resolveJsonPath(obj, spec.path);
-      return v !== undefined && v !== null ? String(v) : null;
+      return formatValue(v, spec);
     } catch {
       return null;
     }
@@ -41,15 +50,15 @@ export function parseCapturedSessionId(spec, { stdout = '', stderr = '' } = {}) 
       let record;
       try { record = JSON.parse(trimmed); } catch { continue; }
       if (!matchesPredicate(record, spec.match)) continue;
-      const v = resolveJsonPath(record, spec.path);
-      if (v !== undefined && v !== null) return String(v);
+      const value = formatValue(resolveJsonPath(record, spec.path), spec);
+      if (value !== null) return value;
     }
     return null;
   }
   if (spec.parse === 'regex') {
     const re = new RegExp(spec.pattern);
     const m = source.match(re);
-    return m && m[1] !== undefined ? m[1] : null;
+    return m && m[1] !== undefined ? formatValue(m[1], spec) : null;
   }
   return null;
 }

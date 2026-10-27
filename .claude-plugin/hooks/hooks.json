@@ -27,8 +27,8 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tldr-agents\" messaging hook stop --handoff",
-            "timeout": 60,
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/bin/tldr-agents\" messaging hook stop --handoff --wait-mode explicit",
+            "timeout": 30,
             "_tightbeam": "tightbeam-managed:runtime-hooks-v3"
           },
           {

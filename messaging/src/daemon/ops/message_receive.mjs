@@ -1,7 +1,5 @@
-// message.receive is the provider-owned admission boundary for a message
-// previously staged by an exact endpoint listener.  It deliberately does not
-// share message.read's principal-wide semantics: only the stored presentation
-// delivery may become read, and only that presentation's optional wait moves.
+// message.receive admits only the exact provider-owned delivery. Human reply
+// expectations resolve through canonical binding events or legacy presentations.
 
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
@@ -9,8 +7,10 @@ import { openOldestUnreadAdmission } from './delivery_admission.mjs';
 import { pendingOfferDelegationId, requesterCancelNotice, returnedWorkNotice, returnedWorkRouteReasons } from './notification_context.mjs';
 import { heldWork } from './thread_list.mjs';
 import { markExactDeliveryRead } from './message_read.mjs';
+import { admitLiveSessionReceipt, exactLiveSessionReceipt, logReceiptAdmitted } from './message_receive_live.mjs';
 import { receiveOrderBy, receivedBeforeSql, refreshSessionWatermark } from './message_shared.mjs';
 import { completeResumeRequestsForMessage } from './resume_shared.mjs';
+import { satisfyBoundReplyWait } from './message_reply_wait_admission.mjs';
 
 function malformed(field) {
   throw new TightbeamError('malformed_request', `${field} is required and must be a non-empty string`, { field });
@@ -115,6 +115,7 @@ function admitCurrentOwnerReceipt(db, current, input, now) {
 }
 
 function admitLinkedPresentation(db, current, input, now) {
+  satisfyBoundReplyWait(db, current, now);
   const presentation = db
     .prepare(
       `SELECT p.id AS presentation_id, p.reply_wait_id
@@ -169,7 +170,7 @@ function exactAvailabilitySuccessorReceipt(db, input, appId) {
          ON r.endpoint_id = e.id AND r.message_id = d.message_id
         AND r.reason = 'availability_takeover' AND r.session_id = e.provider_session_id
       WHERE e.id = ? AND e.process_generation = ? AND e.provider_session_id = ?
-        AND e.launch_mode = 'non_interactive' AND e.state IN ('idle', 'busy')
+        AND e.state IN ('idle', 'busy')
         AND e.created_by_app_id = ?
         AND d.takeover_decided_at IS NOT NULL
         AND d.admission_process_generation = e.process_generation - 1
@@ -190,15 +191,6 @@ function exactAvailabilitySuccessorReceipt(db, input, appId) {
       LIMIT 1`,
   ).get(input.message_id, input.endpoint_id, input.process_generation, input.provider_session_id, appId);
 }
-
-// The current owner is a headless process: the session itself is
-// non_interactive, or (item 42 C) the owner is the daemon's own headless
-// resume of an interactive or unknown-mode session. That resume keeps the
-// session's launch mode — relabelling it would mark an interactive session
-// non_interactive forever — so the proof here is the launch token its
-// registration stamped: only a daemon launch carries one, and a pane that
-// reopens the session re-registers without it and takes ownership back.
-const HEADLESS_OWNER = `(e.launch_mode = 'non_interactive' OR (e.owner_launch_token IS NOT NULL AND length(e.owner_launch_token) > 0))`;
 
 // A successor has no live old listener to acknowledge: that listener belongs
 // to the process whose exit the retirement executor already proved. Its
@@ -238,7 +230,7 @@ function exactSuccessorReceipt(db, input, appId) {
           AND r.session_id = e.provider_session_id
           AND r.state IN ('claimed', 'completed')
         WHERE e.id = ? AND e.process_generation = ? AND e.provider_session_id = ?
-          AND ${HEADLESS_OWNER} AND e.state IN ('idle', 'busy')
+          AND e.state IN ('idle', 'busy')
           AND e.created_by_app_id = ?
           AND (
             d.read_at IS NOT NULL
@@ -268,8 +260,8 @@ function exactSuccessorReceipt(db, input, appId) {
 // Ordinary daemon recovery uses the same bodyless exact-message brief as a
 // terminated successor, but has no retired listener to prove. Its authority
 // comes from the active recovery request instead: only the current
-// non-interactive owner of that exact endpoint/session may receive the
-// message that exact claimed (or already completed) request names.
+// owner of that exact endpoint/session may receive the message that exact
+// claimed (or already completed) request names. Launch kind is not checked.
 //
 // A cold spawn adopts a sessionless placeholder, so its durable request
 // retains NULL in session_id. That is safe to accept only through this same
@@ -289,7 +281,7 @@ function exactOrdinaryReceipt(db, input, appId) {
           AND (r.session_id = e.provider_session_id OR r.session_id IS NULL)
         WHERE e.id = ? AND e.process_generation = ? AND e.provider_session_id = ?
           AND e.provider_session_id IS NOT NULL AND e.provider_session_id != ''
-          AND ${HEADLESS_OWNER} AND e.state IN ('idle', 'busy')
+          AND e.state IN ('idle', 'busy')
           AND e.created_by_app_id = ?
           AND NOT EXISTS (
             SELECT 1 FROM endpoint_retirements retirement
@@ -400,6 +392,7 @@ export const messageReceiveOp = {
   permission: 'read_inbox',
   handler(context, payload, connection) {
     const input = request(payload);
+    let receiptPath = null;
     const outcome = withTransaction(context.db, () => {
       // v22 delivery admission is authoritative even when a parked Stop
       // presentation exists.  The presentation is transport compatibility,
@@ -410,9 +403,10 @@ export const messageReceiveOp = {
       const availability = presentation || current ? null : exactAvailabilitySuccessorReceipt(context.db, input, connection.appId);
       const successor = presentation || current || availability ? null : exactSuccessorReceipt(context.db, input, connection.appId);
       const ordinary = presentation || current || availability || successor ? null : exactOrdinaryReceipt(context.db, input, connection.appId);
-      if (!presentation && !current && !availability && !successor && !ordinary) {
-        throw receiveRefusal(context, input, connection.appId);
-      }
+      receiptPath = Object.entries({ current_owner: current, listener_presentation: presentation, availability_successor: availability,
+        retirement_successor: successor, ordinary_recovery: ordinary }).find(([, row]) => row)?.[0] ?? 'live_session';
+      const live = receiptPath === 'live_session' ? exactLiveSessionReceipt(context.db, input, connection.appId) : null;
+      if (receiptPath === 'live_session' && !live) throw receiveRefusal(context, input, connection.appId);
       if (current) {
         if (current.read_at) {
           // Receipt committed before its compatibility wake is recoverable:
@@ -570,6 +564,11 @@ export const messageReceiveOp = {
           idempotent_replay: false,
         }, wake: null };
       }
+      if (live) {
+        const now = admitLiveSessionReceipt(context.db, live, input);
+        admitLinkedPresentation(context.db, live, input, now);
+        return { result: { message_id: live.message_id, conversation_id: live.conversation_id, body: live.body, idempotent_replay: false }, wake: null };
+      }
       if (presentation.admitted_at) {
         return { result: {
           message_id: presentation.message_id,
@@ -609,6 +608,7 @@ export const messageReceiveOp = {
         idempotent_replay: false,
       }, wake: null };
     });
+    logReceiptAdmitted(context.logger, input, { path: receiptPath, idempotent_replay: outcome.result.idempotent_replay });
     if (outcome.wake) {
       refreshSessionWatermark({
         stateRoot: context.stateRoot,

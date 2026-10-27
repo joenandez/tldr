@@ -2,60 +2,95 @@
   "schema_version": 1,
   "package": {
     "name": "@joenandez/tldr",
-    "version": "0.2.0"
+    "version": "0.3.0-rc.1"
   },
   "source": {
     "repository": "tldr-internal",
-    "commit": "dbb672ff8bbdf9c3990ef28865289e9a8ef0955f"
+    "commit": "6ecbf9a9a8d2370ec7b162ea6c0d6d8ce1a94753"
   },
   "files": [
     {
       "path": ".agents/plugins/marketplace.json",
       "source": ".agents/plugins/marketplace.json",
-      "sha256": "6d62199f5b89d5845ba54bdd241a8a647b653a2eaf6d6c73d25abd4930428820",
-      "bytes": 265,
+      "sha256": "4bc201ff1bf608a9b4c155e8e604ae8cccb70332e35fd90e5d251c624f4fd4b1",
+      "bytes": 270,
       "mode": "644"
     },
     {
       "path": ".claude-plugin/hooks/hooks.json",
       "source": ".claude-plugin/hooks/hooks.json",
-      "sha256": "53602358f7528cafc74a9d7fad7f60edaf740a1ec8a82562293409bb262626e7",
-      "bytes": 1794,
+      "sha256": "5459fbab27c3a266bd61ce24fdd23c8991cae45df7a8289f8760b6e40137a030",
+      "bytes": 1815,
       "mode": "644"
     },
     {
       "path": ".claude-plugin/marketplace.json",
       "source": ".claude-plugin/marketplace.json",
-      "sha256": "fdebea3a0b8b701f91bd44ee489b7bb6679e85a1d223019443368babda2a0b26",
-      "bytes": 590,
+      "sha256": "e94ba9942aca0814bcfa059860b45c990faa1a131613872e344a1b2cf82b3902",
+      "bytes": 595,
       "mode": "644"
     },
     {
       "path": ".claude-plugin/plugin.json",
       "source": ".claude-plugin/plugin.json",
-      "sha256": "f7a36c9296f8e5c869b3eb8140009eb72b780ec6d2a47ade7d0410085f4485ca",
-      "bytes": 675,
+      "sha256": "abb8b2013189b7d28840a88d29a14b3ec9b83c235b732a7dc13743e37eadd7bd",
+      "bytes": 680,
       "mode": "644"
     },
     {
       "path": ".codex-plugin/hooks/hooks.json",
       "source": ".codex-plugin/hooks/hooks.json",
-      "sha256": "eb969dbdff5717f73aaa3c30d1f98cd882fa825b6a1b23ed7c0e53e7661ce4da",
-      "bytes": 2014,
+      "sha256": "76d2a7f70115524bcca75dbb2c5286cc51ae5a2a572e5854c32d3a4b2e6de0d7",
+      "bytes": 2032,
       "mode": "644"
     },
     {
       "path": ".codex-plugin/plugin.json",
       "source": ".codex-plugin/plugin.json",
-      "sha256": "a1af4ce05d9844c3770a555c99bc714943a83f62be8c55107ff8bbc3ee6af4f3",
-      "bytes": 196,
+      "sha256": "0c4a21d854825befadae64a31c3557586eb72b94feb4b269bf165a39dccf1176",
+      "bytes": 201,
+      "mode": "644"
+    },
+    {
+      "path": ".copilot-plugin/.claude-plugin/plugin.json",
+      "source": ".copilot-plugin/.claude-plugin/plugin.json",
+      "sha256": "3e9cf33eca6d811d39ee338b1afb827bc2654972ae4f7d3bd7f9e5b700a7ad37",
+      "bytes": 236,
+      "mode": "644"
+    },
+    {
+      "path": ".copilot-plugin/hooks/hooks.json",
+      "source": ".copilot-plugin/hooks/hooks.json",
+      "sha256": "c3ecf9ff2b2b6a308fc5c38685fb62cea6c526ea80a5be4395730f4122fba257",
+      "bytes": 790,
+      "mode": "644"
+    },
+    {
+      "path": ".copilot-plugin/skills/messaging/SKILL.md",
+      "source": ".copilot-plugin/skills/messaging/SKILL.md",
+      "sha256": "56b76ea08717c9f9675a208f895e1c700e3c4e12a1ebcf01d00df0d255949118",
+      "bytes": 1081,
+      "mode": "644"
+    },
+    {
+      "path": ".copilot-plugin/skills/setup/SKILL.md",
+      "source": ".copilot-plugin/skills/setup/SKILL.md",
+      "sha256": "6815e2908ac97d6988bff30153153e4961f848f0c3e1af3f274e15c2cb30fa76",
+      "bytes": 481,
+      "mode": "644"
+    },
+    {
+      "path": ".copilot-plugin/skills/tasks/SKILL.md",
+      "source": ".copilot-plugin/skills/tasks/SKILL.md",
+      "sha256": "9a5f029587689d84abbea1dffa3a66a3e691ff3e31edb52d4143bc780f6960ac",
+      "bytes": 594,
       "mode": "644"
     },
     {
       "path": "bin/tldr-agents",
       "source": "bin/tldr-agents",
-      "sha256": "8507da2ee48fd2b71290a084f0f4733ec996eb826ea31dbddc8a5b409c2acf6d",
-      "bytes": 24592,
+      "sha256": "f49fa6192ae9f2ddb979803e74cd68bdf1860c1057e1edc3a477f01804812f1b",
+      "bytes": 26048,
       "mode": "755"
     },
     {
@@ -68,15 +103,15 @@
     {
       "path": "install/tldr-agent-bootstrap.sh",
       "source": "install/tldr-agent-bootstrap.sh",
-      "sha256": "4b58cae41a7b0c68f4550d66ca011a5c0bf27e02d683cb7add2fd08fc03b36b0",
-      "bytes": 27245,
+      "sha256": "fc849777980bbb02393257f9535c17fefa15e93b6f635b8a3c1de1795ee774b8",
+      "bytes": 27411,
       "mode": "755"
     },
     {
       "path": "libexec/component-dispatch",
       "source": "libexec/component-dispatch",
-      "sha256": "c044efc971e0a472a194d68e20f9c3d9bff8e4870f87c967413fce0f01eacba4",
-      "bytes": 10398,
+      "sha256": "29fb95ec8bd12f5466819aead9fc32a7e3370d6c99e06a10dc68b635772c09c8",
+      "bytes": 10658,
       "mode": "755"
     },
     {
@@ -117,8 +152,15 @@
     {
       "path": "libexec/tldr-agent",
       "source": "libexec/tldr-agent",
-      "sha256": "ff7e806b8e243de780cd79fa930ca4e9a6b53bd0761d800b1db88ee6688f3955",
-      "bytes": 3801,
+      "sha256": "de5a206d16a177ec703b24e4c772072fd0aca7797b14181a50562010cfeb93a2",
+      "bytes": 4350,
+      "mode": "755"
+    },
+    {
+      "path": "libexec/tldr-slack-channels",
+      "source": "libexec/tldr-slack-channels",
+      "sha256": "72822b740e34fd8c07d0dce364cd4ce0e875cfd8dea69c33a265ae63915cdbad",
+      "bytes": 405,
       "mode": "755"
     },
     {
@@ -131,8 +173,8 @@
     {
       "path": "messaging/bin/tightbeam",
       "source": "messaging/bin/tightbeam",
-      "sha256": "da0347cb306b6b2fcf95ddc2c2c04ea21de64bf8f75b17d39e8cada6532a2ad8",
-      "bytes": 74583,
+      "sha256": "a3794d19ec1ff0a26576a713ae86a25e4d42f79a9dcdb8bf9a6f24c8e51e9c83",
+      "bytes": 78920,
       "mode": "755"
     },
     {
@@ -157,6 +199,27 @@
       "mode": "755"
     },
     {
+      "path": "messaging/src/cli/agent_action_lock_identity.mjs",
+      "source": "messaging/src/cli/agent_action_lock_identity.mjs",
+      "sha256": "11395aa4a99bb61ffed61dfae76002d3fc295f71e3f6e65a4c14ae99be05d5e8",
+      "bytes": 2419,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/agent_action_lock.mjs",
+      "source": "messaging/src/cli/agent_action_lock.mjs",
+      "sha256": "5e81a0fa1412846e02534369ffb84346230d17bb8b393b464f75b59bea9a6b81",
+      "bytes": 5008,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/agent_action_store.mjs",
+      "source": "messaging/src/cli/agent_action_store.mjs",
+      "sha256": "effbaa843a860e84fbe45049e2c7f1759c866ab9deb83ae80e0e19bee44a220a",
+      "bytes": 2665,
+      "mode": "644"
+    },
+    {
       "path": "messaging/src/cli/agent_address.mjs",
       "source": "messaging/src/cli/agent_address.mjs",
       "sha256": "a0312982db729914f3eefc9e811e7cdae59a565fec5edc3dc1c43a1935cba6a8",
@@ -166,8 +229,8 @@
     {
       "path": "messaging/src/cli/agent_commands.mjs",
       "source": "messaging/src/cli/agent_commands.mjs",
-      "sha256": "2885d05c475a8e98ad150cdabf4901bd3a105a8b584cface47c581a09010167c",
-      "bytes": 73345,
+      "sha256": "49f7870920a8e4cd4d766d4b365abf5c839486c89c7f84c1b14ec2f810064992",
+      "bytes": 72770,
       "mode": "644"
     },
     {
@@ -192,10 +255,73 @@
       "mode": "644"
     },
     {
+      "path": "messaging/src/cli/agent_wait_context.mjs",
+      "source": "messaging/src/cli/agent_wait_context.mjs",
+      "sha256": "f9ed664bdc7638c4177610335308138e21c84f8740a94554e2e8ec52233362b9",
+      "bytes": 5242,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/agent_wait_journal.mjs",
+      "source": "messaging/src/cli/agent_wait_journal.mjs",
+      "sha256": "8858e083fb89938edc9d7b1aa037a83be43981719d155a41d950ab254951af0f",
+      "bytes": 8286,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/agent_wait_startup.mjs",
+      "source": "messaging/src/cli/agent_wait_startup.mjs",
+      "sha256": "b6aa203f2f8d5ac32725383543e4d5eb5233995714451f9acfdf91207743dee9",
+      "bytes": 1099,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/agent_wait.mjs",
+      "source": "messaging/src/cli/agent_wait.mjs",
+      "sha256": "c01bd43d592402f5a8aae85558df8def5c15568c70a0517ee7bfa0e94071651e",
+      "bytes": 8113,
+      "mode": "644"
+    },
+    {
       "path": "messaging/src/cli/bootstrap.mjs",
       "source": "messaging/src/cli/bootstrap.mjs",
-      "sha256": "ddc0c72182fec1cbbce2bdc7b19a9c57b3e1edd349f54ee9e53d86841c5f4220",
-      "bytes": 23610,
+      "sha256": "56a80fce7c91de0af4de1beea2def0781db7d635f2e63b7d5720b96f07d1ae10",
+      "bytes": 23938,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/copilot_configured_input.mjs",
+      "source": "messaging/src/cli/copilot_configured_input.mjs",
+      "sha256": "5e500ebbfb4ee90adaf6b2ab5ccef9803ee0401f666ec737774eac80d2a18251",
+      "bytes": 2859,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/copilot_hook_input.mjs",
+      "source": "messaging/src/cli/copilot_hook_input.mjs",
+      "sha256": "fe702b4cb62d859510925156e283c92b720332827d88547c86d144fda25a041d",
+      "bytes": 5277,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/copilot_hook_runtime.mjs",
+      "source": "messaging/src/cli/copilot_hook_runtime.mjs",
+      "sha256": "68dc240901bc98291452fa28c320759188ef3be38669ec3224ea4cbed85de56c",
+      "bytes": 5344,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/copilot_hook.mjs",
+      "source": "messaging/src/cli/copilot_hook.mjs",
+      "sha256": "506df595ec6df6f37bbb14796840c0c478eeece9e8e7a6e0f849e6f9e400acaf",
+      "bytes": 1705,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/cli/copilot_hooks_install.mjs",
+      "source": "messaging/src/cli/copilot_hooks_install.mjs",
+      "sha256": "5bbd6c4e4d36973aa4e6280acf18bf5820b264c20fb791fcd2c886315e73875d",
+      "bytes": 7501,
       "mode": "644"
     },
     {
@@ -208,8 +334,8 @@
     {
       "path": "messaging/src/cli/hook_commands.mjs",
       "source": "messaging/src/cli/hook_commands.mjs",
-      "sha256": "a96072c1df115cdfbcfd56e233ffde004a451d3d9d41bf146115fca1c2ae5119",
-      "bytes": 79860,
+      "sha256": "8274198d9bfe821cfde6da3dcca7869a28c14300b1ff61381146696cd302bcf4",
+      "bytes": 80697,
       "mode": "644"
     },
     {
@@ -222,8 +348,8 @@
     {
       "path": "messaging/src/cli/hook_identity.mjs",
       "source": "messaging/src/cli/hook_identity.mjs",
-      "sha256": "473ae78c1fd31264e03ea97b26eef1a414f60783a054ecf9301c9ba558469cc4",
-      "bytes": 36943,
+      "sha256": "82a743b18d650a6378481dc01ebf1fffaa7232bc2183b6960f955848dd21ecc1",
+      "bytes": 37387,
       "mode": "644"
     },
     {
@@ -234,31 +360,45 @@
       "mode": "644"
     },
     {
+      "path": "messaging/src/cli/hooks_install_io.mjs",
+      "source": "messaging/src/cli/hooks_install_io.mjs",
+      "sha256": "f765744de245d49c6213a19a1aab1c05e395ec3220c7d76ed149e227b5887d9e",
+      "bytes": 1090,
+      "mode": "644"
+    },
+    {
       "path": "messaging/src/cli/hooks_install.mjs",
       "source": "messaging/src/cli/hooks_install.mjs",
-      "sha256": "be272fcc20f354ac41b7b49b61a2be6c7fce7711247e056872c6734ccb602e5c",
-      "bytes": 25576,
+      "sha256": "af6f57ced2e97c38eff4069a0f3f6ab6e823583538818dce0c6d1b8a844fd277",
+      "bytes": 25577,
       "mode": "644"
     },
     {
       "path": "messaging/src/cli/new_agent.mjs",
       "source": "messaging/src/cli/new_agent.mjs",
-      "sha256": "65c32a7067d4d674e0ccddb5df08e2a8d964a7a4c99a57e09e7ab33f67a317ef",
-      "bytes": 8128,
+      "sha256": "b839aa2d8f9eb57f1a34726054bcdcab44f72754c1942c107f6addce7a64f798",
+      "bytes": 8292,
       "mode": "644"
     },
     {
       "path": "messaging/src/cli/package_context.mjs",
       "source": "messaging/src/cli/package_context.mjs",
-      "sha256": "0e2553de94b4d44e05f76cbf356620b0a143eee41a9400db70722f2b5d0ca426",
-      "bytes": 5962,
+      "sha256": "fdd5f29fb377dcc4aa2df266a7712ae4ad99b46e72ea037bb5b901690a41bc2a",
+      "bytes": 7423,
       "mode": "644"
     },
     {
       "path": "messaging/src/client/client.mjs",
       "source": "messaging/src/client/client.mjs",
-      "sha256": "24246b7dfa6fda697273f5c26c05682e2e18723d26f7d71d5d8f6214e8652350",
-      "bytes": 13355,
+      "sha256": "e91c4249b84fcf200d48dcf6ec86232c7a5570b050b9de79d5e85d6286f387eb",
+      "bytes": 13662,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/agent_wait_context.mjs",
+      "source": "messaging/src/daemon/agent_wait_context.mjs",
+      "sha256": "05ef8d7f0c692a0b5ad83c16a1274c4387796172f3baa60688aaa3c9a81fc7b9",
+      "bytes": 1827,
       "mode": "644"
     },
     {
@@ -280,6 +420,13 @@
       "source": "messaging/src/daemon/codex_thread_host.mjs",
       "sha256": "f97cd088915e5cbc4ac983c00db25a9e399611fd08993151936468bef445081a",
       "bytes": 5006,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/copilot_wake.mjs",
+      "source": "messaging/src/daemon/copilot_wake.mjs",
+      "sha256": "e2e25115b7dd6ea7d5a5b931d81f2a653eb863b0f7fec823ef9fe8682db3bca2",
+      "bytes": 10199,
       "mode": "644"
     },
     {
@@ -318,24 +465,31 @@
       "mode": "644"
     },
     {
+      "path": "messaging/src/daemon/explicit_wait_guard.mjs",
+      "source": "messaging/src/daemon/explicit_wait_guard.mjs",
+      "sha256": "a523d6117960273c1c6a33a57181997ef19fec8725cd1cd021572ab9845fcfb0",
+      "bytes": 9109,
+      "mode": "644"
+    },
+    {
       "path": "messaging/src/daemon/lifecycle_transition.mjs",
       "source": "messaging/src/daemon/lifecycle_transition.mjs",
-      "sha256": "d8d20fd41cb6c9b9e066102a2b9462c77be9efe935593f168a0fa1fd3ed781c1",
-      "bytes": 159150,
+      "sha256": "de074c20b58a3cc4d6dcd5e98464e79c9d613b1b8d3ce2b7840635e3a1620c2c",
+      "bytes": 160915,
       "mode": "644"
     },
     {
       "path": "messaging/src/daemon/listener_reconciler.mjs",
       "source": "messaging/src/daemon/listener_reconciler.mjs",
-      "sha256": "9b9ec0bdc16bcff5b3b8ba4591c850366745c48db90508b47620097239a3d009",
-      "bytes": 26071,
+      "sha256": "ca81e18c1a910cd49db5aa38a18f759343572b6bca55a33005bd6235a77b8854",
+      "bytes": 26686,
       "mode": "644"
     },
     {
       "path": "messaging/src/daemon/migration_records.mjs",
       "source": "messaging/src/daemon/migration_records.mjs",
-      "sha256": "f49dc627ab07b2e110dea7eddcbd0247762070a3439ccc1c7a77d72f2a43aa29",
-      "bytes": 64802,
+      "sha256": "9330dc8ae65663d4d4a1346012bcf4d3993cce7afa6146c53d9e42d81ff5ab4f",
+      "bytes": 64803,
       "mode": "644"
     },
     {
@@ -376,8 +530,8 @@
     {
       "path": "messaging/src/daemon/ops/authority_scope.mjs",
       "source": "messaging/src/daemon/ops/authority_scope.mjs",
-      "sha256": "2ed0df18ce5ce74a46164d46bf79033e8e3bd4bdd49d44704f490f91e04d81b2",
-      "bytes": 915,
+      "sha256": "a0be327c9e3f812d0cb812bf63e0524597439d6932ce71679b088608d0f5a173",
+      "bytes": 2874,
       "mode": "644"
     },
     {
@@ -467,15 +621,15 @@
     {
       "path": "messaging/src/daemon/ops/endpoint_list.mjs",
       "source": "messaging/src/daemon/ops/endpoint_list.mjs",
-      "sha256": "4e5cd9f04e672a37e816e2420d01f16d2d3206cc32c9cb67ca7a2dea880400e3",
-      "bytes": 8127,
+      "sha256": "8150e674b65d25a062973db00a826b85f715094cb56a56dac4d91bfe3a2ec58f",
+      "bytes": 8203,
       "mode": "644"
     },
     {
       "path": "messaging/src/daemon/ops/endpoint_register.mjs",
       "source": "messaging/src/daemon/ops/endpoint_register.mjs",
-      "sha256": "ab5cb842f18d7139e5043158ce3052a18aa18dec5257bf110edcde9fbf6045e0",
-      "bytes": 46581,
+      "sha256": "8d8a6c5089d91a5b417b4683c5fba82a9c43f717463f0c5815428122389eddad",
+      "bytes": 47057,
       "mode": "644"
     },
     {
@@ -495,8 +649,8 @@
     {
       "path": "messaging/src/daemon/ops/handshake.mjs",
       "source": "messaging/src/daemon/ops/handshake.mjs",
-      "sha256": "26f9c9c62b9a0eabb14ecd03b0ec16825856ce9f7db847a60ffbb504be014492",
-      "bytes": 4845,
+      "sha256": "510ae2f2f4a3c450421401bf14a8ab8e5326995ddb1c992c08ceee4cc4d274f0",
+      "bytes": 7527,
       "mode": "644"
     },
     {
@@ -530,8 +684,8 @@
     {
       "path": "messaging/src/daemon/ops/index.mjs",
       "source": "messaging/src/daemon/ops/index.mjs",
-      "sha256": "57ef653c97128828159ed08269d1dcc29a7eacb59df6716c3d34e57103dfb8b8",
-      "bytes": 9709,
+      "sha256": "ce199a8acc4f08135009d524ed5994c5458195b4fdb34ea39c0b183024da82da",
+      "bytes": 9819,
       "mode": "644"
     },
     {
@@ -572,8 +726,8 @@
     {
       "path": "messaging/src/daemon/ops/message_notification_next.mjs",
       "source": "messaging/src/daemon/ops/message_notification_next.mjs",
-      "sha256": "6d941f8b6599287331ac328003d10e446e511634a5375d3694134439d141aa83",
-      "bytes": 2694,
+      "sha256": "fa51a53f3a067f175748e3cb1dfebcb862b474d19c0139ec39bd23d02858b17a",
+      "bytes": 4816,
       "mode": "644"
     },
     {
@@ -584,17 +738,31 @@
       "mode": "644"
     },
     {
+      "path": "messaging/src/daemon/ops/message_receive_live.mjs",
+      "source": "messaging/src/daemon/ops/message_receive_live.mjs",
+      "sha256": "2d3894d77632ed0278d2a40fb5ce28bfcb7163889198ce29ac0738f06d4de570",
+      "bytes": 3128,
+      "mode": "644"
+    },
+    {
       "path": "messaging/src/daemon/ops/message_receive.mjs",
       "source": "messaging/src/daemon/ops/message_receive.mjs",
-      "sha256": "151bbb446f6f126410d0426ea835ad477612e6da0199e6077f8ea904ca559816",
-      "bytes": 32364,
+      "sha256": "1b4c4f01cdc480e4099db5bbcab6062f96205f66d464d1438935b0d1dc3d3204",
+      "bytes": 32518,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/ops/message_reply_wait_admission.mjs",
+      "source": "messaging/src/daemon/ops/message_reply_wait_admission.mjs",
+      "sha256": "9c6c62f6ab3214efdeed74245bfaf16b0bf36083720be78869029e48ccd6d502",
+      "bytes": 1107,
       "mode": "644"
     },
     {
       "path": "messaging/src/daemon/ops/message_shared.mjs",
       "source": "messaging/src/daemon/ops/message_shared.mjs",
-      "sha256": "c4fcc6a16920331208d403e2c737cff0202a76b5ce2d6f552cee2f0a60698642",
-      "bytes": 56741,
+      "sha256": "556d08e7539d6f15d39d3b4b19a28a3596d062d57c9bdb7d5c796ca81971273e",
+      "bytes": 56847,
       "mode": "644"
     },
     {
@@ -668,10 +836,17 @@
       "mode": "644"
     },
     {
+      "path": "messaging/src/daemon/ops/resume_assert_active.mjs",
+      "source": "messaging/src/daemon/ops/resume_assert_active.mjs",
+      "sha256": "aa1308ca7f53582f498b20ce70f84829112154a9182fa10f518a6fe894d2b011",
+      "bytes": 7902,
+      "mode": "644"
+    },
+    {
       "path": "messaging/src/daemon/ops/resume_claim.mjs",
       "source": "messaging/src/daemon/ops/resume_claim.mjs",
-      "sha256": "bbffaa3b24308f8bb3140b938a163fa54917993c0df7268e7336de17513e2e63",
-      "bytes": 6624,
+      "sha256": "120bb464e769fef50430ee185844157cd5b2c60d171b9e99b5205a621a911a5f",
+      "bytes": 7792,
       "mode": "644"
     },
     {
@@ -705,8 +880,8 @@
     {
       "path": "messaging/src/daemon/ops/runtime_register.mjs",
       "source": "messaging/src/daemon/ops/runtime_register.mjs",
-      "sha256": "5f8b2fc7303dbb2a17956377a15ef6db6524fc1c2f21df77d66fa86514502eaf",
-      "bytes": 1181,
+      "sha256": "80b76eba6d6e1a1fec6067ddab985a96a732a7148a077bc3a27ed5c76e60524c",
+      "bytes": 4124,
       "mode": "644"
     },
     {
@@ -754,8 +929,15 @@
     {
       "path": "messaging/src/daemon/owner_process_contract.mjs",
       "source": "messaging/src/daemon/owner_process_contract.mjs",
-      "sha256": "dc226ab66bc874206a458a05b87494f7d28a0a327a0e18854eecc2bcdc0af857",
-      "bytes": 4461,
+      "sha256": "575a4e04d581eb774a5d37c41b85638eff39dbb1375d69dc92a830a0d54e637f",
+      "bytes": 4970,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/daemon/pending_reply_expectations.mjs",
+      "source": "messaging/src/daemon/pending_reply_expectations.mjs",
+      "sha256": "16208a24d40ff4ebbccaf5b38cc35a20efc8e3c748591949f7f997dfa479a8fa",
+      "bytes": 8547,
       "mode": "644"
     },
     {
@@ -773,10 +955,17 @@
       "mode": "644"
     },
     {
+      "path": "messaging/src/daemon/resume_debug_log.mjs",
+      "source": "messaging/src/daemon/resume_debug_log.mjs",
+      "sha256": "69de24538e84356a0beac42eb8980fa6dc9a8b15a4462fc380113b91d8e49a50",
+      "bytes": 2332,
+      "mode": "644"
+    },
+    {
       "path": "messaging/src/daemon/resumer.mjs",
       "source": "messaging/src/daemon/resumer.mjs",
-      "sha256": "58000b71191dd3ae44bc551555e5165d72df4366e5e97e2ff3b82556e31f1165",
-      "bytes": 151112,
+      "sha256": "b6df383f944851ba1293f659ee7e88502bd53acd4ef0ef7c2d00e2f8396fd89d",
+      "bytes": 150656,
       "mode": "644"
     },
     {
@@ -789,15 +978,15 @@
     {
       "path": "messaging/src/daemon/runtime_store.mjs",
       "source": "messaging/src/daemon/runtime_store.mjs",
-      "sha256": "263dc24a4cf4a8be6943d8d1ded29510e93885e24201784458624810476449c4",
-      "bytes": 16973,
+      "sha256": "1957ee81f4a2ffff1deca8e26e30f0a95297bd061415698033b58ceddbf17557",
+      "bytes": 17056,
       "mode": "644"
     },
     {
       "path": "messaging/src/daemon/schema.mjs",
       "source": "messaging/src/daemon/schema.mjs",
-      "sha256": "5a0070ce833643bf3cf44311ad98ca256cae00057c1b17ea60cbee6593f2e074",
-      "bytes": 73282,
+      "sha256": "816dffbd8b81f4426c644cefe9c9cfb14ec2ae9f09525f48d046290af8312ee8",
+      "bytes": 73572,
       "mode": "644"
     },
     {
@@ -852,8 +1041,8 @@
     {
       "path": "messaging/src/protocol/envelope.mjs",
       "source": "messaging/src/protocol/envelope.mjs",
-      "sha256": "aa3f3f3bfb77fdff74d3fd102d49750302ba0c5007f8ae890c11460168584137",
-      "bytes": 9362,
+      "sha256": "57ea072c68fc8d0df488f767b26e08bfd6fd646699f2cb0313c95e8ff2a210c1",
+      "bytes": 9706,
       "mode": "644"
     },
     {
@@ -880,8 +1069,8 @@
     {
       "path": "messaging/src/protocol/session_env.mjs",
       "source": "messaging/src/protocol/session_env.mjs",
-      "sha256": "28fd271af00b8f0985da80e2d7eefbe025a8b9564dde50a34c749756698249a8",
-      "bytes": 1983,
+      "sha256": "0befae0afa6c0412427318e9570a42127e805dbc8cf01044d62c0230d483bacf",
+      "bytes": 2232,
       "mode": "644"
     },
     {
@@ -906,24 +1095,38 @@
       "mode": "644"
     },
     {
+      "path": "messaging/src/runtimes/copilot_contract.mjs",
+      "source": "messaging/src/runtimes/copilot_contract.mjs",
+      "sha256": "d12bfb4c3567d5d7ba29e4e045fb207a0e4f81dfa6d3188cc6d28819138e2032",
+      "bytes": 7685,
+      "mode": "644"
+    },
+    {
+      "path": "messaging/src/runtimes/copilot_wake_contract.mjs",
+      "source": "messaging/src/runtimes/copilot_wake_contract.mjs",
+      "sha256": "9b9f9980c45ca486174a875b40b10afc5e40f64dde9399879ae6b1d9404b2c9e",
+      "bytes": 5962,
+      "mode": "644"
+    },
+    {
       "path": "messaging/src/runtimes/registry.mjs",
       "source": "messaging/src/runtimes/registry.mjs",
-      "sha256": "6f1116e8b8ca6f25ad6caa6d26869daaa8f6eb567ed59c9443f674003ef04222",
-      "bytes": 24602,
+      "sha256": "bd5597e9a6741f312e96b8138ff1a1890519f9372353c5484d4c41e5a26693d7",
+      "bytes": 24513,
       "mode": "644"
     },
     {
       "path": "package-lock.json",
       "source": "package-lock.json",
-      "sha256": "3ce309deb7daf1b5bb1bc08d09d6447b5d012fd77086b5ebf8f8c4703521b6c8",
-      "bytes": 63307,
+      "sha256": "b5ab01efeb90fcf20d4063c6c3a3810883b7295d6a94b4e3c7305d46b3815f77",
+      "bytes": 63133,
       "mode": "644"
     },
     {
       "path": "package.json",
       "source": "package.json",
-      "sha256": "b352d1206d6f4dcef781d58f668265afbbf6853e359861fa05592fa6ceab6bc0",
-      "bytes": 27014,
+      "sha256": "d8deee67a434d1d095420c6e37137f1cd08b3142b4739846bb6c586fc0666650",
+      "bytes": 31097,
       "mode": "644"
     },
     {
@@ -936,8 +1139,8 @@
     {
       "path": "release/activation-manifest.json",
       "source": "release/activation-manifest.json",
-      "sha256": "e236ef18a20d1d54a24f2ea3a390ce562a27d4a12d5d15e765eb3ddae081841c",
-      "bytes": 1056,
+      "sha256": "78bffa28cf79b2a9c93fd08aab73b0696f8cb1cfa355157d99785b323d44534d",
+      "bytes": 1061,
       "mode": "644"
     },
     {
@@ -957,8 +1160,8 @@
     {
       "path": "release/payloads/arm64/tldr-agent.tar.gz",
       "source": "release/payloads/arm64/tldr-agent.tar.gz",
-      "sha256": "da06c141f7ca22a3e8d74b6f09b3e5941e9220b60cced4a9c8b4293b6b93b3a9",
-      "bytes": 1468572,
+      "sha256": "eda20d64a7f6ba8faeb626012fda43daeaf4729ee5c159e35c97ffcd8e0bac78",
+      "bytes": 1569634,
       "mode": "644"
     },
     {
@@ -971,15 +1174,15 @@
     {
       "path": "release/starport-release.json",
       "source": "release/starport-release.json",
-      "sha256": "a5855b1a370244b5c33a57d1633d5ce48a1d5312481ef40ba0169128f91d565d",
-      "bytes": 1565,
+      "sha256": "f73d1c271d824d271e6b6c64a83e205efe1294d8270f759d4836e2625f189056",
+      "bytes": 1575,
       "mode": "644"
     },
     {
       "path": "scheduling/src/adapters/academy.yaml",
       "source": "scheduling/src/adapters/academy.yaml",
-      "sha256": "dfc65e3be0fd7806cd3eeaeaceb1594ff7ae8104913515685ce4d300dac74d38",
-      "bytes": 1288,
+      "sha256": "978673d3c5a51a3b911a28b75108f4f94b1f5e7240ddbbe433fcda8dae906f6f",
+      "bytes": 1925,
       "mode": "644"
     },
     {
@@ -1048,8 +1251,8 @@
     {
       "path": "scheduling/src/helm-tasks.mjs",
       "source": "scheduling/src/helm-tasks.mjs",
-      "sha256": "2fbd9b157c9c697fdaef6867865c74d5974a0f09e10cf29e655eb895f4aa94a7",
-      "bytes": 115922,
+      "sha256": "6b8d9b6211d419377ee80a432d823cdd97025f7d49b0dd967249f490b50c32b0",
+      "bytes": 116147,
       "mode": "755"
     },
     {
@@ -1083,15 +1286,15 @@
     {
       "path": "scheduling/src/lib/adapters/capture.mjs",
       "source": "scheduling/src/lib/adapters/capture.mjs",
-      "sha256": "5e3c79c889d864a1767c4ea24afd50a9ecb54c8660ad70fea983c303116fdf31",
-      "bytes": 2236,
+      "sha256": "ba21ff4996cc13c1a04a309b39ccf61f2c2607ac52b2af5aff2bec86d671ae4a",
+      "bytes": 2468,
       "mode": "644"
     },
     {
       "path": "scheduling/src/lib/adapters/manifest_loader.mjs",
       "source": "scheduling/src/lib/adapters/manifest_loader.mjs",
-      "sha256": "74e753ff3861d027fd419906aa6f871b0c88fb99ce38733b744a74bad23db654",
-      "bytes": 11346,
+      "sha256": "5b2dcffdc2d944d1f53a184bd04682e2a7dc22c3600cccdbe3726a226c3f8fe9",
+      "bytes": 11963,
       "mode": "644"
     },
     {
@@ -1111,15 +1314,15 @@
     {
       "path": "scheduling/src/lib/agent_fallback.mjs",
       "source": "scheduling/src/lib/agent_fallback.mjs",
-      "sha256": "30ef26170b81ccad2e8cb6d7c09c098c8c87f4d9c46e9082334ff7aa5e56ca10",
-      "bytes": 10520,
+      "sha256": "b6fb454a09aefeb521509bc99c962fde0931e4100a36264638454de5c2116a9b",
+      "bytes": 10991,
       "mode": "644"
     },
     {
       "path": "scheduling/src/lib/agent_process_descriptor.mjs",
       "source": "scheduling/src/lib/agent_process_descriptor.mjs",
-      "sha256": "2b2ac5b29cc0587078209cb2cc64423c765e612cbc65adde7532e57d80669c60",
-      "bytes": 4609,
+      "sha256": "0a0bc2acab03017a4ed3caeb7d26adc91b7f598391ea903972acec18489cec7a",
+      "bytes": 4620,
       "mode": "644"
     },
     {
@@ -1496,8 +1699,8 @@
     {
       "path": "scheduling/src/lib/executor.mjs",
       "source": "scheduling/src/lib/executor.mjs",
-      "sha256": "ea2e54142216ac7fa261fe38dad33aad008467de86f41b1687a3537dc063d0bd",
-      "bytes": 57169,
+      "sha256": "13a9cadf5aea47a201bdcccc9a1ceff601a4def67b646054790cd2dd14f1308f",
+      "bytes": 57249,
       "mode": "644"
     },
     {
@@ -1573,8 +1776,8 @@
     {
       "path": "scheduling/src/lib/job_service.mjs",
       "source": "scheduling/src/lib/job_service.mjs",
-      "sha256": "eccd499d95e494f98de5b787dfc39058d639fe17c92fea8a10e6ed23ab46f0ca",
-      "bytes": 35283,
+      "sha256": "382b08487077a1fa3bebfcf904e1d2449a603d6983832022d8f30c49f148d696",
+      "bytes": 35413,
       "mode": "644"
     },
     {
@@ -1804,8 +2007,8 @@
     {
       "path": "scheduling/src/lib/runtime_options.mjs",
       "source": "scheduling/src/lib/runtime_options.mjs",
-      "sha256": "197b7e243d4f9cc618059838aa5967a90cfb3ed92a0303818af349855afdc2cf",
-      "bytes": 11685,
+      "sha256": "c2d5d0388b56161394bede5542efa9ec997b3c72bc1c7676faae63cb7211ec2f",
+      "bytes": 13060,
       "mode": "644"
     },
     {
@@ -2077,8 +2280,8 @@
     {
       "path": "scheduling/src/lib/subspace_memory_launch.mjs",
       "source": "scheduling/src/lib/subspace_memory_launch.mjs",
-      "sha256": "aa58e4c88f0622d75f785c6e84cfad53661b7a79a7e697a986d27b6bf25f0e70",
-      "bytes": 3138,
+      "sha256": "c992259d8a94c1c04f4209897976ff295ce5707ec826e0375448d0f8d67a80be",
+      "bytes": 3550,
       "mode": "644"
     },
     {
@@ -2105,8 +2308,8 @@
     {
       "path": "scheduling/src/lib/tightbeam_sessions.mjs",
       "source": "scheduling/src/lib/tightbeam_sessions.mjs",
-      "sha256": "70eaecd4ec8c1b89b6546a0aa05a57eb67dc1eaf3cee8d258d1fb3c0aa7dc4a6",
-      "bytes": 10440,
+      "sha256": "67b42fe9c523ef9c6cddc2eef6a39865e9181932f3e5a2ded96a3be01f246010",
+      "bytes": 10540,
       "mode": "644"
     },
     {
@@ -2147,15 +2350,15 @@
     {
       "path": "skills/messaging/SKILL.md",
       "source": "skills/messaging/SKILL.md",
-      "sha256": "33e19c7ea00689facea0a1b777dacd004ceeb2ec28b11e3c3ed62dabcc65a8fb",
-      "bytes": 19543,
+      "sha256": "46d7ed899d946238f2028943f513ad8da6b45a8bebbdfb5c80bb0d89a557cd72",
+      "bytes": 22148,
       "mode": "644"
     },
     {
       "path": "skills/setup/SKILL.md",
       "source": "skills/setup/SKILL.md",
-      "sha256": "2d35b21d755703b17273cd03df81b2fc702356d393d7b6875a47c615a167c6d5",
-      "bytes": 9121,
+      "sha256": "06aa3841583455a7419db072bd2fed0ef13af2611bbafc3af39793456df494d5",
+      "bytes": 11343,
       "mode": "644"
     },
     {
@@ -2257,6 +2460,13 @@
       "mode": "644"
     },
     {
+      "path": "src/lib/copilot_runtime_registration.mjs",
+      "source": "src/lib/copilot_runtime_registration.mjs",
+      "sha256": "65bcbf94b0a6ccae56a18130fdc045ba262a6292f10ebd8a2d15e185ccbdfe80",
+      "bytes": 5413,
+      "mode": "644"
+    },
+    {
       "path": "src/lib/daemon_child_commands.mjs",
       "source": "src/lib/daemon_child_commands.mjs",
       "sha256": "63d83932c5789cde93216e33671be22285cc4a31ab0696fa5e84c269e93d3875",
@@ -2292,6 +2502,13 @@
       "mode": "644"
     },
     {
+      "path": "src/lib/daemon_slack_lane.mjs",
+      "source": "src/lib/daemon_slack_lane.mjs",
+      "sha256": "f1333a509591808186ab202883cbe519f69646e36d5b567b5b4e1d21c82256a2",
+      "bytes": 7494,
+      "mode": "644"
+    },
+    {
       "path": "src/lib/durable_file_io.mjs",
       "source": "src/lib/durable_file_io.mjs",
       "sha256": "49069c9996723a98d95aef35003e93a5cca7c10824a9109a8030a9407f00a666",
@@ -2308,8 +2525,8 @@
     {
       "path": "src/lib/email_disconnect_marker.mjs",
       "source": "src/lib/email_disconnect_marker.mjs",
-      "sha256": "cdda55fa67698a54e94d5bb366a288cf3c8fedd813d64ee20610d3222e8c1ea3",
-      "bytes": 2983,
+      "sha256": "ec3cad860c14ca5e389bcbd2170be77bd4bc4117a8e062e13fbb99e4ee370d7f",
+      "bytes": 3214,
       "mode": "644"
     },
     {
@@ -2369,6 +2586,13 @@
       "mode": "644"
     },
     {
+      "path": "src/lib/ini_merge.mjs",
+      "source": "src/lib/ini_merge.mjs",
+      "sha256": "ccd51a189555f0b40838356837f5756cf2a3ac512994ff66b42823269f6bf9db",
+      "bytes": 1404,
+      "mode": "644"
+    },
+    {
       "path": "src/lib/json_io.mjs",
       "source": "src/lib/json_io.mjs",
       "sha256": "35d73bab47d2c1bf6b657ff88184992a5f436c5a09e94809b7f4edba2782e5af",
@@ -2385,8 +2609,8 @@
     {
       "path": "src/lib/linux_setup.mjs",
       "source": "src/lib/linux_setup.mjs",
-      "sha256": "4878f6cad373ee7f460b7583c9ea3722bcaba1b792097fc655e66718c21832b7",
-      "bytes": 11078,
+      "sha256": "68a21e8b50049fe51ccfdb2635f427eee5f608010b18d58063e9607cb86f66ce",
+      "bytes": 12254,
       "mode": "644"
     },
     {
@@ -2432,6 +2656,139 @@
       "mode": "644"
     },
     {
+      "path": "src/lib/slack_agent_rows.mjs",
+      "source": "src/lib/slack_agent_rows.mjs",
+      "sha256": "20e79d8528842687caa46863a651434c482840d3153a9451579c9ad44cb01081",
+      "bytes": 812,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_api.mjs",
+      "source": "src/lib/slack_api.mjs",
+      "sha256": "8930a60a208862a390910e04660e4810d18c8bd20690157ad562d37c31b5c3cf",
+      "bytes": 7367,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_app_provision.mjs",
+      "source": "src/lib/slack_app_provision.mjs",
+      "sha256": "a4e3119deb3d9df8e7aec56761377f8f9bf677d40721bbfbaea6778b40e38375",
+      "bytes": 4875,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_channel_map.mjs",
+      "source": "src/lib/slack_channel_map.mjs",
+      "sha256": "73b8ab85df5025726758fd6ee4ab43996dde727b2d3c67446a23566be7f08ff9",
+      "bytes": 11440,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_channels_add.mjs",
+      "source": "src/lib/slack_channels_add.mjs",
+      "sha256": "fb5712d9b160848ce2acc5b905a7c2bbdf82801a7a33ef9229c4771e576cbd26",
+      "bytes": 7975,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_channels_entry.mjs",
+      "source": "src/lib/slack_channels_entry.mjs",
+      "sha256": "daa0f1c0104d720251ded33770dd0a3639340899f343703267b2c83ffff6cb2f",
+      "bytes": 5108,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_credentials.mjs",
+      "source": "src/lib/slack_credentials.mjs",
+      "sha256": "461e858e82df27ba313abfe5ccce4e10ee60bef0b7a3a91d443589281e5b868a",
+      "bytes": 5673,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_inbound_by_name.mjs",
+      "source": "src/lib/slack_inbound_by_name.mjs",
+      "sha256": "dfe1abde652c8c5096ac9b47947f30cd57808c7f46cb8e43be33112fdb408c90",
+      "bytes": 9117,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_inbound.mjs",
+      "source": "src/lib/slack_inbound.mjs",
+      "sha256": "aa5e69f599386377efd7dc988d78e50660d3db4ab25b81b826d3c48599762bd3",
+      "bytes": 7592,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_inbox.mjs",
+      "source": "src/lib/slack_inbox.mjs",
+      "sha256": "3a3f40c96a9a32fe9f4b4414dc570ed9927e86e3518b20b87aba8e6462a5e639",
+      "bytes": 3183,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_owner_channel.mjs",
+      "source": "src/lib/slack_owner_channel.mjs",
+      "sha256": "cdd71d8c4f36a1251d9a82a60bd7d72028c8f6ccefa01f659543aab63eb02a09",
+      "bytes": 7936,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_session_launch.mjs",
+      "source": "src/lib/slack_session_launch.mjs",
+      "sha256": "4458671e9a0a0bfb1a712b7804690db50096198576ba6d2f41f7e50a3a821e22",
+      "bytes": 8748,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_setup_entry.mjs",
+      "source": "src/lib/slack_setup_entry.mjs",
+      "sha256": "6112da9e675de20057a73b91e8e147569a039ebe4b65626a00a3e4919dca65f7",
+      "bytes": 6869,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_setup_flow.mjs",
+      "source": "src/lib/slack_setup_flow.mjs",
+      "sha256": "8cb345f9185d01cf822e2e95fc35c3e40d7ab2629ab62264d6edcef431050301",
+      "bytes": 7509,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_setup_http.mjs",
+      "source": "src/lib/slack_setup_http.mjs",
+      "sha256": "7d6504531bf2009554b06c3417e57f6005bad9d4c653eefe2a1c420034e997ab",
+      "bytes": 4044,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_setup_page.mjs",
+      "source": "src/lib/slack_setup_page.mjs",
+      "sha256": "bbd21b952f6151ea546f2bb8c8a09a0e17a98de7413c17375f1eb37f9b593119",
+      "bytes": 7744,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_setup_steps.mjs",
+      "source": "src/lib/slack_setup_steps.mjs",
+      "sha256": "f70d33e284a4355169f925cd79f46f9da52e3fb25e4d00306ad8411928d1dc34",
+      "bytes": 4449,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_setup.mjs",
+      "source": "src/lib/slack_setup.mjs",
+      "sha256": "ad645f0072cb98cfe43822c4d0f154737c7d242ed3f96a1747d05fbe12ca3d4c",
+      "bytes": 6465,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/slack_socket_listener.mjs",
+      "source": "src/lib/slack_socket_listener.mjs",
+      "sha256": "a58901c484db50c0226401d4e5d372dc29344d7e0e6f4dc2bcc6e5234a254a73",
+      "bytes": 8791,
+      "mode": "644"
+    },
+    {
       "path": "src/lib/starport_aegis_package.mjs",
       "source": "src/lib/starport_aegis_package.mjs",
       "sha256": "4df597a693d975d760c41cf2db331587da850bb66d3da23706284ab8cc80c30c",
@@ -2469,8 +2826,8 @@
     {
       "path": "src/lib/starport_orchestrator.mjs",
       "source": "src/lib/starport_orchestrator.mjs",
-      "sha256": "bbbb2aae656d4c382094c305704541b952407aa39ecb69adb02d6520d7ceb84a",
-      "bytes": 12657,
+      "sha256": "79ac37ea9f199e43846ec9af49ab06bd98454f05f74d67ccc3ad2ad35a315877",
+      "bytes": 12770,
       "mode": "644"
     },
     {
@@ -2485,6 +2842,13 @@
       "source": "src/lib/starport_runtime.mjs",
       "sha256": "089da628b2d2fbf45a9bcc3c4734dc0a243fe46a09b7b2c6857c0f61d26dafb6",
       "bytes": 9820,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/starport_slack_route.mjs",
+      "source": "src/lib/starport_slack_route.mjs",
+      "sha256": "5f1e1bf5c20924c27d29b466348f23ea10574bb045e70a47f58f60a3512725b0",
+      "bytes": 136,
       "mode": "644"
     },
     {
@@ -2544,6 +2908,41 @@
       "mode": "644"
     },
     {
+      "path": "src/lib/tightbeam_slack_adapter.mjs",
+      "source": "src/lib/tightbeam_slack_adapter.mjs",
+      "sha256": "677d10b7207d50061b80115eabb4deb27a27fd0304bfae5e8fb7ab7887c649db",
+      "bytes": 9323,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tightbeam_slack_channel.mjs",
+      "source": "src/lib/tightbeam_slack_channel.mjs",
+      "sha256": "053e587a2b510e2b7885e2cbfd8eb4992525217113972af34a66481c8c95e262",
+      "bytes": 4834,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tightbeam_slack_delivery.mjs",
+      "source": "src/lib/tightbeam_slack_delivery.mjs",
+      "sha256": "e5de296341cbd1b200bde1857b97e4c23f53b8a81cb500927e10f998d3c1a7ab",
+      "bytes": 6912,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tightbeam_slack_identity.mjs",
+      "source": "src/lib/tightbeam_slack_identity.mjs",
+      "sha256": "e2d02ddb283f5e81398dfb6b6caa4a7bd37e11d85f6451e2391d40ea9e51d541",
+      "bytes": 1250,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tightbeam_slack_support.mjs",
+      "source": "src/lib/tightbeam_slack_support.mjs",
+      "sha256": "2f2ff6921d9af541f5859431a989c754935d86cc1db367ed53d886d25f112b98",
+      "bytes": 5476,
+      "mode": "644"
+    },
+    {
       "path": "src/lib/tightbeam_verified_runtime.mjs",
       "source": "src/lib/tightbeam_verified_runtime.mjs",
       "sha256": "c86f8665227d67a6201b230d91bf89678681660649b3c00bdfde06cb25fbe05f",
@@ -2567,8 +2966,8 @@
     {
       "path": "src/lib/tldr_agent_daemon_loop.mjs",
       "source": "src/lib/tldr_agent_daemon_loop.mjs",
-      "sha256": "6a19e2480e5b12560d203fb77239dc29a2d334ec1deee5dad749f39eea8137ec",
-      "bytes": 8843,
+      "sha256": "9fb00ab70343c3cd98cf86f4155ab4736ed1535c8b0bb7a5e43174d4a0ea647f",
+      "bytes": 9390,
       "mode": "644"
     },
     {
@@ -2595,8 +2994,8 @@
     {
       "path": "src/lib/tldr_agent_diagnostic_schema.mjs",
       "source": "src/lib/tldr_agent_diagnostic_schema.mjs",
-      "sha256": "449f7ce04a0a40a8b03cb505ed37918ad0315fbccbef6187525e4e54d2d3256a",
-      "bytes": 5370,
+      "sha256": "190ab5ca939788d8f92e69156a34afdd5cf90551698fd8b9d95d8ae46e57e501",
+      "bytes": 7405,
       "mode": "644"
     },
     {
@@ -2611,6 +3010,13 @@
       "source": "src/lib/tldr_agent_gui_session.mjs",
       "sha256": "06674802e36a8f7d4d3455118232342eede476a2742430e56236fe3296d8266d",
       "bytes": 1674,
+      "mode": "644"
+    },
+    {
+      "path": "src/lib/tldr_agent_helm_service_wait.mjs",
+      "source": "src/lib/tldr_agent_helm_service_wait.mjs",
+      "sha256": "83302486bed7af2eeb2b0b4b606d6b098909836585e7684f0936cdaf4565aca5",
+      "bytes": 2035,
       "mode": "644"
     },
     {
@@ -2665,8 +3071,8 @@
     {
       "path": "src/lib/tldr_agent_source_lifecycle.mjs",
       "source": "src/lib/tldr_agent_source_lifecycle.mjs",
-      "sha256": "8e2cb8daec7e3134eba4dacfa78376750f1f6cd7649543b8a4ec257052e2e9a2",
-      "bytes": 14011,
+      "sha256": "cd86e9176fb275e1735682afb1868e283d657060a3af6c55894d638f85e160e4",
+      "bytes": 12159,
       "mode": "644"
     },
     {
@@ -2679,15 +3085,15 @@
     {
       "path": "src/lib/tldr_capabilities.mjs",
       "source": "src/lib/tldr_capabilities.mjs",
-      "sha256": "e032728a0735ed95d34e3ad0a07410e1bbfba2d8a80c57e234c5e13dd2a68598",
-      "bytes": 3823,
+      "sha256": "332df64d427eedc036f9feff3318f4dcd8245accafabcce3ae0263995cf18934",
+      "bytes": 4423,
       "mode": "644"
     },
     {
       "path": "src/lib/tldr_capability_readers.mjs",
       "source": "src/lib/tldr_capability_readers.mjs",
-      "sha256": "d648fd7dcb5325eb5f18893a0399d746de5c421a1f1a5958100244d96ab364fa",
-      "bytes": 5899,
+      "sha256": "a1a769681bcc6351ff2be2ecc38a7193f23019079cc0066041f94e71269a89d4",
+      "bytes": 6559,
       "mode": "644"
     },
     {
@@ -2789,10 +3195,17 @@
       "mode": "644"
     },
     {
+      "path": "src/lib/wsl_setup.mjs",
+      "source": "src/lib/wsl_setup.mjs",
+      "sha256": "1e6f1668370af64544de6e39690c6a06fa2a37a799c1068fa35cd6c9488049b1",
+      "bytes": 7140,
+      "mode": "644"
+    },
+    {
       "path": "src/starport.mjs",
       "source": "src/starport.mjs",
-      "sha256": "b8978879e1cb46df2d02cadeaa2461f364a2ce771bd488e91a3ea2464d8855f4",
-      "bytes": 5071,
+      "sha256": "9c6864e827e57e24435c13ca2b395229d532f24e9c705f2ff31bba773e115529",
+      "bytes": 7342,
       "mode": "644"
     },
     {

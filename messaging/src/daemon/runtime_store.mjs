@@ -11,10 +11,8 @@
 //      write can never activate transient configuration, because the swap
 //      happens only after the rename returned.
 //
-// Files follow the hook-app.json precedent (src/cli/hook_credentials.mjs):
-// 0600 files inside the 0700 state root. No database involvement at all —
-// registration adds no schema migration. Rollback for any registration is
-// deleting its file.
+// Files follow the hook-app.json precedent: 0600 files in the 0700 state
+// root, no schema migration. Rollback for any registration is deleting it.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -265,12 +263,11 @@ function persistCanonicalManifest({ runtimesDir, id, json, fsImpl }) {
  * parsed, reject collisions against the builtin/alias space, treat
  * same-id/same-hash as an idempotent replay, and otherwise persist first
  * and activate second by swapping a new frozen snapshot onto
- * `context.runtimeRegistry`. Returns { id, hash, replayed, file? }.
- *
- * `fsImpl` exists so tests can fail the rename at exactly the atomic step;
- * production callers take the default node:fs and no other seam exists.
+ * `context.runtimeRegistry`. Returns { id, hash, replayed, replaced, file? }.
+ * `replaceStale(existing, manifest)` (setup only) may approve replacing a
+ * different-content record. `fsImpl` lets tests fail the atomic rename.
  */
-export function registerRuntimeManifest({ context, manifestObject, fsImpl = fs }) {
+export function registerRuntimeManifest({ context, manifestObject, replaceStale = null, fsImpl = fs }) {
   if (!isPlainObject(manifestObject)) {
     throw new TightbeamError('malformed_request', 'manifest is required and must be a JSON object (the CLI sends the parsed document, never a path)', {
       field: 'manifest',
@@ -355,9 +352,11 @@ export function registerRuntimeManifest({ context, manifestObject, fsImpl = fs }
       context.logger?.info?.({ event: 'runtime_register_replayed', params: { runtime_id: id }, status: 'replayed' });
       return { id, hash, replayed: true, file: existing.file };
     }
-    throw new TightbeamError('identity_conflict', `runtime id "${id}" is already registered with different content (registered hash ${existing.hash})`, {
-      field: 'id',
-    });
+    if (!replaceStale?.(existing, manifestObject)) {
+      throw new TightbeamError('identity_conflict', `runtime id "${id}" is already registered with different content (registered hash ${existing.hash})`, {
+        field: 'id',
+      });
+    }
   }
 
   // Identity evidence must stay unique across every record — builtins
@@ -404,14 +403,14 @@ export function registerRuntimeManifest({ context, manifestObject, fsImpl = fs }
   context.runtimeRegistry = createRuntimeSnapshot({
     stateRoot: context.stateRoot,
     runtimesDir,
-    entries: [...entries, entry],
+    entries: [...entries.filter((other) => other !== existing), entry],
   });
 
   context.logger?.info?.({
     event: 'runtime_registered',
     params: { runtime_id: id, resume_strategy: parsed.record.resumeStrategy },
     result: { hash },
-    status: 'activated',
+    status: existing ? 'replaced' : 'activated',
   });
-  return { id, hash, replayed: false, file };
+  return { id, hash, replayed: false, replaced: Boolean(existing), file };
 }

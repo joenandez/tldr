@@ -11,7 +11,7 @@ import { createHash } from 'node:crypto';
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { generateId } from '../../protocol/ids.mjs';
 import { isSafeSessionId, sessionPaths } from '../../protocol/session_paths.mjs';
-import { isUniqueConstraintError } from './authority_scope.mjs';
+import { ROUTE_ADMITTED_ROLE, isUniqueConstraintError } from './authority_scope.mjs';
 import { REPLY_BINDING_POLICY } from '../reply_listener_policy.mjs';
 import { activeListenerForEndpoint, createPendingPresentation } from './listener_operations.mjs';
 import { requestHostWakesForDeliveries } from '../session_host.mjs';
@@ -78,7 +78,7 @@ export function requirePrincipal(db, principalId, field) {
 
 export function requireParticipant(db, conversationId, principalId) {
   const row = db
-    .prepare('SELECT 1 FROM conversation_participants WHERE conversation_id = ? AND principal_id = ?')
+    .prepare(`SELECT 1 FROM conversation_participants WHERE conversation_id = ? AND principal_id = ? AND role IS NOT '${ROUTE_ADMITTED_ROLE}'`)
     .get(conversationId, principalId);
   if (!row) {
     throw new TightbeamError('conversation_binding_conflict', `principal "${principalId}" is not a participant of conversation "${conversationId}"`);
@@ -759,7 +759,7 @@ export function createDeliveriesForRecipients(db, { conversationId, messageId, s
               e.created_at AS created_at, e.updated_at AS updated_at,
               EXISTS (SELECT 1 FROM resume_requests rr WHERE rr.endpoint_id = e.id AND rr.replacement_endpoint_id IS NOT NULL) AS superseded
          FROM endpoints e
-         JOIN conversation_participants cp ON cp.principal_id = e.principal_id
+         JOIN conversation_participants cp ON cp.principal_id = e.principal_id AND cp.role IS NOT '${ROUTE_ADMITTED_ROLE}'
         WHERE cp.conversation_id = ?
           AND (? IS NULL OR e.id = ?)
           AND e.state != 'closed'

@@ -14,8 +14,17 @@ import {
 import { EMAIL_ROUTE } from "./starport_email_route.mjs";
 import { createEmailDisconnectMarker } from "./email_disconnect_marker.mjs";
 import { tldrAgentHomeFor } from "./store.mjs";
+import {
+  detectWsl,
+  wslPlatformSteps,
+  wslPlatformStatus,
+} from "./wsl_setup.mjs";
+import { registerOwnCopilotRuntime } from "./copilot_runtime_registration.mjs";
 import { projectCapabilities } from "./tldr_capabilities.mjs";
-import { probeColdCapabilities } from "./tldr_capability_readers.mjs";
+import {
+  probeColdCapabilities,
+  readSlackCapabilityState,
+} from "./tldr_capability_readers.mjs";
 
 // Linux/WSL `tldr-agents setup|status|repair`. There is no signed app and no
 // Aegis helper here, so email is "connected" when the owner credential file
@@ -134,6 +143,7 @@ export async function linuxStatus({
   probe = probeColdCapabilities,
   poller = defaultPoller,
   tightbeam,
+  wsl = detectWsl({ env }),
 } = {}) {
   const cold = await probe();
   const credential = readCredentials(home);
@@ -160,10 +170,12 @@ export async function linuxStatus({
     appInstalled: true,
     emailRoutes: routes,
     emailDisconnectPending: pending,
+    slack: readSlackCapabilityState(),
   });
+  const wslState = wsl ? await wslPlatformStatus({ env, run, ...wsl }) : null;
   const connected = capabilities.email.state === "connected";
   const state = connected
-    ? active && pollerState.runnable === true
+    ? active && pollerState.runnable === true && !wslState?.missing.length
       ? "ready"
       : "repair-required"
     : nativeStatus === "unconfigured"
@@ -190,11 +202,35 @@ export async function linuxStatus({
           : null,
         unit: { name: UNIT, active },
         poller: pollerState,
+        wsl: wslState,
       },
     },
     error: null,
   };
 }
+
+async function ensureCredentials({ home, given, prompt }) {
+  const current = readCredentials(home);
+  if (current.valid) return;
+  log("info", "linux_setup_prompt", { reason: current.code });
+  const p = prompt ?? createPrompt();
+  try {
+    writeOwnerCredentials(await collectCredentials(p, given), { home });
+  } finally {
+    if (!prompt) p.close();
+  }
+}
+
+const setupFailure = (operation, error) => ({
+  ok: false,
+  data: null,
+  error: {
+    code: error.code ?? "LINUX_SETUP_FAILED",
+    message: `${operation} stopped at step ${error.step ?? "unknown"}`,
+    retryable: true,
+    remediation: error.remediation ?? "tldr-agents repair --json",
+  },
+});
 
 // Setup and repair are the same idempotent steps; the key is asked for only
 // when owner.json is missing or refused.
@@ -209,8 +245,11 @@ export async function linuxSetup({
   poller = defaultPoller,
   tightbeam,
   status = linuxStatus,
+  wsl = detectWsl({ env }),
+  copilotRuntime = registerOwnCopilotRuntime,
 } = {}) {
   const steps = [];
+  let copilot = null;
   const step = async (name, fn) => {
     log("info", "linux_setup_step", { operation, step: name });
     try {
@@ -230,17 +269,11 @@ export async function linuxSetup({
     if (!result.ok) throw fail(`${name}_failed`, `${name} failed`);
   };
   try {
-    await step("credentials", async () => {
-      const current = readCredentials(home);
-      if (current.valid) return;
-      log("info", "linux_setup_prompt", { reason: current.code });
-      const p = prompt ?? createPrompt();
-      try {
-        writeOwnerCredentials(await collectCredentials(p, given), { home });
-      } finally {
-        if (!prompt) p.close();
-      }
-    });
+    // Windows settings and systemd come first: one WSL restart applies them all.
+    const stop =
+      wsl && (await wslPlatformSteps({ step, steps, env, run, ...wsl }));
+    if (stop) return stop;
+    await step("credentials", () => ensureCredentials({ home, given, prompt }));
     await step("desired_state", async () =>
       checked(
         "desired_state",
@@ -264,6 +297,14 @@ export async function linuxSetup({
         await agents(run, ["messaging", "bootstrap"]),
       ),
     );
+    // The daemon is up: register tldr's own Copilot runtime (A2).
+    await step("copilot_runtime", async () => {
+      copilot = await copilotRuntime({
+        packageRoot: PACKAGE_ROOT,
+        home,
+        messaging: (args) => agents(run, ["messaging", ...args]),
+      });
+    });
     await step("email_route", async () => {
       const channel = tightbeam ?? (await defaultTightbeam(env, home));
       const preflight = await channel.preflight();
@@ -278,19 +319,19 @@ export async function linuxSetup({
       await mod.installLinuxEmailPoller({ env, platform });
     });
   } catch (error) {
-    return {
-      ok: false,
-      data: null,
-      error: {
-        code: error.code ?? "LINUX_SETUP_FAILED",
-        message: `${operation} stopped at step ${error.step ?? "unknown"}`,
-        retryable: true,
-        remediation: "tldr-agents repair --json",
-      },
-    };
+    return setupFailure(operation, error);
   }
-  const final = await status({ env, home, platform, run, poller, tightbeam });
+  const final = await status({
+    env,
+    home,
+    platform,
+    run,
+    poller,
+    tightbeam,
+    wsl,
+  });
   final.data.steps = steps;
+  final.data.copilot_runtime = copilot;
   return final;
 }
 

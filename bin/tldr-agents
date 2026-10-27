@@ -9,6 +9,7 @@
 #   tldr-agents tasks <args...>       -> helm-tasks <args...>
 #   tldr-agents assignments <args...> -> helm-assignments <args...>
 #   tldr-agents drafts <args...>      -> email-drafts <args...>
+#   tldr-agents slack <args...>       -> tldr-slack-channels <args...>
 #
 # The component launchers live in <package root>/libexec, not bin/: Claude
 # Code adds each enabled plugin's bin/ to its Bash PATH, so bin/ holds only
@@ -67,14 +68,18 @@ usage_error() {
 registry() {
   /bin/cat <<'REGISTRY'
 area	lifecycle	tldr-agent	registry	Set up, check, configure, repair, or remove tldr; (the setup skill).
-verb	lifecycle	setup	registry	Connect email in the signed tldr; app; messaging and tasks work without it.
+verb	lifecycle	setup	registry	Connect email in the signed tldr; app, or Slack with --channel slack; messaging and tasks work without either.
 usage	lifecycle	setup	setup [--json] [--force-downgrade]
-verb	lifecycle	status	registry	Show messaging, scheduled tasks, and email status.
+usage	lifecycle	setup	setup --channel slack [--agents <names> | --agents-json <file|->] [--json]
+verb	lifecycle	status	registry	Show messaging, scheduled tasks, and email status, plus Slack (--channel slack checks it live).
 usage	lifecycle	status	status [--json]
-verb	lifecycle	configure	registry	Open the app to change owner or replace the API key, or disconnect email.
+usage	lifecycle	status	status --channel slack [--json]
+verb	lifecycle	configure	registry	Open the app to change owner or replace the API key, or disconnect email; --channel slack disconnect removes Slack.
 usage	lifecycle	configure	configure [--json]
-verb	lifecycle	repair	registry	Repair messaging, scheduled tasks, or email; each names its own fix.
+usage	lifecycle	configure	configure --channel slack disconnect [--json]
+verb	lifecycle	repair	registry	Repair messaging, scheduled tasks, or email, or Slack with --channel slack; each names its own fix.
 usage	lifecycle	repair	repair [--json] [--force-downgrade]
+usage	lifecycle	repair	repair --channel slack [--json]
 verb	lifecycle	uninstall	registry	Open the app to confirm removing tldr; from this Mac.
 usage	lifecycle	uninstall	uninstall [--json]
 verb	lifecycle	version	registry	Print the active public or local development version.
@@ -84,6 +89,8 @@ verb	messaging	agent send	component	Send a message when no response or action is
 usage	messaging	agent send	agent send --to session:<id>|agent:<runtime>:<cwd>|new:<runtime>:<cwd> --subject <text> --reason <text> (--body <text> | --body-file <path>) [--no-reply]
 usage	messaging	agent send	agent send --to user --subject <text> --reason <text> (--body <text> | --body-file <path>) [--channel <selector>|all] [--no-reply] [--wait-delivery <duration>]
 usage	messaging	agent send	agent send --thread <handle> (--body <text> | --body-file <path>)
+verb	messaging	agent wait	component	Wait for an expected reply without reading its content.
+usage	messaging	agent wait	agent wait [--timeout <duration>] [--json]
 verb	messaging	agent request	component	Open tracked work with another agent or yourself.
 usage	messaging	agent request	agent request --to self|session:<id>|agent:<runtime>:<cwd>|new:<runtime>:<cwd> --subject <text> --reason <text> (--body <text> | --body-file <path>) --completion-mode <message_committed|delivery_confirmed> [--notify user] [--channel <selector>]
 verb	messaging	agent reply	component	Reply to a received message, including a user message.
@@ -127,7 +134,9 @@ usage	messaging	bootstrap	bootstrap [--app-name <name>] [--authority <name>] [--
 verb	messaging	hook	registry	Run one session hook with its payload on stdin; the plugin's hooks call this.
 usage	messaging	hook	hook session-start|user-prompt-submit|stop|wake-listen [--runtime <id>]
 usage	messaging	hook	hook stop --handoff [--runtime <id>]
-usage	messaging	hook	hook pre-tool-use|post-tool-use
+usage	messaging	hook	hook stop --wait-mode explicit [--runtime <id>]
+usage	messaging	hook	hook stop --handoff --wait-mode explicit [--runtime <id>]
+usage	messaging	hook	hook pre-tool-use|post-tool-use [--runtime <id>]
 usage	messaging	hook	hook subagent-start|subagent-stop [--runtime <id>]
 area	tasks	helm-tasks	component	Scheduled jobs, the scheduler daemon, history, and logs (Helm; the tasks skill).
 verb	tasks	schedule	component	Create runnable scheduled work and activate the workspace runtime.
@@ -195,6 +204,10 @@ usage	drafts	confirm	confirm --id <draft-id>
 usage	drafts	confirm	confirm --id <draft-id> --job-file <path>|- [--cwd <path>]
 verb	drafts	discard	registry	Close a draft without sending or scheduling anything.
 usage	drafts	discard	discard --id <draft-id>
+area	slack	tldr-slack-channels	registry	Slack channels for your agents (one private channel per agent name).
+verb	slack	channels add	registry	Create a private channel per name, invite you, and post a welcome; safe to rerun.
+usage	slack	channels add	channels add <name>... [--launch-cwd <dir> --launch-runtime <claude-code|codex> --launch-command <shell-quoted command>] [--json]
+usage	slack	channels add	channels add --agents-json <file|-> [--json]
 REGISTRY
 }
 
@@ -377,7 +390,7 @@ dispatch_help() { # <mode> <area> [words...]
 area_for() { # <word>; prints the area an invocation word selects
   case "$1" in
     setup|status|configure|repair|uninstall|version) printf 'lifecycle\n' ;;
-    messaging|tasks|assignments|drafts) printf '%s\n' "$1" ;;
+    messaging|tasks|assignments|drafts|slack) printf '%s\n' "$1" ;;
     *) return 1 ;;
   esac
 }
@@ -390,6 +403,9 @@ if [ "$#" -ge 3 ] && [ "$1" = messaging ] && [ "$2" = hook ]; then
     session-start|user-prompt-submit|stop|wake-listen|pre-tool-use|post-tool-use|subagent-start|subagent-stop)
       if mode=$(help_after 3 "$@"); then dispatch_help "$mode" messaging hook; fi
       shift 3
+      if [ "$event" = post-tool-use ] && [ "$#" -eq 2 ] && [ "$1" = --runtime ] && [ -n "$2" ]; then
+        run_component tightbeam hook "$event" --runtime "$2"
+      fi
       case "$event" in
         pre-tool-use|post-tool-use)
           [ "$#" -eq 0 ] ||

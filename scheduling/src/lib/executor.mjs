@@ -1335,9 +1335,8 @@ function resolveAdapter(job) {
 
 function selectedAdapterRuntime(adapter, job) {
   if (adapter?.name !== "academy") return adapter?.name || null;
-  const runtime =
-    job?.execution_hints?.provider_config?.academy_runtime || "claude";
-  return runtime === "codex" ? "codex" : "claude";
+  const runtime = job?.execution_hints?.provider_config?.academy_runtime;
+  return ["claude", "codex", "copilot"].includes(runtime) ? runtime : "claude";
 }
 
 async function runPreparedAdapter({
@@ -1358,6 +1357,7 @@ async function runPreparedAdapter({
   const trackedEnv = agentExecutionEnv(extraEnv, {
     sessionId: prepared.session_id || null,
   });
+  const selectedRuntime = selectedAdapterRuntime(adapter, job);
   if (prepared.session_id) {
     writeAgentRunSession({
       jobId: trackedEnv.HELM_JOB_ID,
@@ -1376,7 +1376,7 @@ async function runPreparedAdapter({
     trackedEnv,
     onSpawn,
     logPaths,
-    { appendLogs, trackAgentSession: { agent: adapter.name }, memoryMode },
+    { appendLogs, trackAgentSession: { agent: selectedRuntime }, memoryMode },
   );
   const sidecarAfter = prepared.sidecar
     ? snapshotSidecarIds(prepared.sidecar, cwd)

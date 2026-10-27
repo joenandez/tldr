@@ -230,6 +230,7 @@ function usage() {
       "--provider",
       "--academy-agent",
       "--academy-runtime",
+      "--permission-mode",
       "--unmanaged",
       "--session-required",
       "--output-format",
@@ -403,6 +404,7 @@ const HELP_CATALOG = {
       "--provider <codex|claude|droid|gemini|cursor|hermes|academy>",
       "--academy-agent <name>",
       "--academy-runtime <claude|codex>",
+      "--permission-mode <mode>",
       "--prompt <text>",
       "--prompt-file <path>",
       "--tags <a,b,c>",
@@ -1430,6 +1432,8 @@ function buildExecutionHintsFromFlags(flags) {
   if (flags["academy-runtime"] !== undefined)
     providerConfig.academy_runtime =
       flags["academy-runtime"] === "null" ? null : flags["academy-runtime"];
+  const permission_mode = flags["permission-mode"]; // an Academy/copilot job needs it
+  if (permission_mode) providerConfig.runtime_options = { permission_mode };
   if (Object.keys(providerConfig).length > 0)
     hints.provider_config = providerConfig;
   if (flags.unmanaged !== undefined) {

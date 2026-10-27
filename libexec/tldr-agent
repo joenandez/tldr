@@ -55,6 +55,22 @@ tldr_default_operation() {
   fi
 }
 operation=${1:-$(tldr_default_operation)}
+# Slack has no signed app either: one Node entry serves macOS and Linux.
+tldr_wants_slack() {
+  case "$operation" in setup|status|repair|configure) ;; *) return 1 ;; esac
+  previous=""
+  for argument in "$@"; do
+    if [ "$argument" = "--channel=slack" ] || { [ "$previous" = "--channel" ] && [ "$argument" = "slack" ]; }; then
+      return 0
+    fi
+    previous=$argument
+  done
+  return 1
+}
+if tldr_wants_slack "$@"; then
+  if [ "$#" -gt 0 ]; then shift; fi
+  exec "${plugin_root}/libexec/component-dispatch" tldr-slack-setup "$operation" "$@"
+fi
 # Linux has no signed app: a short Node setup replaces the bootstrap, which
 # never runs there. The Node entry refuses operations Linux does not support.
 if tldr_is_linux; then

@@ -31,6 +31,12 @@ export function unifiedPackageFrontDoorPath(packageRoot = defaultPackageRoot) {
     : path.join(packageRoot, 'bin', FRONT_DOOR_COMMAND);
 }
 
+// This package's source-owned Copilot plugin hooks file, the artifact a
+// `--plugin-dir <package root>/.copilot-plugin` load runs.
+export function unifiedPackageCopilotPluginHooksPath(packageRoot = defaultPackageRoot) {
+  return path.join(packageRoot, '.copilot-plugin', 'hooks', 'hooks.json');
+}
+
 // A path the shell passes through as one word, unquoted.
 const SHELL_WORD = /^[A-Za-z0-9_@%+=:,./-]+$/;
 
@@ -47,6 +53,15 @@ function unifiedMessagingRecipe(packageRoot) {
     : FRONT_DOOR_MESSAGING_COMMAND;
 }
 
+// The front door a Copilot recipe runs: this package's own path, POSIX
+// single-quoted when the shell would split it. Never the bare command for a
+// path that needs quoting, because a plugin-only install puts nothing on PATH.
+export function quotedMessagingRecipe(packageRoot = defaultPackageRoot) {
+  const frontDoor = unifiedPackageFrontDoorPath(packageRoot);
+  if (frontDoor === null) return FRONT_DOOR_MESSAGING_COMMAND;
+  return `${SHELL_WORD.test(frontDoor) ? frontDoor : `'${frontDoor.replaceAll("'", `'\\''`)}'`} messaging`;
+}
+
 // The Tightbeam command prefix for a recipe the CLI prints for an agent to
 // run (hook notifications, next actions). The standalone package and its
 // `~/.tightbeam/install` launcher are retired (items 17 and 33), so every
@@ -59,6 +74,21 @@ export function tightbeamCommandHint(packageRoot = defaultPackageRoot) {
 // and the acknowledge command. The ACK gate admits it.
 export function tightbeamRecipeCommand(packageRoot = defaultPackageRoot) {
   return unifiedMessagingRecipe(packageRoot);
+}
+
+export function tightbeamCodexWaitRecipe() {
+  const command = JSON.stringify(
+    `${tightbeamRecipeCommand()} agent wait --timeout 350s --json`,
+  );
+  return `Run this wait command, then stop again after it returns:\n` +
+    `// @exec: {"yield_time_ms": 360000}\n` +
+    `let result = await tools.exec_command({ cmd: ${command}, yield_time_ms: 30000 });\n` +
+    `let session_id = result.session_id;\n` +
+    `while (session_id) {\n` +
+    `  result = await tools.write_stdin({ session_id, chars: "", yield_time_ms: 300000 });\n` +
+    `  session_id = result.session_id;\n` +
+    `}\n` +
+    `text(result.output);`;
 }
 
 // The exact commands that answer a pending delegation offer. Every surface

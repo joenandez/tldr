@@ -1,17 +1,4 @@
 #!/usr/bin/env node
-// Tightbeam CLI — a thin wrapper over src/client (the product plan
-// Technical Approach §3: "Clients can validate obvious input errors. Only
-// the daemon can create canonical messages..."). No business logic and no
-// local state beyond reading credentials from flags/env/file: every
-// subcommand below maps 1:1 onto one docs/protocol.md operation. CLI verb
-// naming (nouns before verbs, e.g. `app register`, `endpoint set-state`)
-// is informed by Helm's message CLI contract
-// (Helm's message CLI, inspected for flag-naming
-// convention only — see the internal provenance record), per the product plan Technical
-// Approach §1 ("Use Helm as the source for ... the existing message CLI
-// contract"). Tightbeam's own surface maps onto docs/protocol.md
-// verbatim; no Helm flags are copied wholesale.
-
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -19,9 +6,8 @@ import os from 'node:os';
 import { connect, writeAdminNonce } from '../src/client/client.mjs';
 import { HookError, runHookVerb, HOOK_EVENT_VERBS } from '../src/cli/hook_commands.mjs';
 import { bootstrapHooks } from '../src/cli/hooks_install.mjs';
-// The install-time bootstrap shared with `hook session-start`: one
-// implementation, two entry points.
 import { bootstrap, BootstrapError, DEFAULT_APP_NAME, DEFAULT_AUTHORITY_NAME } from '../src/cli/bootstrap.mjs';
+import { copilotRecipePrefix } from '../src/cli/copilot_hook_runtime.mjs';
 import { readHookCredentials } from '../src/cli/hook_credentials.mjs';
 import { statePaths } from '../src/daemon/state_root.mjs';
 import { resolveStateRoot as resolveConfiguredStateRoot } from '../src/protocol/state_root_location.mjs';
@@ -34,14 +20,16 @@ import { createRuntimeSnapshot, loadPersistedRuntimeEntries } from '../src/daemo
 import { SCHEMA_VERSION } from '../src/daemon/schema.mjs';
 import { runDoctorChecks } from '../src/cli/doctor_checks.mjs';
 import { AgentCommandError, loadAgentSession, parseAgentCommand, resolveAgentSessionIdentity, runAgentCommand } from '../src/cli/agent_commands.mjs';
-// Text for a person or an agent to run names the front door
-// (`tldr-agents messaging`), not the retired `tightbeam` bin alias (item 36).
+import { agentWaitHandshakeError, cacheAgentWaitStartup, prepareAgentWaitStartup } from '../src/cli/agent_wait_startup.mjs';
+// Recipe text uses the supported `tldr-agents messaging` front door.
 import { tightbeamCommandName } from '../src/cli/package_context.mjs';
 // Client-side manifest validation for `runtime register`: the same strict
 // parser the daemon runs, so an invalid manifest fails before any daemon
 // contact.
 import { parseRuntimeManifest } from '../src/runtimes/registry.mjs';
+import { packageBoundCopilotRuntimeIds } from '../src/runtimes/copilot_wake_contract.mjs';
 import { BASELINE_CAPABILITIES, DAEMON_VERSION, PROTOCOL_VERSION, TightbeamError } from '../src/protocol/envelope.mjs';
+import { writeCopilotOutput } from '../src/cli/copilot_hook.mjs';
 
 class UsageError extends Error {}
 
@@ -265,24 +253,33 @@ async function runPreflight(globalFlags, args) {
   }
 }
 
-async function buildClient({ stateRoot, admin, appId, secretFile, onEvent }) {
+async function buildClient({ stateRoot, admin, appId, secretFile, onEvent, agentWaitContext: waitContext }) {
   const client = await connect(stateRoot, onEvent ? { onEvent } : {});
-  if (admin) {
-    const nonce = writeAdminNonce(stateRoot);
-    client.handshakeResult = await client.handshake({ credential: { kind: 'admin', nonce } });
+  try {
+    if (admin) {
+      const nonce = writeAdminNonce(stateRoot);
+      client.handshakeResult = await client.handshake({ credential: { kind: 'admin', nonce } });
+      return client;
+    }
+    let resolvedAppId = appId || process.env.TIGHTBEAM_APP_ID;
+    let secret = readAppSecret(secretFile);
+    if (!resolvedAppId && !secret) {
+      const credentials = readHookCredentials(stateRoot);
+      resolvedAppId = credentials?.app_id;
+      secret = credentials?.app_secret;
+    }
+    if (!resolvedAppId) throw new UsageError('--app-id (or TIGHTBEAM_APP_ID) is required for a non-admin command');
+    if (!secret) throw new UsageError('--secret-file (or TIGHTBEAM_APP_SECRET) is required for a non-admin command');
+    try {
+      client.handshakeResult = await client.handshake({ appId: resolvedAppId, credential: { kind: 'app', app_secret: secret }, agentWaitContext: waitContext });
+    } catch (error) {
+      throw agentWaitHandshakeError(error, waitContext);
+    }
     return client;
+  } catch (error) {
+    await client.close();
+    throw error;
   }
-  let resolvedAppId = appId || process.env.TIGHTBEAM_APP_ID;
-  let secret = readAppSecret(secretFile);
-  if (!resolvedAppId && !secret) {
-    const credentials = readHookCredentials(stateRoot);
-    resolvedAppId = credentials?.app_id;
-    secret = credentials?.app_secret;
-  }
-  if (!resolvedAppId) throw new UsageError('--app-id (or TIGHTBEAM_APP_ID) is required for a non-admin command');
-  if (!secret) throw new UsageError('--secret-file (or TIGHTBEAM_APP_SECRET) is required for a non-admin command');
-  client.handshakeResult = await client.handshake({ appId: resolvedAppId, credential: { kind: 'app', app_secret: secret } });
-  return client;
 }
 
 // ---------------------------------------------------------------------
@@ -310,6 +307,26 @@ function printHuman(result) {
 function printResult(json, result) {
   if (json) printJson({ ok: true, result });
   else printHuman(result);
+}
+
+// How an agent command recovers and binds its session. A Copilot session
+// registers only from its real sessionStart callback: a synthetic refresh
+// payload cannot decode and would only mislead, so a missing session is a
+// named refusal, a stale generation stays the daemon's canonical conflict,
+// and printed recipes carry the validated session binding.
+function agentSessionPolicy({ registry, identity, refreshSession, log }) {
+  if (registry.get(identity.runtime)?.hooksInstall?.format !== 'copilot-json') {
+    return { recover: refreshSession, bind: (session) => session, refreshSession };
+  }
+  const binding = `HELM_AGENT_SESSION_ID=<session> TIGHTBEAM_RUNTIME=${identity.runtime}`;
+  return {
+    async recover() {
+      log({ event: 'copilot_session_unavailable', params: { runtime: identity.runtime, has_session_id: Boolean(identity.sessionId) }, status: 'refused' });
+      throw new AgentCommandError('session_unavailable', `a Copilot agent command needs this session's binding, printed in its tldr notice or session start context (${binding}); the session registers only from Copilot's own sessionStart hook`, { next_action: `run the command with the ${binding} prefix shown in the tldr notice or session start context` });
+    },
+    bind: (session) => ({ ...session, recipe_prefix: copilotRecipePrefix(identity.runtime, session.session_id) }),
+    refreshSession: undefined,
+  };
 }
 
 // ---------------------------------------------------------------------
@@ -369,16 +386,20 @@ const COMMANDS = {
         });
         return loadAgentSession(globalFlags.stateRoot, { identity });
       };
+      const policy = agentSessionPolicy({ registry, identity, refreshSession, log: identityLog });
       let session;
       try {
         session = loadAgentSession(globalFlags.stateRoot, { identity });
       } catch (error) {
-        if (!(error instanceof AgentCommandError) || error.code !== 'session_unavailable') throw error;
-        session = await refreshSession();
+        if (!(error instanceof AgentCommandError) || error.code !== 'session_unavailable' || command.command === 'wait') throw error;
+        session = await policy.recover();
       }
-      const client = await buildClient(globalFlags);
+      session = policy.bind(session);
+      const startup = prepareAgentWaitStartup(session, command);
+      const client = await buildClient({ ...globalFlags, agentWaitContext: startup.agentWaitContext });
       try {
-        return await runAgentCommand(client, session, command, { refreshSession });
+        cacheAgentWaitStartup(session, startup.command, client.handshakeResult);
+        return await runAgentCommand(client, session, startup.command, { refreshSession: policy.refreshSession });
       } finally {
         await client.close();
       }
@@ -457,6 +478,9 @@ const COMMANDS = {
     admin: true,
     op: 'runtime.register',
     build(args) {
+      // --replace-stale is tldr setup's request to replace its own stale
+      // `copilot` record; the daemon decides whether the record is tldr's own.
+      const replaceStale = extractFlag(args, 'replace-stale', { boolean: true }) === true;
       const file = requirePositional(args, 'file');
       let raw;
       try {
@@ -478,7 +502,7 @@ const COMMANDS = {
       if (!parsed.ok) {
         throw new UsageError(`invalid manifest in "${file}" (${parsed.code}): ${parsed.message}`);
       }
-      return { manifest: document };
+      return replaceStale ? { manifest: document, replace_stale: true } : { manifest: document };
     },
   },
 
@@ -971,6 +995,42 @@ const COMMANDS = {
       return payload;
     },
   },
+  'resume assert-active': {
+    local: true,
+    async run(args, globalFlags) {
+      if (!globalFlags.json) throw new UsageError('resume assert-active requires --stdin --json');
+      if (extractFlag(args, 'stdin', { boolean: true }) !== true || args.length > 0) {
+        throw new UsageError('resume assert-active requires --stdin --json');
+      }
+      const inputChunks = [];
+      let inputBytes = 0;
+      const inputBuffer = Buffer.alloc(4096);
+      while (inputBytes <= 16 * 1024) {
+        const count = fs.readSync(0, inputBuffer, 0, Math.min(inputBuffer.length, 16 * 1024 + 1 - inputBytes), null);
+        if (count === 0) break;
+        inputChunks.push(Buffer.from(inputBuffer.subarray(0, count)));
+        inputBytes += count;
+      }
+      if (inputBytes === 0 || inputBytes > 16 * 1024) throw new UsageError('assert-active input must be between 1 and 16384 bytes');
+      const input = Buffer.concat(inputChunks, inputBytes);
+      let payload;
+      try {
+        payload = JSON.parse(input.toString('utf8'));
+      } catch {
+        throw new UsageError('assert-active input must be one JSON object');
+      }
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new UsageError('assert-active input must be one JSON object');
+      const client = await buildClient(globalFlags);
+      try {
+        return await client.request('resume.assert-active', payload);
+      } finally {
+        await client.close();
+      }
+    },
+    print(result) {
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    },
+  },
   'resume complete': {
     op: 'resume.complete',
     build(args) {
@@ -1054,6 +1114,7 @@ const COMMANDS = {
         stateRoot: globalFlags.stateRoot,
         socketPath: paths.socket,
         runtimeTypes: [...registry.names()],
+        wakeRuntimeTypes: packageBoundCopilotRuntimeIds(registry),
         appName,
         authorityName,
         force,
@@ -1209,9 +1270,12 @@ async function runHook(globalFlags, args) {
     // `stop --handoff`: the idle-wake background-hook gate records its
     // decision for `wake-listen` instead of holding a park itself.
     handoff: extractFlag(args, 'handoff', { boolean: true }) === true,
+    waitMode: extractFlag(args, 'wait-mode'),
     appId: globalFlags.appId,
     appSecret: globalFlags.secretFile ? readAppSecret(globalFlags.secretFile) : undefined,
   };
+  if (flags.waitMode !== undefined && flags.waitMode !== 'explicit') throw new UsageError('--wait-mode only accepts explicit');
+  if (flags.waitMode !== undefined && verb !== 'stop') throw new UsageError('--wait-mode is only available for hook stop');
   // Identity resolves through this state root's full registry — builtins
   // plus registered manifests — through the same read-only loader the
   // hooks installer and doctor use. An explicit --runtime is validated
@@ -1223,6 +1287,10 @@ async function runHook(globalFlags, args) {
     runtimesDir: paths.runtimesDir,
     entries: loadPersistedRuntimeEntries({ runtimesDir: paths.runtimesDir }),
   });
+  const bound = flags.runtime || process.env.TIGHTBEAM_RUNTIME;
+  if (args.length > 0 && bound && registry.get(bound)?.hooksInstall?.format === 'copilot-json') {
+    throw new HookError(`Copilot hook ${verb} takes only --runtime <id> (unexpected: ${args.join(' ')})`);
+  }
   const result = await runHookVerb(verb, {
     stateRoot: globalFlags.stateRoot,
     flags,
@@ -1231,7 +1299,15 @@ async function runHook(globalFlags, args) {
     // layering reason as the explicit `bootstrap` verb above.
     socketPath: paths.socket,
   });
-  if (result && result.output) process.stdout.write(JSON.stringify(result.output) + '\n');
+  await emitHookResult(globalFlags, result);
+}
+
+async function emitHookResult(globalFlags, result) {
+  if (result?.copilotOutput) {
+    await writeCopilotOutput(process.stdout, result.copilotOutput, result.commitOutput);
+    return;
+  }
+  if (result?.output) process.stdout.write(JSON.stringify(result.output) + '\n');
   if (globalFlags.json) printJson({ ok: true, result });
 }
 
@@ -1482,6 +1558,7 @@ function agentUsage(command) {
     '  agent cancel --work <work_id> --reason <text>',
     '  agent inbox [--unread]',
     '  agent receive --message <message_id>',
+    '  agent wait [--timeout <duration>] [--json]',
     '  agent status (--work <work_id>|--message <message_id>) [--wait-delivery <duration>]',
     '  agent sessions [--here | --cwd <path>] [--runtime <runtime>] [--state <busy|idle|stopped|ended|unknown>] [--all]',
     '  agent threads [--all] [--waiting-on me|them]',
@@ -1548,7 +1625,7 @@ function printUsage({ all = false } = {}) {
 const FULL_USAGE_BEFORE_COMMIT = [
       '  app set-permissions <app_id> --permissions-json <json>',
       '  authority register <name> [--description <text>]',
-      '  runtime register <file> (admin; sends the parsed manifest, not the path)',
+      '  runtime register <file> [--replace-stale] (admin; sends the parsed manifest, not the path; --replace-stale: setup only)',
       '  principal register --authority <name> [--external-ref <ref>] [--display-name <name>]',
       '  endpoint register --authority <name> --principal <id> --runtime <rt> [--session <id>] [--launch-mode <m>] [--reference <ref>]',
       '  endpoint set-state <endpoint_id> <state> --generation <n>',
@@ -1580,11 +1657,12 @@ const FULL_USAGE_AFTER_COMMIT = [
       '  delivery release <delivery_id> --token <token>',
       '  resume list [--runtime-type <type>] [--state <state>]',
       '  resume claim [--id <resume_request_id>] [--runtime-type <type>] [--lease-ms <n>]',
+      '  resume assert-active --stdin --json',
       '  resume complete <resume_request_id> --token <token>',
       '  resume fail <resume_request_id> --token <token> [--retryable] [--reason <text>]',
       '  watch <principal_id>',
       `  hook ${HOOK_EVENT_VERBS.join('|')} [--runtime <id>]   (reads the runtime hook payload on stdin)`,
-      '  hook stop --handoff [--runtime <id>]   (idle-wake gate: records the Stop decision for hook wake-listen)',
+      '  hook stop --handoff [--wait-mode explicit] [--runtime <id>]   (idle-wake gate: records the Stop decision for hook wake-listen)',
       '  hooks install [--runtime <id>] [--dry-run]   (id: a builtin or a registered manifest runtime)',
       '  hooks uninstall [--runtime <id>] [--settings-file <path>]',
       '  export [--app-id-scope <app_id>] [--out <file>] (admin)',

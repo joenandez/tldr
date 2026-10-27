@@ -37,10 +37,17 @@ function holderGone(path) {
   return Number.isInteger(pid) && pid > 0 && !isProcessAlive(pid);
 }
 
-async function withRouteLock(
+const ROUTE_LOCK_BUSY = {
+  code: "EMAIL_ROUTE_LOCK_BUSY",
+  message: "email route lock is held",
+};
+
+// Any cross-process lock file around async work; Slack channels add uses it
+// per agent name. busy is the { code, message } thrown on timeout.
+export async function withRouteLock(
   path,
   fn,
-  { timeoutMs = ROUTE_LOCK_TIMEOUT_MS } = {},
+  { timeoutMs = ROUTE_LOCK_TIMEOUT_MS, busy = ROUTE_LOCK_BUSY } = {},
 ) {
   const token = `${process.pid}:${randomUUID()}\n`;
   const deadline = Date.now() + timeoutMs;
@@ -55,9 +62,7 @@ async function withRouteLock(
         continue;
       }
       if (Date.now() >= deadline) {
-        throw Object.assign(new Error("email route lock is held"), {
-          code: "EMAIL_ROUTE_LOCK_BUSY",
-        });
+        throw Object.assign(new Error(busy.message), { code: busy.code });
       }
       // eslint-disable-next-line no-await-in-loop -- route-lock polling must observe each holder before retrying.
       await sleep(ROUTE_LOCK_POLL_MS);

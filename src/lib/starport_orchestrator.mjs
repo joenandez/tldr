@@ -3,6 +3,7 @@ import {
   createEmailRouteActivator,
 } from "./starport_email_route.mjs";
 import { uninstallStarport } from "./starport_native_lifecycle.mjs";
+import { readSlackCapabilityState } from "./tldr_capability_readers.mjs";
 import { projectCapabilities } from "./tldr_capabilities.mjs";
 
 const COMPONENTS = Object.freeze([
@@ -159,12 +160,10 @@ export function createStarportOrchestrator({
   function lifecycleStatus(inspected, nativeStatus, welcome) {
     const projectedNative = nativeProjection(nativeStatus, inspected);
     if (projectedNative) return projectedNative;
-
     const unhealthy = COMPONENTS.filter((name) => inspected?.[name] !== true);
     if (unhealthy.length > 0) {
       return success("repair-required", unhealthy, "repair", "Repair tldr;");
     }
-
     if (welcome?.status === "accepted") {
       return success("onboarding-verified", COMPONENTS, "use-tldr-agent");
     }
@@ -245,6 +244,7 @@ export function createStarportOrchestrator({
       appInstalled: inspected?.aegis === true,
       emailRoutes,
       welcome: welcome?.status,
+      slack: readSlackCapabilityState(),
     });
     logStatusEvent("info", "starport_status_result", {
       state: lifecycle.data.state,

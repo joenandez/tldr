@@ -1,6 +1,6 @@
 ---
 name: setup
-description: "Use tldr; to check messaging, scheduled tasks, and email status, connect or disconnect email, repair a capability, or uninstall the plugin's product."
+description: "Use tldr; to check messaging, scheduled tasks, email, and Slack status, connect or disconnect email or Slack, repair a capability, or uninstall the plugin's product."
 version: 4
 ---
 
@@ -33,10 +33,13 @@ If that variable is unset, resolve `../../bin/tldr-agents` relative to the direc
 Map what the user says to one operation:
 
 - “Set up email for tldr;”, “Connect email”, “Continue setting up email”, “Continue setting up tldr;”, or set up: `setup`.
-- “Check tldr;” or “is tldr; ready?”: `status`.
+- “Check tldr;” or “is tldr; ready?”: `status`; report a Slack line (for example “Slack: connected”) alongside the other capabilities.
 - “Change owner” or “Replace API key”: `configure`.
 - “Disconnect email”: `configure`, then **Disconnect Email** in the app.
 - “Fix email” or “Repair tldr;”: `repair`.
+- “Set up Slack for tldr;”: `setup --channel slack`.
+- “Fix Slack”: `repair --channel slack`.
+- “Disconnect Slack”: `configure --channel slack disconnect`.
 - “Uninstall tldr;”: `uninstall`.
 
 Do not probe private files, invent another recovery path, or use a globally installed executable. Stop for unavailable bundled launcher context only when neither the host's plugin-root variable nor the loaded skill's absolute path resolves an executable bundled launcher; an unset variable alone is not a failure.
@@ -82,6 +85,18 @@ Read the `setup` result from `data.capabilities.email`:
 - **Needs attention:** use the email attention copy above.
 
 After email connects, run `drafts list` through the same launcher. For each pending email request, follow the review prompt in the messaging and tasks skills; never send one without the user's explicit yes. `already_committed` means it was already sent. `state: committing` with `retryable` means an earlier attempt may already have sent it; say so instead of calling it unsent.
+
+## Connect Slack
+
+Run the Slack operations above only when the user asks. Setup serves a local page; the user does the Slack clicks there. Report Slack from its own `status` entry; Slack problems never change messaging, tasks, or email.
+
+- Run `setup --channel slack` in the background. Add `--agents <name,name>` to create a private channel for each name now (for example `--agents clio,stow`). Or add `--agents-json <file|->` (`-` reads stdin) with rows `{name,cwd,runtime,command}`; this gives each name a launch command so a new top-level post starts a session. It cannot be combined with `--agents`.
+- **Not an Academy agent** (no `ACADEMY_AGENT_NAME` in the environment): run `setup --channel slack` without `--agents` or `--agents-json`.
+- **Academy agent:** get your rows from `academy list --slack-rows <name>` and pipe them in: `academy list --slack-rows <name> | tldr-agents setup --channel slack --agents-json -`.
+- Read the `url` and `steps` line from its output. Send the user the link and that line, unchanged (“Open this link and follow the 3 steps on the page.”). The page shows the steps one at a time; do not repeat them in chat. Never open a browser; links only.
+- When the command exits, report its result. “Slack: connected” means done. If it says the channels failed, run the retry command it prints. When you are not an Academy agent, after “Slack: connected” say exactly: “Slack works with your Academy Owners and Principals. Ask one of them, or tell me which agent should get a channel.”
+
+Slack tokens are pasted only into the local setup page, never in chat, arguments, or environment variables. If the user pastes a token in chat, tell them to revoke or rotate it in Slack and rerun setup. To add channels later: `tldr-agents slack channels add <name>...`. To add one Academy agent's channel with its launch command: `academy list --slack-rows <name> | tldr-agents slack channels add --agents-json -`.
 
 ## Repair, disconnect, and uninstall
 

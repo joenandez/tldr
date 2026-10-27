@@ -12,6 +12,7 @@ import tty from 'node:tty';
 import { execFileSync as runFile } from 'node:child_process';
 
 import { createRuntimeRegistry } from '../runtimes/registry.mjs';
+import { COPILOT_OWNER_CAPTURE_SOURCE, COPILOT_OWNER_COMMAND } from '../runtimes/copilot_wake_contract.mjs';
 
 import { isSafeSessionId } from '../protocol/session_paths.mjs';
 import { HOST_NAME_PATTERN, HOST_REF_PATTERN } from '../protocol/host_binding.mjs';
@@ -236,9 +237,8 @@ export function hasControllingTerminal() {
   }
 }
 
-// Item 42 C: the capture source each runtime's hook stamps. Mirrors
-// src/daemon/owner_process_contract.mjs (this module may not import the
-// daemon layer); 'claude' is the legacy stored alias of 'claude-code'.
+// Item 42 C: the capture source each runtime's hook stamps, mirroring
+// src/daemon/owner_process_contract.mjs (no daemon import); 'claude' aliases 'claude-code'.
 const OWNER_CAPTURE_SOURCES = Object.freeze({ codex: 'codex-hook', 'claude-code': 'claude-hook', claude: 'claude-hook' });
 
 // The process names that can own a session's transcript: the runtime's own
@@ -277,7 +277,7 @@ function isOwnerCommand(runtime, name) {
  * capture is `unknown` and records nothing. Older Codex, `--no-daemon`,
  * `codex exec` and Claude hook directly under the runtime process.
  *
- * Both built-in runtimes capture (item 42 C). Null — never a partial
+ * Built-ins and `copilot` (package-bound record; command `copilot`, not `node`) capture. Null — never a partial
  * snapshot — for any other runtime, an unobservable ancestor, a chain that
  * does not reach the runtime process within OWNER_CAPTURE_MAX_HOPS, or an
  * app-server layout whose TUI is not provable; the daemon then has no
@@ -287,8 +287,8 @@ function isOwnerCommand(runtime, name) {
  * decision naming the signal that chose the owner (never arguments, ids or
  * folders).
  */
-export function captureOwnerProcess({ runtime, parentProcessId = process.ppid, sessionId, cwd, execFileSync = runFile, log } = {}) {
-  const captureSource = Object.hasOwn(OWNER_CAPTURE_SOURCES, runtime) ? OWNER_CAPTURE_SOURCES[runtime] : null;
+export function captureOwnerProcess({ runtime, copilot = false, parentProcessId = process.ppid, sessionId, cwd, execFileSync = runFile, log } = {}) {
+  const captureSource = copilot ? COPILOT_OWNER_CAPTURE_SOURCE : Object.hasOwn(OWNER_CAPTURE_SOURCES, runtime) ? OWNER_CAPTURE_SOURCES[runtime] : null;
   const report = (status, extra = {}) => {
     if (typeof log === 'function') log({ event: 'owner_process_capture', params: { runtime: runtime ?? null }, status, ...extra });
   };
@@ -310,7 +310,7 @@ export function captureOwnerProcess({ runtime, parentProcessId = process.ppid, s
         return null;
       }
       const name = commandBaseName(observed.command);
-      if (isOwnerCommand(runtime, name)) {
+      if (copilot ? COPILOT_OWNER_COMMAND.test(name) : isOwnerCommand(runtime, name)) {
         if (runtime === 'codex') {
           const args = readProcessArgs(observed.pid, execFileSync);
           if (args === null) {
@@ -598,15 +598,14 @@ function helmJobPresent(env) {
  *      `non_interactive` unless the job states otherwise). A foreign
  *      contract: an unusable value is ignored and logged, not refused, so
  *      a Helm-side typo cannot stop the session registering at all.
- *   4. Runtime-declared headless evidence: `claude -p` sets
- *      CLAUDE_CODE_ENTRYPOINT=sdk-cli (observed against Claude Code
- *      2.1.237), the interactive TUI does not.
+ *   4. Host headless evidence (CLAUDE_CODE_ENTRYPOINT=sdk-cli, set by
+ *      `claude -p` and SDK hosts such as Subspace chats) is recorded as
+ *      `host_headless`, never decisive: only tldr launches (1, 3, 7) are.
  *   5. Claude's own attended/entrypoint flags and process arguments (see
  *      claudeLaunchMode): a real TUI has no controlling terminal, so this
- *      is what makes it interactive.
- *   6. The Codex rollout's session_meta `source` on a fresh start: `exec`
- *      is non_interactive; `cli` and `vscode` are interactive; anything
- *      else falls through.
+ *      is what makes it interactive. A headless reading is evidence only.
+ *   6. The Codex rollout's session_meta `source` on a fresh start: `cli`
+ *      and `vscode` are interactive; `exec` is evidence only, like 4.
  *   7. A Helm job run (HELM_JOB_ID or HELM_RUN_ID, which the executor sets
  *      on every run, process jobs included) is non_interactive.
  *   8. A controlling terminal with no headless evidence is interactive.
@@ -644,15 +643,16 @@ export function resolveLaunchModeEvidence({
   if (typeof env.HELM_AGENT_LAUNCH_MODE === 'string' && env.HELM_AGENT_LAUNCH_MODE.trim() !== '') evidence.helm_agent_launch_mode = 'ignored_unusable';
 
   const entrypoint = typeof env.CLAUDE_CODE_ENTRYPOINT === 'string' ? env.CLAUDE_CODE_ENTRYPOINT.toLowerCase() : '';
-  if (entrypoint.startsWith('sdk')) return { launch_mode: 'non_interactive', signal: 'claude_code_entrypoint', ...evidence };
-
-  const claude = claudeLaunchMode({ env, runtime, observeArgs: observeClaudeArgs ?? (() => claudeInvocationArgs({ env })) });
+  if (entrypoint.startsWith('sdk')) evidence.host_headless = 'claude_code_entrypoint';
+  const claude = entrypoint.startsWith('sdk') ? { mode: null, evidence: {} } : claudeLaunchMode({ env, runtime, observeArgs: observeClaudeArgs ?? (() => claudeInvocationArgs({ env })) });
   Object.assign(evidence, claude.evidence);
-  if (claude.mode) return { launch_mode: claude.mode, signal: claude.signal, ...evidence };
+  if (claude.mode === 'interactive') return { launch_mode: claude.mode, signal: claude.signal, ...evidence };
+  if (claude.mode) evidence.host_headless = claude.signal;
 
   const transcript = codexTranscriptLaunchMode({ payload, runtime, readMeta });
   Object.assign(evidence, transcript.evidence);
-  if (transcript.mode) return { launch_mode: transcript.mode, signal: 'codex_transcript_source', ...evidence };
+  if (transcript.mode === 'interactive') return { launch_mode: transcript.mode, signal: 'codex_transcript_source', ...evidence };
+  if (transcript.mode) evidence.host_headless = 'codex_transcript_source';
 
   if (helmJobPresent(env)) return { launch_mode: 'non_interactive', signal: 'helm_job_env', ...evidence };
 

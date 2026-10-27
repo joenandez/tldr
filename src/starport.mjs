@@ -18,6 +18,12 @@ import {
   runProductUninstallOperation,
 } from "./lib/product_uninstall_entry.mjs";
 import { createProductionStarportRuntime } from "./lib/starport_runtime.mjs";
+import {
+  COPILOT_RUNTIME_RETRY,
+  registerOwnCopilotRuntime,
+  runCommand,
+} from "./lib/copilot_runtime_registration.mjs";
+import { defaultTightbeamInvocation } from "./lib/tightbeam_channel_runtime.mjs";
 
 // The disconnect and product-uninstall operations are for the signed app
 // only; the agent-facing bootstrap front door does not admit them.
@@ -108,10 +114,72 @@ function unavailable(error) {
   });
 }
 
+// This package's root. The bootstrap runs this file from tldr's own
+// ~/.tldr-agents/agent/install/tldr-agent copy, which Academy's resolver
+// selects after setup; an ambient Claude plugin path is never registered.
+const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
+
+function copilotRuntimeFailure(error) {
+  return Object.freeze({
+    ok: false,
+    data: null,
+    error: Object.freeze({
+      code: error?.code ?? "copilot_runtime_failed",
+      message: `tldr; could not register its Copilot runtime: ${error?.message}`,
+      retryable: true,
+      remediation: COPILOT_RUNTIME_RETRY,
+    }),
+  });
+}
+
+// Ensure the messaging daemon (bootstrap is idempotent), then register
+// this copy's Copilot hooks file through its own Tightbeam entrypoint.
+export async function registerInstalledCopilotRuntime({
+  messaging = (args) => {
+    const { command, commandPrefix = [] } = defaultTightbeamInvocation();
+    return runCommand(command, [...commandPrefix, ...args]);
+  },
+} = {}) {
+  if (!(await messaging(["bootstrap"])).ok) {
+    throw Object.assign(new Error("messaging bootstrap failed"), {
+      code: "copilot_runtime_bootstrap_failed",
+    });
+  }
+  return registerOwnCopilotRuntime({ packageRoot: PACKAGE_ROOT, messaging });
+}
+
+// Setup and repair register the Copilot runtime after the native operation
+// returns ok; a registration failure fails the operation (A2).
+export function withCopilotRuntime(
+  runtime,
+  register = registerInstalledCopilotRuntime,
+) {
+  const addCopilotRuntime = (result) =>
+    register().then(
+      (copilot) => ({
+        ...result,
+        data: { ...result.data, copilot_runtime: copilot },
+      }),
+      copilotRuntimeFailure,
+    );
+  const registered = (operation) => async () => {
+    const result = await runtime[operation]();
+    return result?.ok ? addCopilotRuntime(result) : result;
+  };
+  return {
+    ...runtime,
+    setup: registered("setup"),
+    repair: registered("repair"),
+  };
+}
+
+const createInstalledRuntime = async () =>
+  withCopilotRuntime(await createProductionStarportRuntime());
+
 export async function dispatchStarportOperation(
   operation,
   {
-    createRuntime = createProductionStarportRuntime,
+    createRuntime = createInstalledRuntime,
     openApp = () => JSON.parse(runAppLauncher("configure")),
     emailDisconnect = runEmailDisconnectOperation,
     productUninstall = runProductUninstallOperation,

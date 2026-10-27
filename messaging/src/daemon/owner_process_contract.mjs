@@ -1,3 +1,5 @@
+import { COPILOT_OWNER_CAPTURE_SOURCE } from '../runtimes/copilot_wake_contract.mjs';
+
 // The one ownership-fact contract shared by registration and portable state.
 // A tuple is either absent in full (no liveness evidence) or a complete
 // runtime-hook observation bound to the endpoint generation that owns it.
@@ -30,7 +32,11 @@ export const OWNER_CAPTURE_SOURCE_BY_RUNTIME = Object.freeze({
   claude: CLAUDE_OWNER_CAPTURE_SOURCE,
 });
 
-export function ownerCaptureSourceForRuntime(runtime) {
+// `copilotWake` is the registry's proof that `runtime` is the package-bound
+// Copilot record (endpoint.register has the registry; stored rows do not, so
+// ownerProcessTupleIssue below only checks that such a row is not a builtin's).
+export function ownerCaptureSourceForRuntime(runtime, copilotWake = false) {
+  if (copilotWake) return COPILOT_OWNER_CAPTURE_SOURCE;
   return Object.hasOwn(OWNER_CAPTURE_SOURCE_BY_RUNTIME, runtime) ? OWNER_CAPTURE_SOURCE_BY_RUNTIME[runtime] : null;
 }
 
@@ -75,7 +81,7 @@ export function ownerProcessTupleIsComplete(row) {
 export function ownerProcessTupleIssue(row, { runtime, processGeneration }) {
   if (ownerProcessTupleIsAbsent(row)) return null;
   if (!ownerProcessTupleIsComplete(row)) return 'owner process tuple must be all-null or complete';
-  const expectedSource = ownerCaptureSourceForRuntime(runtime);
+  const expectedSource = ownerCaptureSourceForRuntime(runtime) ?? (row.owner_process_capture_source === COPILOT_OWNER_CAPTURE_SOURCE ? COPILOT_OWNER_CAPTURE_SOURCE : null);
   if (expectedSource === null || row.owner_process_capture_source !== expectedSource) {
     return 'owner process tuple is not a supported runtime hook observation';
   }
