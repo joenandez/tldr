@@ -133,6 +133,9 @@ run_installed() {
       "${package_root}/src/lib/local_snapshot_front_door.mjs" \
       "$operation" "$@"
   fi
+  # The installed runtime registers this package's Copilot hooks (src/starport.mjs).
+  TLDR_AGENT_SETUP_PACKAGE_ROOT=${package_root}
+  export TLDR_AGENT_SETUP_PACKAGE_ROOT
   exec "$runtime_node" "$entrypoint" "$operation" "$@"
 }
 

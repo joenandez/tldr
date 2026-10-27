@@ -114,10 +114,24 @@ function unavailable(error) {
   });
 }
 
-// This package's root. The bootstrap runs this file from tldr's own
-// ~/.tldr-agents/agent/install/tldr-agent copy, which Academy's resolver
-// selects after setup; an ambient Claude plugin path is never registered.
-const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
+// The bootstrap runs this file from the ~/.tldr-agents/agent/install/tldr-agent
+// copy, which is the native runtime only: its front door has no activation
+// manifest, so its Copilot hooks cannot run. The package that ran setup (the
+// bootstrap's --package-root) is the active tldr; an ambient Claude plugin
+// path is never registered.
+function setupPackageRoot() {
+  const root = process.env.TLDR_AGENT_SETUP_PACKAGE_ROOT;
+  // Required: without it only the copy is known, and its hooks would refuse every session.
+  if (!root) {
+    throw Object.assign(
+      new Error(
+        "the package that ran setup is unknown; run it through tldr-agents setup",
+      ),
+      { code: "copilot_runtime_package_root_missing" },
+    );
+  }
+  return root;
+}
 
 function copilotRuntimeFailure(error) {
   return Object.freeze({
@@ -132,20 +146,21 @@ function copilotRuntimeFailure(error) {
   });
 }
 
-// Ensure the messaging daemon (bootstrap is idempotent), then register
-// this copy's Copilot hooks file through its own Tightbeam entrypoint.
+// Ensure the messaging daemon (bootstrap is idempotent), then register the
+// setup package's Copilot hooks file through this copy's Tightbeam entrypoint.
 export async function registerInstalledCopilotRuntime({
   messaging = (args) => {
     const { command, commandPrefix = [] } = defaultTightbeamInvocation();
     return runCommand(command, [...commandPrefix, ...args]);
   },
 } = {}) {
+  const packageRoot = setupPackageRoot();
   if (!(await messaging(["bootstrap"])).ok) {
     throw Object.assign(new Error("messaging bootstrap failed"), {
       code: "copilot_runtime_bootstrap_failed",
     });
   }
-  return registerOwnCopilotRuntime({ packageRoot: PACKAGE_ROOT, messaging });
+  return registerOwnCopilotRuntime({ packageRoot, messaging });
 }
 
 // Setup and repair register the Copilot runtime after the native operation

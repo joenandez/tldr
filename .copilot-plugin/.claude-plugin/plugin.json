@@ -1,6 +1,6 @@
 {
   "name": "tldr",
-  "version": "0.3.0-rc.1",
+  "version": "0.3.0-rc.2",
   "description": "tldr; Tightbeam messaging for GitHub Copilot: startup context, prompt notices, and tool-result notices through the package front door.",
   "hooks": "./hooks/hooks.json"
 }
