@@ -5,7 +5,7 @@ function isPlainRecord(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function stableStringify(value) {
+export function stableStringify(value) {
   if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
   if (isPlainRecord(value)) {
     return `{${Object.keys(value)
@@ -66,16 +66,59 @@ export function mergeJobDefinition(existing, input) {
 // An operator pause leaves next_run_at in place; a schedule that ran out
 // (a fired one-off) is disabled with next_run_at cleared. Only the former is
 // a choice that re-registering must respect.
-function isOperatorPaused(state) {
+export function isOperatorPaused(state) {
   return state?.enabled === false && Boolean(state?.next_run_at);
 }
+
+// Held paths: a once-job's enabled:false means it fired (its slot is the hold), never an operator pause,
+// whatever writer left a stale next_run_at on it.
+export const isHeldJobPaused = (job) =>
+  job.schedule?.type !== "once" && isOperatorPaused(job.state);
+
+const isOnce = (schedule) => JSON.parse(schedule || "null")?.type === "once";
+
+// Fired wins (fgp.66/.67): a run that fired a once-slot leaves a job whose current schedule is still once fired
+// (enabled false, next null), whatever an edit during the run wrote; no re-arm is inferred mid-run. A job whose
+// schedule was replaced by a recurring/interval one keeps its own enabled/next_run_at. Returns false when the
+// run (`run_schedule`, `run_slot`) fired no once-slot (the caller's own path applies). Shared by every once-run
+// finalize and outcome writer.
+export function settleFiredOnceRun(
+  job,
+  { run_schedule: runSchedule, run_slot: runSlot },
+  path,
+) {
+  if (!runSlot || !isOnce(runSchedule)) return false;
+  if (job.schedule?.type !== "once") return true;
+  if (runSchedule !== stableStringify(job.schedule))
+    process.stderr.write(
+      `[helm held] ${JSON.stringify({ event: "finalize.rearm_dropped", status: "warn", job: job.id, slot: runSlot, path, guidance: "re-arm with tasks schedule --replace after the run ends" })}\n`,
+    );
+  job.state.enabled = false;
+  job.state.next_run_at = null;
+  return true;
+}
+
+// A patch that fired no slot (an idle end-of-tick batch entry) is stale against a once schedule changed since it
+// was read: its enabled/next_run_at never overwrite the new definition.
+export const staleOncePatch = (
+  job,
+  { run_schedule: runSchedule, run_slot: runSlot },
+) =>
+  !runSlot &&
+  isOnce(runSchedule) &&
+  runSchedule !== stableStringify(job.schedule);
 
 // Re-registering a job redefines it; it does not reset what has happened to
 // it. Run history and an operator pause carry over. The schedule position
 // carries over too unless the schedule itself changed (or had run out), in
 // which case the new definition's computed position applies. A caller that
 // passes `state` explicitly (import/restore) gets exactly that state.
-export function carryRuntimeState(existing, next, input, { merge = false } = {}) {
+export function carryRuntimeState(
+  existing,
+  next,
+  input,
+  { merge = false } = {},
+) {
   if (isPlainRecord(input?.state)) return next;
   const prior = existing.state || {};
   const paused = isOperatorPaused(prior);
@@ -90,6 +133,7 @@ export function carryRuntimeState(existing, next, input, { merge = false } = {})
     state.next_run_at = next.state.next_run_at;
     state.deferred_since = null;
     state.deferred_reason = null;
+    state.held = null;
     state.infrastructure_deferred_slot = null;
     state.infrastructure_deferred_reason = null;
   }

@@ -13,7 +13,7 @@ import { generateId } from '../../protocol/ids.mjs';
 import { isSafeSessionId, sessionPaths } from '../../protocol/session_paths.mjs';
 import { ROUTE_ADMITTED_ROLE, isUniqueConstraintError } from './authority_scope.mjs';
 import { REPLY_BINDING_POLICY } from '../reply_listener_policy.mjs';
-import { activeListenerForEndpoint, createPendingPresentation } from './listener_operations.mjs';
+import { activeListenerForEndpoint, createPendingPresentation, logListenerPresentationSkipped } from './listener_operations.mjs';
 import { requestHostWakesForDeliveries } from '../session_host.mjs';
 
 /**
@@ -779,11 +779,7 @@ export function createDeliveriesForRecipients(db, { conversationId, messageId, s
   const routes = new Map();
   const byPrincipal = new Map();
   for (const endpoint of recipientEndpoints) {
-    const listener = activeListenerForEndpoint(db, {
-      endpointId: endpoint.id,
-      processGeneration: endpoint.process_generation,
-      providerSessionId: endpoint.session_id,
-    });
+    const listener = activeListenerForEndpoint(db, { endpointId: endpoint.id, processGeneration: endpoint.process_generation, providerSessionId: endpoint.session_id });
     listeners.set(endpoint.id, listener);
     routes.set(endpoint.id, routeDelivery({
       endpointState: endpoint.state,
@@ -823,7 +819,7 @@ export function createDeliveriesForRecipients(db, { conversationId, messageId, s
     if (!rowEndpointIds.has(endpoint.id)) continue;
     const route = routes.get(endpoint.id);
     if (route === 'skip') continue;
-    const listener = listeners.get(endpoint.id);
+    const listener = listeners.get(endpoint.id) ?? logListenerPresentationSkipped(logger, db, { endpointId: endpoint.id, processGeneration: endpoint.process_generation, providerSessionId: endpoint.session_id, messageId });
 
     const deliveryId = generateId('delivery');
     const typed = routeReason !== null && (endpoint.principal_id === routeReasonPrincipalId || Boolean(routeReasonEndpointIds?.has(endpoint.id)));

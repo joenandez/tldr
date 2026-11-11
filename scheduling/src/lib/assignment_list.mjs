@@ -17,12 +17,16 @@ import { jobsPath, resolveScope } from "./store.mjs";
 import { listRegisteredScopes } from "./scopes.mjs";
 import { isTerminalWorkStatus, summarizeJobRuns } from "./run_completion.mjs";
 import { effectiveCompletionDelivery } from "./assignment_completion_delivery.mjs";
+import {
+  boundedText,
+  boundedWorkFields,
+  isAssignment,
+  jobStatus,
+  scopeExclusion,
+} from "./assignment_task_rows.mjs";
 
 // Catalog shapes this build knows how to read.
 export const SUPPORTED_CATALOG_VERSIONS = Object.freeze(["1.0"]);
-
-const isAssignment = (job) =>
-  Array.isArray(job.tags) && job.tags.includes("assignment");
 
 // Byte-wise, so ordering never depends on the caller's locale.
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -38,12 +42,11 @@ export function renderSchedule(sched) {
 
 // Default hides archived; an explicit --status widens or narrows.
 export function filterAssignmentsByStatus(jobs, status = "") {
-  const statusOf = (job) => job.metadata?.assignment?.status || "active";
   if (status === "all") return jobs;
   if (status === "archived" || status === "active" || status === "disabled") {
-    return jobs.filter((job) => statusOf(job) === status);
+    return jobs.filter((job) => jobStatus(job) === status);
   }
-  return jobs.filter((job) => statusOf(job) !== "archived");
+  return jobs.filter((job) => jobStatus(job) !== "archived");
 }
 
 // Reads one scope's catalog strictly: unlike the dispatch read path, a catalog
@@ -131,20 +134,6 @@ export const assignmentDescription = (job) =>
 // thousand-assignment read at well under a megabyte. Truncation is disclosed,
 // so a consumer knows its match was searched against a bounded string rather
 // than silently missing text it was never sent.
-export const DESCRIPTION_MAX_CHARS = 500;
-
-function boundedDescription(job) {
-  const full = String(assignmentDescription(job) ?? "");
-  const characters = [...full];
-  if (characters.length <= DESCRIPTION_MAX_CHARS) {
-    return { description: full, description_truncated: false };
-  }
-  return {
-    description: characters.slice(0, DESCRIPTION_MAX_CHARS).join(""),
-    description_truncated: true,
-  };
-}
-
 // Scope-local row shape. `last_status` predates the work/dispatch split and
 // still carries the dispatch status.
 export function localAssignmentRow(job) {
@@ -170,8 +159,8 @@ function globalAssignmentRow(job, scope) {
   return {
     id: job.id,
     name: job.name,
-    ...boundedDescription(job),
-    status: job.metadata?.assignment?.status || "active",
+    ...boundedText("description", assignmentDescription(job)),
+    status: jobStatus(job),
     completion_delivery: effectiveCompletionDelivery(job.metadata?.assignment),
     schedule: renderSchedule(job.schedule),
     next_run_at: job.state?.next_run_at || null,
@@ -224,18 +213,41 @@ function terminalRuns(scope, job) {
 
 // Rows for one scope. Returns the scope's first run-history failure instead of
 // rows, so one unreadable assignment fails its scope rather than under-reporting.
-function rowsForScope(scope, assignments, withTerminalRuns) {
+function taskRow(job, scope) {
+  const row = { ...globalAssignmentRow(job, scope), ...boundedWorkFields(job) };
+  if (row.kind === "task") delete row.completion_delivery;
+  return row;
+}
+
+// Under --include-tasks one malformed job is reported, not fatal: plain jobs
+// are written by many tools and the rest of the scope is still readable.
+function taskRowFor(job, index, scope) {
+  try {
+    return { row: taskRow(job, scope) };
+  } catch (err) {
+    return { invalid: `${job?.id ?? `job #${index}`}: ${err.message || err}` };
+  }
+}
+
+function rowsForScope(scope, assignments, { withTerminalRuns, includeTasks }) {
   const rows = [];
-  for (const job of assignments) {
-    const row = globalAssignmentRow(job, scope);
+  const invalid = [];
+  for (const [index, job] of assignments.entries()) {
+    const built = includeTasks
+      ? taskRowFor(job, index, scope)
+      : { row: globalAssignmentRow(job, scope) };
+    if (built.invalid) {
+      invalid.push(built.invalid);
+      continue;
+    }
     if (withTerminalRuns) {
       const found = terminalRuns(scope, job);
       if (!found.ok) return found;
-      row.terminal_runs = found.runs;
+      built.row.terminal_runs = found.runs;
     }
-    rows.push(row);
+    rows.push(built.row);
   }
-  return { ok: true, rows };
+  return { ok: true, rows, invalid };
 }
 
 function runsForScope(scope, assignments) {
@@ -284,19 +296,32 @@ function scopeResolveFailure(entry, err) {
 // more than reading catalogs, and it introduces a failure mode (readable
 // catalog, unreadable history) that callers who only want the catalog should
 // never inherit.
+//
+// `includeTasks` widens the read to plain jobs, skips dead and temp scopes
+// before reading them (reported as `excluded`), and always takes the partial
+// contract: one unreadable scope is a named failure, not a failed list.
 export function listAssignmentsAcrossScopes({
   status = "",
   withTerminalRuns = false,
   partial = false,
+  includeTasks = false,
 } = {}) {
   const registered = listRegisteredScopes();
   const seen = new Set();
   const failures = [];
+  const excluded = [];
   const rows = [];
   const scopes = [];
   let successfulScopes = 0;
+  const allowPartial = partial || includeTasks;
 
   for (const entry of registered) {
+    const exclusion = includeTasks ? scopeExclusion(entry) : null;
+    if (exclusion) {
+      if (!excluded.some((e) => e.scope_id === exclusion.scope_id))
+        excluded.push(exclusion);
+      continue;
+    }
     let scope;
     try {
       scope = resolveScope({ cwd: entry.cwd || entry.scope_id });
@@ -318,7 +343,7 @@ export function listAssignmentsAcrossScopes({
       continue;
     }
     const assignments = filterAssignmentsByStatus(
-      catalog.jobs.filter(isAssignment),
+      includeTasks ? catalog.jobs : catalog.jobs.filter(isAssignment),
       status,
     );
     if (assignments.length === 0) {
@@ -326,7 +351,10 @@ export function listAssignmentsAcrossScopes({
       continue;
     }
 
-    const built = rowsForScope(scope, assignments, withTerminalRuns);
+    const built = rowsForScope(scope, assignments, {
+      withTerminalRuns,
+      includeTasks,
+    });
     if (!built.ok) {
       failures.push({
         scope_id: scope.scope_id,
@@ -336,18 +364,28 @@ export function listAssignmentsAcrossScopes({
       });
       continue;
     }
+    for (const detail of built.invalid) {
+      failures.push({
+        scope_id: scope.scope_id,
+        cwd: scope.cwd,
+        code: "job_unreadable",
+        detail,
+      });
+    }
     scopes.push({
       scope_id: scope.scope_id,
       cwd: scope.cwd,
-      assignment_count: assignments.length,
+      assignment_count: built.rows.length,
     });
     rows.push(...built.rows);
     successfulScopes += 1;
   }
 
   failures.sort((a, b) => cmp(a.scope_id, b.scope_id));
-  if (failures.length > 0 && (!partial || successfulScopes === 0)) {
-    return { ok: false, failures, scanned_scopes: seen.size };
+  excluded.sort((a, b) => cmp(a.scope_id, b.scope_id));
+  const exclusions = includeTasks ? { excluded_scopes: excluded } : {};
+  if (failures.length > 0 && (!allowPartial || successfulScopes === 0)) {
+    return { ok: false, failures, scanned_scopes: seen.size, ...exclusions };
   }
   rows.sort(
     (a, b) =>
@@ -359,6 +397,7 @@ export function listAssignmentsAcrossScopes({
     assignments: rows,
     scopes,
     scanned_scopes: seen.size,
+    ...exclusions,
     ...(failures.length > 0 ? { failures, complete: false } : {}),
   };
 }

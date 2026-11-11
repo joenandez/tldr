@@ -175,3 +175,23 @@ export function buildCopilotWakeInvocation({
     debugFile: null,
   };
 }
+
+/** The sessionless named spawn: the resume argv without a session to resume. */
+export function buildCopilotSpawnInvocation({ agentName, prompt }) {
+  return {
+    form: "spawn",
+    command: "academy",
+    args: [
+      "run",
+      agentName,
+      "--runtime-once",
+      "copilot",
+      "--",
+      ...WAKE_PERMISSION_ARGS["approve-all"],
+      "-p",
+      prompt,
+    ],
+    prompt: null,
+    debugFile: null,
+  };
+}

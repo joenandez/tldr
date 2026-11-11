@@ -6,6 +6,7 @@ import {
 } from "./store.mjs";
 import { isProcessAlive } from "./process_liveness.mjs";
 import { computeDueShadowSample } from "./dispatch_due_shadow.mjs";
+import { hasEndedPendingProviderRun } from "./pending_ended_provider_run.mjs";
 
 const DEFAULT_DAEMON_DISPATCH_CHILD_CAP = 4;
 const DEFAULT_DAEMON_DISPATCH_LAUNCH_BUDGET = 4;
@@ -141,7 +142,9 @@ export function classifyScopeDueForDispatch(
       readActiveRuns,
       pidAlive,
     });
-    if (activeRunSuppression.suppressed) {
+    // An ended handed-off run's marker only a dispatch can finalize; the per-job in-flight skip prevents a
+    // second run of the live job.
+    if (activeRunSuppression.suppressed && !hasEndedPendingProviderRun(scope)) {
       return withDispatchIndexStatus(
         {
           ...idleClassification(scope, "active_run_in_flight"),
@@ -208,17 +211,19 @@ function activeRunPidAlive(pidAlive, pid, details) {
 }
 
 function classifyActiveRunReapNeed({ scope, readActiveRuns, pidAlive }) {
-  const activeRuns = activeRunsObject(scope, readActiveRuns);
-  if (!activeRuns) return { dispatchNeeded: false };
-
-  for (const entry of Object.values(activeRuns)) {
+  const activeRuns = activeRunsObject(scope, readActiveRuns) ?? {};
+  const deadActiveRun = Object.values(activeRuns).some((entry) => {
     const pid = Number(entry?.pid);
-    if (!Number.isFinite(pid) || pid <= 0) continue;
-    if (!activeRunPidAlive(pidAlive, pid, { scope, activeRun: entry })) {
-      return { dispatchNeeded: true };
-    }
-  }
-  return { dispatchNeeded: false };
+    return (
+      Number.isFinite(pid) &&
+      pid > 0 &&
+      !activeRunPidAlive(pidAlive, pid, { scope, activeRun: entry })
+    );
+  });
+  // A handed-off run that ended leaves a marker only dispatchScope's sweep can finalize.
+  return {
+    dispatchNeeded: deadActiveRun || hasEndedPendingProviderRun(scope),
+  };
 }
 
 function classifyActiveRunSuppression({
@@ -256,18 +261,8 @@ function classifyActiveRunSuppression({
   };
 }
 
-function hasDeadActiveRunNeedingDispatch({ scope, readActiveRuns, pidAlive }) {
-  const activeRuns = activeRunsObject(scope, readActiveRuns);
-  if (!activeRuns) return false;
-  for (const entry of Object.values(activeRuns)) {
-    const pid = Number(entry?.pid);
-    if (!Number.isFinite(pid) || pid <= 0) continue;
-    if (!activeRunPidAlive(pidAlive, pid, { scope, activeRun: entry })) {
-      return true;
-    }
-  }
-  return false;
-}
+const hasDeadActiveRunNeedingDispatch = (args) =>
+  classifyActiveRunReapNeed(args).dispatchNeeded;
 
 function withDispatchIndexStatus(result, details = {}) {
   if (!details.dispatchIndexStatus) return result;

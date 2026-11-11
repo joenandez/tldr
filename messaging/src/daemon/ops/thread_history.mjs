@@ -2,12 +2,10 @@
 // (plan §2.4). It backs `agent thread` (S6) and resolves the agent that owes
 // the caller for `agent send --thread`.
 //
-// Identity and gate: the same loaded session tuple thread.list validates
-// (requireActingEndpoint plus the register_endpoints authority rule), and the
-// same participant set (the endpoint plus the lineage predecessors it
-// replaced). The handle is resolved and the participant check applied before
-// any body is read. A handle that names no thread of this application is
-// `thread_not_found`; a thread the caller set has no link to is
+// Identity and gate: the loaded session tuple thread.list validates, and its
+// participant set (the endpoint plus the lineage predecessors it replaced) or
+// a principal-level participant. A handle that names no thread of this
+// application is `thread_not_found`; a thread the caller is not in is
 // `not_a_participant`. Neither refusal carries a subject, body, or count.
 //
 // Read-only: it never writes a row, never touches read_at, delivery state, or
@@ -15,6 +13,7 @@
 
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { ID_PREFIXES } from '../../protocol/ids.mjs';
+import { ROUTE_ADMITTED_ROLE } from './authority_scope.mjs';
 import { chainNodes, sessionHandles } from './lifecycle_view.mjs';
 import { replacementDeliveryFor } from './message_shared.mjs';
 import { returnedWorkNotice, returnedWorkRouteReasons } from './notification_context.mjs';
@@ -93,8 +92,7 @@ function notAParticipant() {
 
 // Resolves the handle among this application's conversations, preferring the
 // caller's own: a prefix shared with a thread the caller is not in never
-// blocks or reveals anything. Ambiguity is reported only among the caller's
-// own threads. Returns the conversation and the caller set's links to it.
+// blocks or reveals anything. Ambiguity is reported among the caller's own.
 function resolveThread(db, appId, handle, caller) {
   const prefix = `${CONVERSATION_PREFIX}${handle}`;
   const matches = db
@@ -103,10 +101,12 @@ function resolveThread(db, appId, handle, caller) {
     .map((row) => row.id);
   if (matches.length === 0) threadNotFound();
   const linksByConversation = Map.groupBy(participationLinks(db, appId, caller.endpointIds), (link) => link.conversation_id);
-  const mine = matches.filter((id) => linksByConversation.has(id));
+  // Header-only reads (send --thread) admit a second session of the same agent: requireParticipant's principal rule.
+  const principalIn = db.prepare(`SELECT 1 FROM conversation_participants WHERE conversation_id = ? AND principal_id = ? AND role IS NOT '${ROUTE_ADMITTED_ROLE}'`);
+  const mine = matches.filter((id) => linksByConversation.has(id) || (caller.headerOnly && principalIn.get(id, caller.principalId)));
   if (mine.length === 0) notAParticipant();
   if (mine.length > 1) malformed('thread', 'the handle matches more than one of your threads; use more characters');
-  return { conversationId: mine[0], links: linksByConversation.get(mine[0]) };
+  return { conversationId: mine[0], links: linksByConversation.get(mine[0]) ?? [] };
 }
 
 // Session summaries in thread.list's participant shape, read once per id.
@@ -372,8 +372,7 @@ function owedBy(db, appId, { conversationId, caller, session }) {
     ...session(endpointId),
     root_obligation_id: root.id,
     root_status: root.status,
-    // How the caller's own root ended (null while open); a follow-up refusal
-    // labels it from here, never from the thread's chosen root.
+    // How the caller's own root ended (null while open); a follow-up refusal labels it from here, never from the thread's chosen root.
     root_resolution: root.resolution ?? null,
     // A superseded root ended however the node that superseded it ended.
     root_superseded_by_resolution: root.resolution === 'superseded' ? (root.superseded_by_resolution ?? null) : null,
@@ -395,6 +394,7 @@ function threadHeader(db, appId, { conversationId, caller, links, session }) {
     ...summary,
     participants,
     holder: holderId ? session(holderId) : null,
+    user_anchor_message_id: db.prepare('SELECT m.id FROM messages m WHERE m.conversation_id = ? AND (m.origin_channel_route_id IS NOT NULL OR EXISTS (SELECT 1 FROM deliveries d WHERE d.message_id = m.id AND d.channel_route_id IS NOT NULL)) ORDER BY m.rowid DESC LIMIT 1').get(conversationId)?.id ?? null,
     owed_by: owedBy(db, appId, { conversationId, caller, session }),
   };
 }
@@ -404,7 +404,7 @@ function readHistory(context, connection, request) {
   const appId = connection.appId;
   validatedEndpoint(db, connection, request);
   const predecessors = predecessorEndpointIds(db, appId, request.endpointId);
-  const caller = { principalId: request.principalId, endpointId: request.endpointId, endpointIds: [request.endpointId, ...predecessors], logger: context.logger };
+  const caller = { principalId: request.principalId, endpointId: request.endpointId, endpointIds: [request.endpointId, ...predecessors], logger: context.logger, headerOnly: request.headerOnly };
   const { conversationId, links } = resolveThread(db, appId, request.handle, caller);
   const session = sessionReader(db, appId, caller.endpointId);
   const thread = threadHeader(db, appId, { conversationId, caller, links, session });

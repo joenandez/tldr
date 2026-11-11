@@ -7,7 +7,7 @@ import { openOldestUnreadAdmission } from './delivery_admission.mjs';
 import { pendingOfferDelegationId, requesterCancelNotice, returnedWorkNotice, returnedWorkRouteReasons } from './notification_context.mjs';
 import { heldWork } from './thread_list.mjs';
 import { markExactDeliveryRead } from './message_read.mjs';
-import { admitLiveSessionReceipt, exactLiveSessionReceipt, logReceiptAdmitted } from './message_receive_live.mjs';
+import { admitLiveSessionReceipt, exactLiveSessionReceipt, logReceiptAdmitted, noReceiptRefusal } from './message_receive_live.mjs';
 import { receiveOrderBy, receivedBeforeSql, refreshSessionWatermark } from './message_shared.mjs';
 import { completeResumeRequestsForMessage } from './resume_shared.mjs';
 import { satisfyBoundReplyWait } from './message_reply_wait_admission.mjs';
@@ -328,7 +328,7 @@ function receiveRefusal(context, input, appId) {
   const oldestMessageId = olderUnreadAhead(context.db, input, appId);
   const message = 'message.receive is not granted for this exact listener presentation';
   if (!oldestMessageId) {
-    const endpoint = context.db.prepare('SELECT state, process_generation FROM endpoints WHERE id = ?').get(input.endpoint_id);
+    const endpoint = context.db.prepare('SELECT state, process_generation, created_by_app_id, provider_session_id FROM endpoints WHERE id = ?').get(input.endpoint_id);
     const reason = !endpoint ? 'endpoint_unknown'
       : endpoint.state === 'takeover_pending' ? 'endpoint_takeover_pending'
         : endpoint.process_generation !== input.process_generation ? 'process_generation_stale'
@@ -339,7 +339,7 @@ function receiveRefusal(context, input, appId) {
       result: { reason, endpoint_state: endpoint?.state ?? null },
       status: 'refused',
     });
-    return new TightbeamError('permission_denied', message);
+    return noReceiptRefusal({ endpoint, appId, providerSessionId: input.provider_session_id, messageId: input.message_id, message });
   }
   context.logger?.info?.({
     event: 'message_receive_refused',

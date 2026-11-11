@@ -228,6 +228,7 @@ export async function productionRun({
   admin,
   credentials,
   args,
+  timeoutMs,
 }) {
   const commandArgs = ["--json"];
   if (admin) commandArgs.unshift("--admin");
@@ -240,6 +241,8 @@ export async function productionRun({
       {
         encoding: "utf8",
         maxBuffer: 64 * 1024,
+        // a timeout kills the child and falls to the generic failure below
+        timeout: timeoutMs,
         env: {
           PATH: process.env.PATH,
           HOME: process.env.HOME,

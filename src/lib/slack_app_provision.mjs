@@ -6,11 +6,7 @@ import { SLACK_MANIFEST } from "./slack_setup.mjs";
 // provisioner's closure; errors and logs carry reasons, never values.
 
 export const PROVISION_BOT_SCOPES = Object.freeze([
-  "chat:write",
-  "groups:write",
-  "groups:history",
-  "im:write",
-  "im:history",
+  ...SLACK_MANIFEST.oauth_config.scopes.bot,
 ]);
 
 export function provisionManifest({ redirectUrl }) {

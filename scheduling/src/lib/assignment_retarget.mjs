@@ -48,6 +48,7 @@ import {
   copyAssignmentArtifacts,
   moveLedgerRuns,
   removeAll,
+  externalSkillPath,
   resolveAssignmentSkillSource,
   runIdsFor,
   slugifyForAssignment,
@@ -96,9 +97,20 @@ export function resolveDestinationScope(sourceScope, toCwd) {
 
 // Same record, new home: only the scope-derived paths change so id, schedule
 // and state (including run_count inputs) carry over untouched.
-function rewriteForScope(job, destScope, slug) {
+// An external skill (see externalSkillPath) is not copied or deleted: the
+// moved record keeps pointing at it, and there is no source home to clear.
+function skillSource(sourceScope, job, destHome) {
+  const external = externalSkillPath({ scope: sourceScope, job });
+  if (external) return { home: null, destSkillPath: external };
+  const { home } = resolveAssignmentSkillSource({ scope: sourceScope, job });
+  return {
+    home,
+    destSkillPath: join(destHome, "SKILL.md"),
+  };
+}
+
+function rewriteForScope(job, destScope, newSkillPath) {
   const next = JSON.parse(JSON.stringify(job));
-  const newSkillPath = join(assignmentHome(destScope.cwd, slug), "SKILL.md");
   next.metadata = next.metadata || {};
   next.metadata.assignment = next.metadata.assignment || {};
   next.metadata.assignment.skill_path = newSkillPath;
@@ -226,12 +238,16 @@ export async function retargetAssignment({
       }
       const job = jobs[idx];
       const slug = slugifyForAssignment(job.name);
-      const source = resolveAssignmentSkillSource({ scope: sourceScope, job });
+      const source = skillSource(
+        sourceScope,
+        job,
+        assignmentHome(destScope.cwd, slug),
+      );
       const runIds = runIdsFor(sourceScope, jobId);
       const { job: retargeted, skillPath } = rewriteForScope(
         job,
         destScope,
-        slug,
+        source.destSkillPath,
       );
 
       const created = [];

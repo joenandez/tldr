@@ -97,6 +97,8 @@ export const TABLE_ORDER = Object.freeze([
   'messages',
   'obligations',
   'root_attention',
+  // A parked request's wake: references its attempt and holder endpoint.
+  'scheduled_wakes',
   // References applications + obligations, so it follows both.
   'lifecycle_commands',
   'deliveries',
@@ -300,14 +302,9 @@ export const TABLE_COLUMNS = Object.freeze({
   ],
   // Schema 10 bounded Stop-block escape evidence: one row per blocked root
   // (work left open AND made visible, plus the anti-wedge counter).
-  root_attention: [
-    'root_obligation_id',
-    'stop_block_count',
-    'attention_source',
-    'first_marked_at',
-    'last_block_at',
-    'updated_at',
-  ],
+  root_attention: ['root_obligation_id', 'stop_block_count', 'attention_source', 'first_marked_at', 'last_block_at', 'updated_at'],
+  // Schema 30: `delegate --at` and Stop-cap wakes, with their fire / 1 h re-wake / notice state.
+  scheduled_wakes: ['wake_id', 'attempt_id', 'endpoint_id', 'reason', 'wake_at', 'fired_at', 'rewake_at', 'notified_at', 'cancelled_at'],
   handoff_watches: [
     'id',
     'delegation_id',
@@ -465,6 +462,7 @@ const TABLE_SORT_KEY = Object.freeze({
   deliveries: (r) => r.id,
   obligations: (r) => r.id,
   root_attention: (r) => r.root_obligation_id,
+  scheduled_wakes: (r) => r.wake_id,
   lifecycle_commands: (r) => r.id,
   resume_requests: (r) => r.id,
   reply_bindings: (r) => r.id,
@@ -827,6 +825,8 @@ function scopeToApp(all, appId) {
     // Attention evidence rides its root obligation like a watch rides its
     // delegation — an out-of-scope row would dangle its REFERENCES on import.
     root_attention: all.root_attention.filter((a) => includedObligationIds.has(a.root_obligation_id)),
+    // A wake rides its attempt the same way; its holder endpoint must be in scope too.
+    scheduled_wakes: all.scheduled_wakes.filter((w) => includedObligationIds.has(w.attempt_id) && includedEndpointIds.has(w.endpoint_id)),
     lifecycle_commands: lifecycleCommands,
     message_effects: messageEffects,
     handoff_watches: handoffWatches,

@@ -9,7 +9,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { connect } from '../client/client.mjs';
 import { shortId } from '../protocol/ids.mjs';
 import { isSafeSessionId, sessionPaths } from '../protocol/session_paths.mjs';
-import { routeOpenTo } from '../protocol/session_env.mjs';
+import { routeOpenTo, slackChannelAdded } from '../protocol/session_env.mjs';
 import {
   captureOwnerProcess,
   classifyHookPayload,
@@ -25,9 +25,10 @@ import {
 import { hookCredentialsPath, readHookCredentials } from './hook_credentials.mjs';
 import { observeProcessRow } from './hook_process_tree.mjs';
 import { bootstrap, ensureDaemon } from './bootstrap.mjs';
-import { offerActionCommands, tightbeamCodexWaitRecipe, tightbeamCommandHint, tightbeamCommandName, tightbeamRecipeCommand, workActionLines } from './package_context.mjs';
-import { arrivalField, renderArrivalBlock } from '../protocol/arrival_block.mjs';
+import { tightbeamStopWaitReason, tightbeamCommandName, tightbeamRecipeCommand } from './package_context.mjs';
+import { renderNotification } from './arrival_notification.mjs';
 import { readCurrentWaitOutcome, readWaitMessage } from './agent_wait_journal.mjs';
+import { requestSessionStop } from './stop_request.mjs';
 import { decodeCopilotHookInput } from './copilot_hook.mjs';
 import { academyLaunchStamp, packageBoundCopilotRuntimeIds } from '../runtimes/copilot_wake_contract.mjs';
 import { boundCopilotRuntime, requiresExplicitCopilotRuntime, runCopilotHook } from './copilot_hook_runtime.mjs';
@@ -59,10 +60,6 @@ export const HOOK_EVENT_VERBS = ['session-start', 'user-prompt-submit', 'stop', 
 // when it blocks, and the `wake-listen` listener when it wakes an idle
 // session (an async-rewake hook wakes its host by exiting 2).
 export class HookError extends Error {}
-
-// Injected context is read by a model, so it is bounded: an unread 256 KiB
-// message (the message.send cap) must not become 256 KiB of prompt.
-const MAX_INJECTED_CHARS = 8000;
 
 export function isHookProofDebugEvent(fields) {
   return (
@@ -194,6 +191,7 @@ export function resolveIdentity({ payload, env, flags, credentials, sessionId, r
     placeholder_endpoint_id: env.TIGHTBEAM_PLACEHOLDER_ENDPOINT_ID || null,
     ...academyLaunchStamp(env, { record: copilotRecord, log }),
     ...resolveHostBinding(env, { log }),
+    ...(flags.reviveDeadGeneration ? { revive_dead_generation: flags.reviveDeadGeneration } : {}),
     principal_ref: flags.principalRef || env.TIGHTBEAM_PRINCIPAL_REF || credentials?.principal_ref || defaultPrincipalRef({ runtime, cwd }),
   };
 }
@@ -224,6 +222,7 @@ async function registerSession(client, { paths, identity, app_id: appId }) {
     academy_permission_mode: identity.academy_permission_mode,
     ...(identity.host_name ? { host_name: identity.host_name, ...(identity.host_ref ? { host_ref: identity.host_ref } : {}) } : {}),
     ...(identity.placeholder_endpoint_id ? { placeholder_endpoint_id: identity.placeholder_endpoint_id } : {}),
+    ...(identity.revive_dead_generation ? { revive_dead_generation: identity.revive_dead_generation } : {}),
     ...(ownerProcess ? { owner_process: ownerProcess } : {}),
   });
 
@@ -290,75 +289,10 @@ async function setEndpointState(client, ctx, state) {
   return { endpoint_id: result.endpoint_id, state: result.state };
 }
 
-// UX §9 S7. The context lines are absent for an entry staged before the
-// daemon returned them; nothing here ever reads or prints a message body.
-// Sender-controlled values pass through arrivalField (H1): one line, no tag.
-function renderContextLines(entry) {
-  if (typeof entry.thread_id !== 'string') return [];
-  return [
-    `From: ${arrivalField(entry.from)}${entry.from_cwd ? ` · ${arrivalField(entry.from_cwd)}` : ''}`,
-    `Subject: ${arrivalField(entry.subject)}`,
-    `Thread: ${shortId(entry.thread_id)} · ${entry.reply_required ? 'reply required' : 'no reply required'}`,
-  ];
-}
-
-// UX §9 S11: a chain notice (delegation or cancel) leads with the S11 line
-// the daemon derived from the canonical effect and its route reason. It asks
-// for no reply, so it offers only the receive command (plus the held work's
-// commands when the notice returns offered work to its offerer).
-function renderNoticeLines(entry, prefix) {
-  return [
-    'tldr notice · received',
-    arrivalField(entry.notice),
-    `Message: ${entry.message_id}`,
-    `Receive command: ${prefix} agent receive --message ${entry.message_id}`,
-    // Offered work that came back (expired or lost) is still held: its work id and commands.
-    ...(typeof entry.work_id === 'string' ? workActionLines({ work_id: entry.work_id, ack_pending: entry.ack_pending === true }, { prefix, commandSuffix: ' command' }) : []),
-  ];
-}
-
-export function renderInjection(entries, { prefix = tightbeamCommandHint() } = {}) {
-  const lines = [];
-  for (const entry of entries) {
-    if (lines.length > 0) lines.push('');
-    if (typeof entry.notice === 'string') {
-      lines.push(...renderNoticeLines(entry, prefix));
-      continue;
-    }
-    lines.push('tldr message · received');
-    lines.push(...renderContextLines(entry));
-    lines.push(`Message: ${entry.message_id}`);
-    lines.push(`Receive command: ${prefix} agent receive --message ${entry.message_id}`);
-    if (typeof entry.delegation_id === 'string') {
-      // A delegate answers an offer with accept or decline; a reply is not one.
-      const offer = offerActionCommands(entry.delegation_id, prefix);
-      lines.push(`Delegation: ${entry.delegation_id} · offered to you; receive it, then accept or decline`);
-      lines.push(`Accept command: ${offer.accept}`);
-      lines.push(`Decline command: ${offer.decline}`);
-    } else {
-      lines.push(`Reply command: ${prefix} agent reply --message ${entry.message_id} --body "<reply>" --wait-delivery 30s`);
-    }
-    // Tracked work this session holds: the id `--work` takes (F23).
-    if (typeof entry.work_id === 'string') {
-      lines.push(...workActionLines({ work_id: entry.work_id, ack_pending: entry.ack_pending === true }, { prefix, commandSuffix: ' command' }));
-    }
-    if (entry.has_external_origin) {
-      lines.push(`For this external user message, within 120 seconds send ${prefix} agent ack saying it was received and work is underway, or send ${prefix} agent complete if the full answer is ready. A complete answer inside 120 seconds satisfies ACK; after a progress ACK, send the terminal response within 300 seconds of inbound acceptance.`);
-    }
-  }
-  const text = lines.join('\n');
-  const neutralized = entries.filter((entry) => ['from', 'from_cwd', 'subject', 'notice'].some((field) => typeof entry[field] === 'string' && arrivalField(entry[field]) !== entry[field]));
-  if (neutralized.length > 0) {
-    debugLog({ event: 'arrival_fields_neutralized', params: { message_ids: neutralized.map((entry) => entry.message_id) }, result: { count: neutralized.length }, status: 'escaped' });
-  }
-  const body = text.length > MAX_INJECTED_CHARS ? `${text.slice(0, MAX_INJECTED_CHARS)}\n[truncated; reply to each listed message explicitly]` : text;
-  // Truncate inside the tag so the closing tag always survives.
-  return renderArrivalBlock({
-    event: 'received',
-    messageIds: entries.map((entry) => entry.message_id),
-    externalMessageIds: new Set(entries.filter((entry) => entry.has_external_origin).map((entry) => entry.message_id)),
-    body,
-  });
+// The notification block itself lives in arrival_notification.mjs so the daemon's
+// spawn and resume prompts render the same bytes; only the debug stream is bound here.
+export function renderInjection(entries, options = {}) {
+  return renderNotification(entries, { log: debugLog, ...options });
 }
 
 function renderOutboundChannelCatalog(routes) {
@@ -1209,7 +1143,7 @@ export const HANDLERS = {
       output: {
         hookSpecificOutput: {
           hookEventName: 'SessionStart',
-          additionalContext: `${recovery}${renderOutboundChannelCatalog(catalog.routes.filter(({ selector }) => routeOpenTo(selector, ctx.identity?.academy_agent_name)))}`,
+          additionalContext: `${recovery}${renderOutboundChannelCatalog(catalog.routes.filter(({ selector }) => routeOpenTo(selector, ctx.identity?.academy_agent_name) && (selector !== 'slack' || slackChannelAdded(ctx.identity.academy_agent_name))))}`,
         },
       },
     };
@@ -1257,20 +1191,6 @@ export const HANDLERS = {
     return { staged: 0, message_ids: [] };
   },
 };
-
-// A daemon older than background_wait refuses the field as malformed;
-// retry once without it under the SAME key (its refusal wrote nothing), so
-// the Stop behaves exactly as it did before the flag existed.
-async function requestSessionStop(client, request, { backgroundWait, sessionId }) {
-  if (!backgroundWait) return client.request('session.stop', request);
-  try {
-    return await client.request('session.stop', { ...request, background_wait: true });
-  } catch (error) {
-    if (error?.code !== 'malformed_request' || error?.details?.field !== 'background_wait') throw error;
-    debugLog({ event: 'stop_gate_background_wait_unsupported', session_id: sessionId, endpoint_id: request.endpoint_id, result: 'retry_without_flag' });
-    return client.request('session.stop', request);
-  }
-}
 
 function currentActionId(ctx) {
   try {
@@ -1351,16 +1271,13 @@ async function gateStop(client, ctx) {
     ...(ctx.waitMode === 'explicit' ? { wait_mode: 'explicit' } : {}),
     ...(waitOutcome ? { wait_outcome: waitOutcome } : {}),
   };
-  const decision = await requestSessionStop(client, request, { backgroundWait, sessionId: ctx.identity.session_id });
+  const decision = await requestSessionStop(client, request, { backgroundWait, sessionId: ctx.identity.session_id, log: debugLog });
   if (ctx.waitMode === 'explicit') setPendingReplyGuard(ctx, endpoint, decision);
   if (ctx.waitMode === 'explicit' && decision.pending_references?.length) {
-    decision.reason = ctx.identity.runtime === 'codex'
-      ? decision.reason.replace(/Run .* agent wait and stop again after it returns\./u, tightbeamCodexWaitRecipe())
-      : decision.reason.replace(
-        `${tightbeamCommandName()} agent wait`,
-        `${tightbeamRecipeCommand()} agent wait`,
-      );
+    decision.reason = tightbeamStopWaitReason(decision.reason, ctx.identity.runtime);
   }
+  // Daemon Stop texts name the bare front door (pending-reply wait, held-request commands); print this package's launcher.
+  if (decision.decision === 'block') decision.reason = decision.reason.replaceAll(` ${tightbeamCommandName()} agent `, ` ${tightbeamRecipeCommand()} agent `);
   debugLog({
     event: 'stop_gate',
     session_id: ctx.identity.session_id,

@@ -8,7 +8,8 @@
 // Fields (names are agent-facing; the copy says session/thread, never
 // endpoint/principal):
 //   from            `<runtime> <id8>` for a session, `user (<channel label>)`
-//                   for an inbound channel message, `unknown sender` otherwise
+//                   for an inbound channel message, `scheduled wake` for a
+//                   daemon wake, `unknown sender` otherwise
 //   from_cwd        the sending session's working directory (sessions only)
 //   subject         the conversation subject, or `(no subject)`
 //   thread_id       the conversation id (clients shorten it to 8 characters)
@@ -271,7 +272,7 @@ export function pendingOfferDelegationId(db, messageId, endpointId, { logger } =
 export function notificationContext(db, messageId, { deliveryId = null } = {}) {
   const row = db
     .prepare(
-      `SELECT m.conversation_id, m.app_id, m.origin, m.origin_channel_route_id, c.metadata AS conversation_metadata,
+      `SELECT m.conversation_id, m.app_id, m.origin, m.origin_channel_route_id, m.metadata, c.metadata AS conversation_metadata,
               fx.effect, fx.effect_payload, r.label AS channel_label
          FROM messages m
          JOIN conversations c ON c.id = m.conversation_id
@@ -285,8 +286,10 @@ export function notificationContext(db, messageId, { deliveryId = null } = {}) {
   const fromUser = row.origin === 'inbound' && row.origin_channel_route_id !== null;
   const declaration = parseJson(row.effect_payload)?.declaration;
   const session = fromUser ? null : senderSession(db, declaration);
+  // A scheduled or cap wake has no sending session: the daemon sent it.
+  const unknown = parseJson(row.metadata)?.notice === 'scheduled_wake' ? 'scheduled wake' : 'unknown sender';
   const context = {
-    from: fromUser ? `user (${row.channel_label ?? 'channel'})` : session?.from ?? 'unknown sender',
+    from: fromUser ? `user (${row.channel_label ?? 'channel'})` : session?.from ?? unknown,
     ...(session?.from_cwd ? { from_cwd: session.from_cwd } : {}),
     subject: typeof subject === 'string' && subject.trim().length > 0 ? subject : '(no subject)',
     thread_id: row.conversation_id,

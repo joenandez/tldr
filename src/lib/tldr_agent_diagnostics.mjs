@@ -16,6 +16,12 @@ import {
 } from "node:fs";
 import { join } from "node:path";
 
+import {
+  DAEMON_STDERR_MAX_BYTES,
+  trimDaemonStderr,
+} from "./tldr_agent_stderr_trim.mjs";
+
+export { trimDaemonStderr };
 import { assertStateRootCreatable, helmHome } from "./store.mjs";
 import {
   TLDR_AGENT_DIAGNOSTIC_SCHEMA_VERSION,
@@ -145,6 +151,7 @@ export function maintainTldrAgentDiagnostics({
     mkdirSync(tldrAgentDiagnosticsRoot(home), { recursive: true, mode: 0o700 });
     const expired_deleted = removeExpired(home, now, retentionDays);
     const capped = enforceTotalCap(home, totalMaxBytes, reserveBytes);
+    trimDaemonStderr(home, DAEMON_STDERR_MAX_BYTES);
     return {
       ok: true,
       expired_deleted,

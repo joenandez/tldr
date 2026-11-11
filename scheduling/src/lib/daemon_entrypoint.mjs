@@ -269,9 +269,13 @@ export async function runDaemonCommand({
       fail(
         command,
         "daemon_dispatch_failed",
-        "one or more scope dispatches failed",
+        `one or more scope dispatches failed: ${failureReason(failures[0])}`,
         withScope(scope, {
           service: await serviceStatusForOnce(schedulerScriptPath),
+          reasons: failures.map((f) => ({
+            scope_id: f.scope?.scope_id ?? null,
+            reason: failureReason(f),
+          })),
           results,
         }),
         pretty,
@@ -290,6 +294,15 @@ export async function runDaemonCommand({
     );
   }
   return results;
+}
+
+// A failed result names its cause in `error`; a child exit may carry only a code or signal.
+export function failureReason(result) {
+  const why =
+    result.error ??
+    result.cause ??
+    (result.signal ? `signal ${result.signal}` : `exit ${result.code ?? "?"}`);
+  return String(why).slice(0, 200);
 }
 
 export const _internals = {

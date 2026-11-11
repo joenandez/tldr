@@ -99,7 +99,7 @@ export function buildHelmContextBlock({
       `  ${boundReportCmd} --status fail --summary "<reason>"`,
       assignment.completion_delivery === "notify" ||
         assignment.completion_delivery === "conversation"
-        ? "For both ok and fail reports, send the terminal Tightbeam result through this run's official thread. If no official conversation exists, the first send must use tldr-agents messaging agent send --to user --channel subspace --subject <text> --reason <text> --body-file <path>; retain the exact returned conversation_id and message_id. Reuse the exact returned conversation_id for this run, and only the message named by --completion-message satisfies the terminal requirement. Replies are expected by default on reply-capable channels; use --no-reply to turn that off. Then add --origin-thread <conversation_id> --completion-message <message_id>."
+        ? "For both ok and fail reports, send the terminal Tightbeam result through this run's official thread. If no official conversation exists, the first send must use tldr-agents messaging agent send --to user --subject <text> --reason <text> --body-file <path>; retain the exact returned conversation_id and message_id. Reuse the exact returned conversation_id for this run, and only the message named by --completion-message satisfies the terminal requirement. Replies are expected by default on reply-capable channels; use --no-reply to turn that off. Then add --origin-thread <conversation_id> --completion-message <message_id>."
         : "No terminal Tightbeam message is required for activity delivery.",
       "Without a valid report, Helm records this assignment's outcome as indeterminate.",
     );

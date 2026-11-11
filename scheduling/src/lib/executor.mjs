@@ -42,6 +42,7 @@ import {
   runPreparedAdapterUntilStarted,
 } from "./executor_start_confirm.mjs";
 import { launchManagedAgentUntilStartedWithFallback } from "./executor_agent_start_fallback.mjs";
+import { truncateKeepingTail } from "./fallback_never_launched.mjs";
 import {
   makeStdinFd,
   safeCloseFd,
@@ -604,11 +605,9 @@ export function launchAgentUntilStarted({
   if (typeof requestedCommand !== "string" || requestedCommand.trim() === "") {
     throw new TypeError("command is required");
   }
-  // This launch is a handoff: it resolves when the session starts and the
-  // session outlives every Helm process that could watch it (the daemon
-  // dispatches each scope in a forked child, and a foreground run returns at
-  // handoff). Wrapping it makes the session record its own terminal boundary,
-  // so the run still gains a work outcome and a finish time.
+  // A handoff: the session outlives every Helm process that could watch it
+  // (forked per-scope dispatch, foreground return). The wrapper makes it record
+  // its own terminal boundary, so the run still gains an outcome and finish time.
   const { command, args } = sessionBoundaryLaunch({
     command: requestedCommand,
     args: requestedArgs,
@@ -617,7 +616,7 @@ export function launchAgentUntilStarted({
   if (logPaths) {
     const started = Date.now();
     mkdirSync(dirname(logPaths.stdout), { recursive: true });
-    writeFileSync(logPaths.stdout, "", "utf8");
+    const restoreStdout = truncateKeepingTail(logPaths.stdout);
     writeFileSync(logPaths.stderr, "", "utf8");
     const captureBytes = positiveIntegerEnv(
       "HELM_EXECUTOR_CAPTURE_BYTES",
@@ -674,6 +673,7 @@ export function launchAgentUntilStarted({
       startSettled = true;
       clearInterval(pollTimer);
       clearTimeout(startupTimer);
+      restoreStdout(payload);
       const output = currentOutput();
       startResolve({
         ...payload,

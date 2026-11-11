@@ -22,6 +22,8 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import { parseArgs, output, fail } from "./lib/json_io.mjs";
+import { BOOLEAN_FLAGS, unknownFlagError } from "./lib/assignment_flags.mjs";
+import { handleSessionOrigin } from "./lib/session_origin.mjs";
 import { ASSIGNMENTS_COMMAND, TASKS_COMMAND } from "./lib/helm_context.mjs";
 import { resolveScope, loadJobsReadOnly, runLogPaths } from "./lib/store.mjs";
 import { mutateJobs } from "./lib/scope_runtime.mjs";
@@ -34,6 +36,7 @@ import {
 import { buildScheduleFromFlags } from "./lib/schedule_flags.mjs";
 import {
   assignmentHome,
+  externalSkillPath,
   resolveAssignmentSkillSource,
   slugifyForAssignment,
 } from "./lib/assignment_artifacts.mjs";
@@ -63,10 +66,13 @@ import {
   renderSchedule,
 } from "./lib/assignment_list.mjs";
 import { handleAssignmentRuns } from "./lib/assignment_runs.mjs";
+import { jobStatus, jobWorkFields } from "./lib/assignment_task_rows.mjs";
 import {
   applyProviderPatch,
+  repointSkill,
   resolveAssignmentUpdateInput,
   restoreSkillUpdate,
+  refuseExternalSkillWrite,
   writeSkillUpdate,
 } from "./lib/assignment_update_input.mjs";
 import {
@@ -539,16 +545,22 @@ function handleList(flags, pretty) {
   const cmd = "list";
   const status = flags.status || "";
   const withTerminalRuns = Boolean(flags["with-terminal-runs"]);
+  const includeTasks = Boolean(flags["include-tasks"]);
   if (flags["all-scopes"]) {
     handleGlobalList(
       cmd,
-      { status, withTerminalRuns, partial: Boolean(flags.partial) },
+      {
+        status,
+        withTerminalRuns,
+        includeTasks,
+        partial: Boolean(flags.partial),
+      },
       pretty,
     );
     return;
   }
-  if (flags.partial) {
-    fail(cmd, "invalid_flag", "--partial requires --all-scopes", {}, pretty);
+  for (const flag of ["partial", "include-tasks"].filter((f) => flags[f])) {
+    fail(cmd, "invalid_flag", `--${flag} requires --all-scopes`, {}, pretty);
     process.exit(2);
   }
   if (withTerminalRuns) {
@@ -576,12 +588,11 @@ function handleList(flags, pretty) {
 // A scope whose catalog — or, with --with-terminal-runs, whose run history —
 // cannot be read fails the whole call, naming that scope, rather than
 // publishing the scopes that happened to parse as a complete list.
-function handleGlobalList(cmd, { status, withTerminalRuns, partial }, pretty) {
-  const result = listAssignmentsAcrossScopes({
-    status,
-    withTerminalRuns,
-    partial,
-  });
+function handleGlobalList(cmd, options, pretty) {
+  const result = listAssignmentsAcrossScopes(options);
+  const exclusions = result.excluded_scopes
+    ? { excluded_scopes: result.excluded_scopes }
+    : {};
   if (!result.ok) {
     output(
       cmd,
@@ -589,6 +600,7 @@ function handleGlobalList(cmd, { status, withTerminalRuns, partial }, pretty) {
       {
         failed_scopes: result.failures,
         scanned_scopes: result.scanned_scopes,
+        ...exclusions,
       },
       result.failures.map((entry) => ({
         code: entry.code,
@@ -605,6 +617,7 @@ function handleGlobalList(cmd, { status, withTerminalRuns, partial }, pretty) {
       assignments: result.assignments,
       scopes: result.scopes,
       scanned_scopes: result.scanned_scopes,
+      ...exclusions,
       ...(result.complete === false
         ? { failed_scopes: result.failures, complete: false }
         : {}),
@@ -624,7 +637,10 @@ function handleShow(flags, positionals, pretty) {
   }
   const cwd = typeof flags.cwd === "string" ? flags.cwd : process.cwd();
   const scope = resolveScope({ cwd });
-  const jobs = loadJobsReadOnly(scope).filter(isAssignment);
+  const includeTasks = Boolean(flags["include-tasks"]);
+  const jobs = loadJobsReadOnly(scope).filter(
+    (j) => includeTasks || isAssignment(j),
+  );
   const job = identityFailOrJob(cmd, jobs, q, pretty);
 
   const events = historyForJob(scope, job.id, 100);
@@ -638,7 +654,8 @@ function handleShow(flags, positionals, pretty) {
         id: job.id,
         name: job.name,
         description: assignmentDescription(job),
-        status: job.metadata?.assignment?.status || "active",
+        status: jobStatus(job),
+        ...(includeTasks ? jobWorkFields(job) : {}),
         completion_delivery: effectiveCompletionDelivery(
           job.metadata?.assignment,
         ),
@@ -863,7 +880,7 @@ async function handleUpdate(flags, positionals, pretty) {
     fail(cmd, updateInput.error.code, updateInput.error.message, {}, pretty);
     process.exit(updateInput.error.exitCode);
   }
-  const { providerPatch, skill } = updateInput;
+  const { providerPatch, skill, skillPath = null } = updateInput;
   const completionDelivery = completionDeliveryInput(
     flags["completion-delivery"],
   );
@@ -877,18 +894,6 @@ async function handleUpdate(flags, positionals, pretty) {
     );
     process.exit(2);
   }
-  // ── Reject --schedule (undocumented; was silently nooped before this check) ──
-  if (flags.schedule !== undefined) {
-    fail(
-      cmd,
-      "unknown_flag",
-      "--schedule is not a valid flag; use: --in <dur>, --at <iso>, --cron '<expr>', or --every <dur>",
-      {},
-      pretty,
-    );
-    process.exit(2);
-  }
-
   // ── Runtime options: validated against the provider already on the record,
   //    and against the provider configuration this call is about to write —
   //    a run-time option is only accepted by the runtime that will run it. ──
@@ -919,7 +924,7 @@ async function handleUpdate(flags, positionals, pretty) {
     const _hasDesc = typeof flags.description === "string";
     const _hasToggle = Boolean(flags.enable || flags.disable);
     const _hasProvider = providerPatch !== undefined;
-    const _hasSkill = skill !== null;
+    const _hasSkill = skill !== null || skillPath !== null;
     const _hasCompletionDelivery = completionDelivery.value !== null;
     if (
       !_hasSched &&
@@ -935,7 +940,7 @@ async function handleUpdate(flags, positionals, pretty) {
       fail(
         cmd,
         "no_update_flags",
-        "no update flags provided; valid flags: --in <dur>, --at <iso>, --cron '<expr>', --every <dur>, --name, --description, --enable, --disable, --provider, --skill, --model, --reasoning-effort, --permission-mode, --academy-agent, --academy-runtime",
+        "no update flags provided; valid flags: --in <dur>, --at <iso>, --cron '<expr>', --every <dur>, --name, --description, --enable, --disable, --provider, --skill, --skill-path, --model, --reasoning-effort, --permission-mode, --academy-agent, --academy-runtime",
         {},
         pretty,
       );
@@ -1017,9 +1022,11 @@ async function handleUpdate(flags, positionals, pretty) {
         }
         const job = jobs[idx];
         const mutated = JSON.parse(JSON.stringify(job)); // deep clone
-        const renameSource = isRename
-          ? resolveAssignmentSkillSource({ scope, job })
-          : null;
+        const externalSkill = externalSkillPath({ scope, job });
+        const renameSource =
+          isRename && !externalSkill
+            ? resolveAssignmentSkillSource({ scope, job })
+            : null;
 
         // ── Apply schedule ──────────────────────────────────────────────────
         if (newSchedule) {
@@ -1077,10 +1084,12 @@ async function handleUpdate(flags, positionals, pretty) {
         // Read and replace the backing skill only after catalog.lock is held.
         // A failed jobs.json save restores this exact snapshot before releasing
         // that lock, so a stale rollback cannot overwrite a later update.
+        refuseExternalSkillWrite(skill, externalSkill);
         skillSnapshot = writeSkillUpdate(
           skill,
           mutated.metadata?.assignment?.skill_path,
         );
+        repointSkill(mutated, skillPath);
         // ── Apply enable / disable ──────────────────────────────────────────
         if (flags.enable) {
           mutated.state = mutated.state || {};
@@ -1129,12 +1138,15 @@ async function handleUpdate(flags, positionals, pretty) {
             );
           }
 
-          const oldDir = renameSource.home;
-          const newDir = assignmentHome(scope.cwd, newSlug);
-          const newSkillPath = join(newDir, "SKILL.md");
+          // An external skill stays where it is; only the name changes.
+          const oldDir = renameSource?.home ?? null;
+          const newDir = externalSkill
+            ? null
+            : assignmentHome(scope.cwd, newSlug);
+          const newSkillPath = externalSkill || join(newDir, "SKILL.md");
 
           // Copy dir (non-atomic; we track newDir for rollback if needed).
-          copyDirRecursive(oldDir, newDir);
+          if (oldDir) copyDirRecursive(oldDir, newDir);
           renameRollbackDir = oldDir === newDir ? null : newDir;
 
           // Update record fields
@@ -1207,7 +1219,7 @@ async function handleUpdate(flags, positionals, pretty) {
   if (type === "rename") {
     // Remove old dir after the record write succeeded.
     try {
-      if (existsSync(oldDir) && oldDir !== newDir) {
+      if (oldDir && existsSync(oldDir) && oldDir !== newDir) {
         rmSync(oldDir, { recursive: true, force: true });
       }
     } catch {
@@ -1236,6 +1248,7 @@ async function handleUpdate(flags, positionals, pretty) {
         name: mutated.name,
         status: mutated.metadata?.assignment?.status || "active",
         next_run_at: mutated.state?.next_run_at || null,
+        skill_path: mutated.metadata?.assignment?.skill_path || null,
         provider: assignmentProvider(mutated),
         provider_config: assignmentProviderConfig(mutated),
         runtime_options: publishedRuntimeOptions(mutated),
@@ -1437,7 +1450,9 @@ async function handleRun(flags, positionals, pretty) {
 
 // ─── Entry ────────────────────────────────────────────────────────────────────
 async function run() {
-  const { positionals, flags } = parseArgs(process.argv.slice(2));
+  const { positionals, flags } = parseArgs(process.argv.slice(2), {
+    booleans: BOOLEAN_FLAGS,
+  });
   const cmd = positionals[0] || "";
   const pretty = Boolean(flags.pretty);
 
@@ -1451,24 +1466,36 @@ async function run() {
         "  list       List assignments (--status active|disabled|archived|all;\n" +
         "             --all-scopes lists across every registered scope;\n" +
         "             --all-scopes --with-terminal-runs adds each row's finished runs\n" +
-        "             with immutable source_scope_id and source_cwd; --partial returns readable scopes)\n" +
-        "  show       Show full detail for one assignment\n" +
+        "             with immutable source_scope_id and source_cwd; --partial returns readable scopes;\n" +
+        "             --all-scopes --include-tasks adds plain jobs with kind/prompt/command, skips\n" +
+        "             missing-cwd and temp scopes, and reports unreadable scopes as failed_scopes)\n" +
+        "  show       Show full detail for one assignment (--include-tasks resolves plain job ids)\n" +
         "  path       Print the backing-skill path\n" +
         "  skill      Read the backing-skill UTF-8 content as JSON\n" +
         "  update     Change schedule/metadata/runtime options (--in/--at/--cron/--every/--name/\n" +
-        "             --description/--completion-delivery/--enable/--disable/--provider/--skill/--model/--reasoning-effort/--permission-mode)\n" +
+        "             --description/--completion-delivery/--enable/--disable/--provider/--skill/--model/--reasoning-effort/--permission-mode;\n" +
+        "             --skill-path <abs SKILL.md> re-points the backing skill)\n" +
         "  retarget   Move an assignment to another working directory (--to-cwd <path>),\n" +
         "             keeping its id and run history\n" +
         "  archive    Stop schedule; retain skill + history\n" +
         "  unarchive  Re-arm a previously archived assignment\n" +
         "  run        Trigger an immediate direct run\n" +
-        "  runs       List run history for an assignment (--all-scopes [--partial])\n" +
+        "  runs       List run history for an assignment (--all-scopes [--partial];\n" +
+        "             <id> --include-tasks resolves plain job ids)\n" +
         "  completion Show the completion record for a specific run-id\n" +
         "  runtime-options  Accepted runtime options per provider\n" +
+        "  session-origin   Working directory of a session (--session <id>; Tightbeam endpoint first,\n" +
+        "             then Helm's spawn record; origin_not_found when neither knows it)\n" +
         "  logs       Output logs for a specific run-id (--json returns stdout_tail)\n\n" +
         `Run ${ASSIGNMENTS_COMMAND} <verb> --help for verb-specific options.\n`,
     );
     return;
+  }
+
+  const flagError = unknownFlagError(cmd, flags);
+  if (flagError) {
+    fail(cmd, "unknown_flag", flagError.message, flagError.details, pretty);
+    process.exit(2);
   }
 
   if (cmd === "create") {
@@ -1501,6 +1528,10 @@ async function run() {
   }
   if (cmd === "runtime-options") {
     output(cmd, true, runtimeOptionCapabilities(), [], pretty);
+    return;
+  }
+  if (cmd === "session-origin") {
+    await handleSessionOrigin(flags, pretty);
     return;
   }
   if (cmd === "logs") {

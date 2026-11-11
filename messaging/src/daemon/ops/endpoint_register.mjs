@@ -96,7 +96,7 @@ import { authorityIsAllowed, isUniqueConstraintError } from './authority_scope.m
 import { pushLiveDeliveryEvents, refreshWatermarkForAdoptedSession } from './message_shared.mjs';
 import { publishPresentation } from './listener_operations.mjs';
 import { discloseReplacement } from './replacement_disclosure.mjs';
-import { expandStoredRuntimeIds, runtimeContract, runtimeIdEquals } from './resume_shared.mjs';
+import { assertObservedDead, availabilityTakeoverReplay, expandStoredRuntimeIds, runtimeContract, runtimeIdEquals } from './resume_shared.mjs';
 import { clearUnprovenPermissionMode, isCopilotWakeRuntime, normalizeAcademyAgentName, normalizeAcademyPermissionMode } from '../copilot_wake.mjs';
 import { MAX_OWNER_START_IDENTITY_LENGTH, MAX_PROCESS_ID, normalizeStartIdentity, ownerCaptureSourceForRuntime } from '../owner_process_contract.mjs';
 
@@ -305,25 +305,6 @@ function adoptAvailabilityTakeover(db, { endpoint, providerSessionId, launchToke
   return { endpointId: endpoint.id, processGeneration: endpoint.process_generation + 1, requestId: request.id };
 }
 
-function availabilityTakeoverReplay(db, { endpoint, providerSessionId, launchToken }) {
-  if (endpoint.state !== 'idle' || launchToken !== endpoint.owner_launch_token) return null;
-  return db.prepare(
-    `SELECT r.id
-       FROM resume_requests r
-       JOIN deliveries d ON d.endpoint_id = r.endpoint_id AND d.message_id = r.message_id
-      WHERE r.endpoint_id = ? AND r.reason = 'availability_takeover'
-        AND r.session_id = ? AND d.takeover_decided_at IS NOT NULL
-        AND d.admission_process_generation = ? - 1
-        AND d.admission_provider_session_id IS ?
-        AND d.admission_owner_epoch = ? - 1
-        AND d.admission_owner_launch_token IS NOT ?
-        AND ((r.state = 'claimed' AND EXISTS (
-              SELECT 1 FROM claims c WHERE c.resource_type = 'resume_request' AND c.resource_id = r.id AND c.state = 'claimed'
-            )) OR (r.state = 'completed' AND r.admitted_process_generation = ? AND r.admitted_provider_session_id IS ?))
-      LIMIT 1`,
-  ).get(endpoint.id, providerSessionId, endpoint.process_generation, providerSessionId, endpoint.owner_epoch, endpoint.owner_launch_token, endpoint.process_generation, providerSessionId);
-}
-
 export const endpointRegisterOp = {
   name: 'endpoint.register',
   allowedScopes: ['agent'],
@@ -384,6 +365,7 @@ export const endpointRegisterOp = {
     }
 
     const providerSessionId = payload.provider_session_id ?? null;
+    assertObservedDead(context.db, { payload, authorityName, providerSessionId, appId: connection.appId });
     const authorityReference = payload.authority_reference ?? null;
     const launchToken = payload.launch_token ?? null;
     const placeholderHint = payload.placeholder_endpoint_id || null;

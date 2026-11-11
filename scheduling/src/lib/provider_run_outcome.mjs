@@ -12,33 +12,29 @@
 // The runtime ledger is untouched: it governs dispatch, not the work outcome.
 
 import {
-  closeSync,
   existsSync,
   mkdirSync,
-  openSync,
-  readdirSync,
   readFileSync,
   renameSync,
-  rmSync,
-  statSync,
-  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { constants as osConstants } from "node:os";
 import { join } from "node:path";
 import { appendActivityEvent } from "./activity_stream.mjs";
-import { isSameProcessAlive } from "./process_liveness.mjs";
+import { appendHeld, holdAtExit, supersededRun } from "./held_at_exit.mjs";
+import {
+  claim,
+  isRetiredByClaim,
+  releaseClaim,
+  retireMarker,
+} from "./provider_run_marker.mjs";
 import { appendJobHistoryEvent } from "./read_store.mjs";
-import { readRunSessionOutcomeState } from "./run_session_outcome.mjs";
 import { mutateJobs } from "./scope_runtime.mjs";
+import { settleFiredOnceRun, stableStringify } from "./job_reregistration.mjs";
 import { scopeRuntimeRoot } from "./store.mjs";
 
 const MARKER_VERSION = "1.0";
 const RUN_ID_PATTERN = /^[A-Za-z0-9._:-]{1,200}$/;
-// A claim older than this belongs to a finalizer that died mid-way; the next
-// observer takes over rather than dropping the outcome.
-const STALE_CLAIM_MS = 60_000;
-
 function nowIso() {
   return process.env.HELM_NOW
     ? new Date(process.env.HELM_NOW).toISOString()
@@ -49,7 +45,7 @@ function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function pendingDir(scope) {
+export function pendingDir(scope) {
   return join(scopeRuntimeRoot(scope), "provider-runs");
 }
 
@@ -57,41 +53,13 @@ function markerPath(scope, runId) {
   return join(pendingDir(scope), `${runId}.json`);
 }
 
-function claimPath(path) {
-  return `${path}.claim`;
-}
-
-function claim(path) {
-  const lock = claimPath(path);
-  try {
-    closeSync(openSync(lock, "wx"));
-    return true;
-  } catch (err) {
-    if (err?.code !== "EEXIST") return false;
-  }
-  try {
-    if (Date.now() - statSync(lock).mtimeMs < STALE_CLAIM_MS) return false;
-    utimesSync(lock, new Date(), new Date());
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function releaseClaim(path) {
-  try {
-    rmSync(claimPath(path), { force: true });
-  } catch {
-    /* best effort */
-  }
-}
-
-function readMarker(path) {
+export function readMarker(path) {
   try {
     const parsed = JSON.parse(readFileSync(path, "utf8"));
-    return isPlainObject(parsed) && parsed.run_id && parsed.job_id
-      ? parsed
-      : null;
+    const valid = isPlainObject(parsed) && parsed.run_id && parsed.job_id;
+    // `finalized` (in the marker or its kept claim): its records are written but it could not be removed
+    const retired = parsed?.finalized || isRetiredByClaim(path);
+    return valid && !retired ? parsed : null;
   } catch {
     return null;
   }
@@ -116,6 +84,8 @@ export function recordPendingProviderRun(
     sessionId = null,
     logPaths = null,
     outcomeCwds = [],
+    agent = null,
+    runSchedule = null,
   },
 ) {
   if (!jobId || !runId || !RUN_ID_PATTERN.test(runId)) {
@@ -135,6 +105,10 @@ export function recordPendingProviderRun(
     session_id: sessionId || null,
     log_paths: logPaths || null,
     outcome_cwds: [...new Set([...outcomeCwds, scope.cwd].filter(Boolean))],
+    // the agent that finally ran (start fallback); holdAtExit classifies its output
+    agent: agent || null,
+    // the schedule the run fired; the exit keeps a still-once job fired (fgp.65, .66)
+    run_schedule: runSchedule ? stableStringify(runSchedule) : null,
   };
   try {
     mkdirSync(pendingDir(scope), { recursive: true });
@@ -144,7 +118,7 @@ export function recordPendingProviderRun(
     return { written: true };
   } catch (err) {
     process.stderr.write(
-      `[helm provider-outcome] pending marker write failed scope=${scope.scope_id || "unknown"} job=${jobId} run=${runId} error=${err?.message || String(err)}\n`,
+      `[helm provider-outcome] ${JSON.stringify({ event: "pending_marker_write_failed", scope: scope.scope_id || "unknown", job: jobId, run: runId, error: err?.message || String(err) })}\n`,
     );
     return { written: false };
   }
@@ -201,13 +175,21 @@ async function applyJobOutcome(scope, marker, terminal, finishedAt) {
       job.state.last_run_at &&
       job.state.last_run_at !== marker.handed_off_at
     ) {
-      return { applied: false, reason: "newer_run_recorded" };
+      return supersededRun(job, terminal, { ...marker, finishedAt });
     }
     job.state.last_run_at = finishedAt;
     job.state.last_status = terminal.status;
     job.state.last_error = terminal.error;
     job.state.last_failed_step = null;
-    return { applied: true };
+    const hold = holdAtExit(job, terminal, { ...marker, finishedAt });
+    // The fired one-off stays fired whatever an edit or resume during the session wrote (fgp.66, fired wins).
+    const run_slot = marker.scheduled_at || marker.handed_off_at || null;
+    settleFiredOnceRun(
+      job,
+      { run_schedule: marker.run_schedule, run_slot },
+      "provider_outcome",
+    );
+    return { applied: true, hold };
   });
 }
 
@@ -246,9 +228,11 @@ export async function finalizeProviderRunOutcome({
   const finishedAt = outcome?.finished_at || nowIso();
   const terminal = providerRunTerminal(outcome);
   let jobUpdate;
+  let threw = false;
   try {
     jobUpdate = await applyJobOutcome(scope, marker, terminal, finishedAt);
   } catch (err) {
+    threw = true;
     jobUpdate = { ok: false, details: { error: err?.message || String(err) } };
   }
   if (!jobUpdate?.ok) {
@@ -258,7 +242,11 @@ export async function finalizeProviderRunOutcome({
     process.stderr.write(
       `[helm provider-outcome] job update deferred scope=${scope.scope_id || "unknown"} job=${marker.job_id} run=${runId} observed_by=${observedBy} details=${JSON.stringify(jobUpdate?.details || null)}\n`,
     );
-    return { finalized: false, reason: "job_update_deferred" };
+    // A throw (unreadable/unwritable job store) repeats and counts toward quarantine; lease contention does not.
+    return {
+      finalized: false,
+      reason: threw ? "job_update_failed" : "job_update_deferred",
+    };
   }
 
   const startedAt = marker.started_at || null;
@@ -273,123 +261,76 @@ export async function finalizeProviderRunOutcome({
     exit_code: terminal.exitCode,
     signal: terminal.signal,
     session_exit: true,
+    agent: marker.agent || null, // the agent that handed off (start sweep, AC-15)
     observed_by: observedBy,
     last_status_applied: jobUpdate.value?.applied === true,
   };
-  appendJobHistoryEvent(scope, marker.job_id, {
-    id: `run_${runId}_session_exit`,
-    ts: finishedAt,
-    scope_id: scope.scope_id,
-    cwd: scope.cwd,
-    job_id: marker.job_id,
-    run_id: runId,
-    kind: "completed",
-    status: terminal.status,
-    reason: success ? "process_exited" : terminal.error,
-    scheduled_at: marker.scheduled_at || null,
-    started_at: startedAt,
-    finished_at: finishedAt,
-    duration_ms: durationMs,
-    error: terminal.error,
-    exit_code: terminal.exitCode,
-    signal: terminal.signal,
-    session_id: marker.session_id || null,
-    log_paths: marker.log_paths || null,
-    payload,
-  });
-  appendActivityEvent({
-    type: "job_run_session_finished",
-    kind: "run",
-    level: success ? "info" : "error",
-    daemon_instance_id: daemonInstanceId,
-    scope_id: scope.scope_id,
-    cwd: scope.cwd,
-    job_id: marker.job_id,
-    run_id: runId,
-    status: terminal.status,
-    reason: success ? "process_exited" : terminal.error,
-    scheduled_at: marker.scheduled_at || null,
-    started_at: startedAt,
-    finished_at: finishedAt,
-    duration_ms: durationMs,
-    pid: marker.pid,
-    error: terminal.error,
-    data: payload,
-  });
+  // The job update is written: from here the run is finalized. A failed append must not leave the marker,
+  // or the next observer re-applies holdAtExit (attempts+1) and repeats every record.
+  const failed = [];
+  const attempt = (name, append) => {
+    try {
+      append();
+    } catch (err) {
+      failed.push({ name, error: err?.message || String(err) });
+    }
+  };
+  attempt("history_completed", () =>
+    appendJobHistoryEvent(scope, marker.job_id, {
+      id: `run_${runId}_session_exit`,
+      ts: finishedAt,
+      scope_id: scope.scope_id,
+      cwd: scope.cwd,
+      job_id: marker.job_id,
+      run_id: runId,
+      kind: "completed",
+      status: terminal.status,
+      reason: success ? "process_exited" : terminal.error,
+      scheduled_at: marker.scheduled_at || null,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      duration_ms: durationMs,
+      error: terminal.error,
+      exit_code: terminal.exitCode,
+      signal: terminal.signal,
+      session_id: marker.session_id || null,
+      log_paths: marker.log_paths || null,
+      payload,
+    }),
+  );
+  attempt("history_held", () =>
+    appendHeld(scope, { ...marker, finishedAt }, jobUpdate.value?.hold),
+  );
+  attempt("activity", () =>
+    appendActivityEvent({
+      type: "job_run_session_finished",
+      kind: "run",
+      level: success ? "info" : "error",
+      daemon_instance_id: daemonInstanceId,
+      scope_id: scope.scope_id,
+      cwd: scope.cwd,
+      job_id: marker.job_id,
+      run_id: runId,
+      status: terminal.status,
+      reason: success ? "process_exited" : terminal.error,
+      scheduled_at: marker.scheduled_at || null,
+      started_at: startedAt,
+      finished_at: finishedAt,
+      duration_ms: durationMs,
+      pid: marker.pid,
+      error: terminal.error,
+      data: payload,
+    }),
+  );
+  if (failed.length)
+    process.stderr.write(
+      `[helm provider-outcome] ${JSON.stringify({ event: "provider_run_appends_failed", scope: scope.scope_id || "unknown", job: marker.job_id, run: runId, observed_by: observedBy, failed })}\n`,
+    );
   process.stderr.write(
     `[helm provider-outcome] finalized scope=${scope.scope_id || "unknown"} job=${marker.job_id} run=${runId} status=${terminal.status} exit_code=${terminal.exitCode ?? "none"} signal=${terminal.signal || "none"} last_status_applied=${payload.last_status_applied} observed_by=${observedBy}\n`,
   );
-  try {
-    rmSync(path, { force: true });
-  } catch {
-    /* a leftover marker is harmless: it no longer has a claimable outcome */
-  }
-  releaseClaim(path);
+  retireMarker(path, marker); // also drops the claim
   return { finalized: true, status: terminal.status };
 }
 
-function groupAlive(pgid) {
-  if (!Number.isInteger(pgid) || pgid <= 0) return false;
-  try {
-    process.kill(-pgid, 0);
-    return true;
-  } catch (err) {
-    return err?.code === "EPERM";
-  }
-}
-
-function recordedOutcome(marker) {
-  for (const cwd of marker.outcome_cwds || []) {
-    const state = readRunSessionOutcomeState({
-      cwd,
-      jobId: marker.job_id,
-      runId: marker.run_id,
-    });
-    if (state.kind === "valid") return state.outcome;
-  }
-  return null;
-}
-
-/**
- * Daemon-tick pass: finalize every pending run whose session has ended.
- * Sessions still running are left alone.
- */
-export async function sweepProviderRunOutcomes(
-  scope,
-  { daemonInstanceId = null, metadataFor = () => null } = {},
-) {
-  const dir = pendingDir(scope);
-  let names;
-  try {
-    names = readdirSync(dir).filter((name) => name.endsWith(".json"));
-  } catch {
-    return { finalized: 0 };
-  }
-  let finalized = 0;
-  for (const name of names) {
-    const marker = readMarker(join(dir, name));
-    if (!marker) continue;
-    let outcome = recordedOutcome(marker);
-    if (!outcome) {
-      const pidAlive = Number.isInteger(marker.pid)
-        ? isSameProcessAlive(marker.pid, marker.pid_start_time || null)
-        : false;
-      if (pidAlive || groupAlive(marker.pgid)) continue;
-      // Re-read: the boundary wrapper writes its record just before exiting.
-      // Still nothing once the whole process group is gone: the run is lost
-      // (SIGKILL, machine sleep or crash) and is closed as unrecorded.
-      outcome = recordedOutcome(marker);
-    }
-    // eslint-disable-next-line no-await-in-loop -- one marker at a time keeps job writes ordered
-    const closed = await finalizeProviderRunOutcome({
-      scope,
-      runId: marker.run_id,
-      outcome,
-      observedBy: "sweep",
-      daemonInstanceId,
-      metadata: metadataFor(marker.job_id),
-    });
-    if (closed.finalized) finalized += 1;
-  }
-  return { finalized };
-}
+export { sweepProviderRunOutcomes } from "./provider_run_sweep.mjs";

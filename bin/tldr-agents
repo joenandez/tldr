@@ -103,6 +103,9 @@ verb	messaging	agent update	component	Report progress on tracked work.
 usage	messaging	agent update	agent update --work <work_id> (--body <text> | --body-file <path>)
 verb	messaging	agent delegate	component	Offer tracked work to another agent.
 usage	messaging	agent delegate	agent delegate --work <work_id> --to session:<id>|agent:<runtime>:<cwd>|new:<runtime>:<cwd> (--body <text> | --body-file <path>)
+usage	messaging	agent delegate	agent delegate --work <work_id> --at <2m|+1h|ISO-8601 time> (--body <text> | --body-file <path>)
+verb	messaging	agent transfer	component	Move work you hold, and its reply debt, to another session.
+usage	messaging	agent transfer	agent transfer --work <work_id> --to session:<id> [--body <text>]
 verb	messaging	agent accept	component	Accept delegated work.
 usage	messaging	agent accept	agent accept --work <delegation_id> (--body <text> | --body-file <path>)
 verb	messaging	agent decline	component	Decline delegated work.
@@ -157,6 +160,7 @@ verb	tasks	cancel	component	Cancel a scheduled job before it runs.
 verb	tasks	delete	component	Permanently delete a job and any pending runs.
 verb	tasks	pause	component	Pause a job, or all jobs with a tag.
 verb	tasks	resume	component	Resume a paused job, or all jobs with a tag.
+verb	tasks	release-held	component	Release held runs now in every workspace, optionally for one provider.
 verb	tasks	service status	component	Show global service state; use --deep for workspace runtime health.
 verb	tasks	service update	component	Refresh scheduler and sentinel definitions and restart them.
 verb	tasks	desired-state	component	Inspect or set the durable scheduler desired state.
@@ -168,15 +172,15 @@ area	assignments	helm-assignments	registry	Skill-backed recurring agent work (He
 verb	assignments	create	registry	Register a new skill-backed assignment.
 usage	assignments	create	create --name <name> [--description <text>] (--in <dur>|--at <iso>|--cron <expr>|--every <dur>) --provider <provider> --permission-mode <mode> --completion-delivery <activity|notify|conversation> [--skill <path>] [--model <model>] [--reasoning-effort <effort>] [--cwd <path>] [--activate] [--pretty]
 verb	assignments	list	registry	List assignments.
-usage	assignments	list	list [--status active|disabled|archived|all] [--all-scopes [--with-terminal-runs] [--partial]] [--cwd <path>] [--pretty]
+usage	assignments	list	list [--status active|disabled|archived|all] [--all-scopes [--with-terminal-runs] [--partial] [--include-tasks]] [--cwd <path>] [--pretty]
 verb	assignments	show	registry	Show full detail for one assignment.
-usage	assignments	show	show <id-or-name> [--cwd <path>] [--pretty]
+usage	assignments	show	show <id-or-name> [--include-tasks] [--cwd <path>] [--pretty]
 verb	assignments	path	registry	Print the backing-skill path.
 usage	assignments	path	path <id-or-name> [--cwd <path>] [--pretty]
 verb	assignments	skill	registry	Read the backing-skill UTF-8 content as JSON.
 usage	assignments	skill	skill <id-or-name> [--cwd <path>] [--pretty]
 verb	assignments	update	registry	Change schedule, metadata, or runtime options.
-usage	assignments	update	update <id-or-name> [--in <dur>|--at <iso>|--cron <expr>|--every <dur>] [--name <name>] [--description <text>] [--completion-delivery <mode>] [--enable|--disable] [--provider <provider>] [--skill <path>] [--model <model>] [--reasoning-effort <effort>] [--permission-mode <mode>] [--pretty]
+usage	assignments	update	update <id-or-name> [--in <dur>|--at <iso>|--cron <expr>|--every <dur>] [--name <name>] [--description <text>] [--completion-delivery <mode>] [--enable|--disable] [--provider <provider>] [--skill <path>|--skill-path <abs SKILL.md>] [--model <model>] [--reasoning-effort <effort>] [--permission-mode <mode>] [--cwd <path>] [--pretty]
 verb	assignments	retarget	registry	Move an assignment to another working directory, keeping its id and history.
 usage	assignments	retarget	retarget <id-or-name> --to-cwd <path> [--pretty]
 verb	assignments	archive	registry	Stop scheduling; keep the backing skill and history.
@@ -186,11 +190,13 @@ usage	assignments	unarchive	unarchive <id-or-name> [--pretty]
 verb	assignments	run	registry	Trigger an immediate direct run.
 usage	assignments	run	run <id-or-name> [--pretty]
 verb	assignments	runs	registry	List run history for an assignment.
-usage	assignments	runs	runs [<id-or-name> | --all-scopes [--partial]] [--pretty]
+usage	assignments	runs	runs [<id-or-name> [--include-tasks] | --all-scopes [--partial]] [--cwd <path>] [--pretty]
 verb	assignments	completion	registry	Show the completion record for one run.
 usage	assignments	completion	completion <run-id> [--pretty]
 verb	assignments	runtime-options	registry	List accepted runtime options per provider.
 usage	assignments	runtime-options	runtime-options [--pretty]
+verb	assignments	session-origin	registry	Show the working directory a session ran in.
+usage	assignments	session-origin	session-origin --session <id> [--pretty]
 verb	assignments	logs	registry	Print the logs of one run.
 usage	assignments	logs	logs <run-id> [--json]
 area	drafts	email-drafts	registry	Email requests kept for review until email is connected; nothing sends without confirm.
@@ -206,7 +212,7 @@ verb	drafts	discard	registry	Close a draft without sending or scheduling anythin
 usage	drafts	discard	discard --id <draft-id>
 area	slack	tldr-slack-channels	registry	Slack channels for your agents (one private channel per agent name).
 verb	slack	channels add	registry	Create a private channel per name, invite you, and post a welcome; safe to rerun.
-usage	slack	channels add	channels add <name>... [--launch-cwd <dir> --launch-runtime <claude-code|codex> --launch-command <shell-quoted command>] [--json]
+usage	slack	channels add	channels add <name>... [--launch-cwd <dir> --launch-runtime <claude-code|codex>] [--json]
 usage	slack	channels add	channels add --agents-json <file|-> [--json]
 REGISTRY
 }

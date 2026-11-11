@@ -14,7 +14,7 @@ import {
 import { tightbeamRecipeCommand } from "./package_context.mjs";
 
 const POLL_INTERVAL_MS = 5_000;
-const MAX_WAIT_MS = REPLY_BINDING_POLICY.maxParkMs;
+const MAX_WAIT_MS = REPLY_BINDING_POLICY.maxReplyWaitMs;
 
 export function parseWaitTimeout(value) {
   if (value === undefined) return undefined;

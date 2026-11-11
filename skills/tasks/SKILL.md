@@ -244,6 +244,8 @@ what it shows.
 "$TLDR_BIN" tasks skills refresh --pretty
 ```
 
+When the user says they added credits or switched accounts, run `tldr-agents tasks release-held`.
+
 If the scheduler reports `desired_state_blocked`, it is fail-closed. Set the
 workspace desired state to live only when that is the intended operator action,
 then retry. After updating Helm, refresh skills so the single current teaching

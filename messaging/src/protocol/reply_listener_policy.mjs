@@ -8,5 +8,12 @@ export const REPLY_BINDING_POLICY = Object.freeze({
   listenerLeaseMs: 30 * 1000,
   listenerHeartbeatMs: 5 * 1000,
   maxParkMs: 4 * 60 * 60 * 1000,
+  // One `agent wait` call. The agent decides whether to wait again.
+  maxReplyWaitMs: 16 * 60 * 60 * 1000,
   presentationAckDeadlineMs: 1500,
 });
+
+// The host's own tool-call window for one maximum wait: the wait plus a minute
+// for startup and handling. Codex's outer @exec yield and Claude's Bash timeout.
+export const REPLY_WAIT_HOST_WINDOW_MS =
+  REPLY_BINDING_POLICY.maxReplyWaitMs + 60 * 1000;

@@ -30,6 +30,7 @@ export class SlackApiError extends Error {
     httpStatus = null,
     retryable = false,
     retryAfterMs = null,
+    maybeSent = false,
   }) {
     super(`slack ${method} failed: ${slackError}`);
     this.name = "SlackApiError";
@@ -39,6 +40,8 @@ export class SlackApiError extends Error {
     this.retryable = retryable;
     this.permanent = !retryable;
     this.retryAfterMs = retryAfterMs;
+    // The request left this process and no answer came: Slack may hold it (ac-jfv.59).
+    this.maybeSent = maybeSent;
   }
 }
 
@@ -47,7 +50,8 @@ const KEY_FOR_KIND = {
   app: "appToken",
   config: "configToken",
 };
-// Several calls fit in one 35 s daemon phase and its 60 s claim lease.
+// The default for a read or a setup call. A chat.postMessage sets its own (slack_post_parts):
+// under load this limit, not the outbound tick's deadline, would decide it (ac-jfv.59).
 export const REQUEST_TIMEOUT_MS = 10_000;
 
 function resolveToken({ method, token, home, credentials }) {
@@ -93,7 +97,7 @@ function failureFor(method, response, payload) {
 }
 
 // Settles when the signal aborts even if fetchImpl ignores it.
-function untilAborted(promise, signal) {
+export function untilAborted(promise, signal) {
   return new Promise((resolve, reject) => {
     const onAbort = () => reject(signal.reason);
     if (signal.aborted) onAbort();
@@ -105,13 +109,23 @@ function untilAborted(promise, signal) {
 }
 
 // Timeout or caller abort: the request may have reached Slack, so retry.
-function abortError(method, signal) {
+export function abortError(method, signal, maybeSent = true) {
   return new SlackApiError({
     method,
     slackError: signal?.aborted ? "aborted" : "request_timeout",
     retryable: true,
+    maybeSent,
   });
 }
+
+// A failure of the connection before any request could leave: nothing reached Slack.
+const NOT_SENT_CODES = new Set([
+  "ENOTFOUND",
+  "ECONNREFUSED",
+  "EAI_AGAIN",
+  "ENETUNREACH",
+  "EHOSTUNREACH",
+]);
 
 async function send({
   method,
@@ -125,6 +139,8 @@ async function send({
   const bounded = AbortSignal.any(
     [AbortSignal.timeout(timeoutMs), signal].filter(Boolean),
   );
+  // Out of time before the request was made: it never left.
+  if (bounded.aborted) throw abortError(method, signal, false);
   let response;
   try {
     response = await untilAborted(
@@ -139,13 +155,14 @@ async function send({
       }),
       bounded,
     );
-  } catch {
+  } catch (error) {
     if (bounded.aborted) throw abortError(method, signal);
     // the raw network error may echo request details; keep only the class
     throw new SlackApiError({
       method,
       slackError: "network_error",
       retryable: true,
+      maybeSent: !NOT_SENT_CODES.has(error?.cause?.code ?? error?.code),
     });
   }
   const payload = await untilAborted(response.json(), bounded).catch(
@@ -231,13 +248,67 @@ export async function authTest(opts) {
   return { userId: r.user_id, teamId: r.team_id, botId: r.bot_id };
 }
 
-export async function postMessage({ channel, text, thread_ts }, opts) {
+// marker (a short string) rides in the post's metadata so findMarkedPost can find the post
+// again when Slack took it but the answer never came back (ac-jfv.59).
+export async function postMessage({ channel, text, thread_ts, marker }, opts) {
+  const metadata = marker
+    ? JSON.stringify({ event_type: "tldr_post", event_payload: { marker } })
+    : undefined;
   const r = await slackFetch(
     "chat.postMessage",
-    { channel, text, thread_ts },
+    { channel, text, thread_ts, metadata },
     opts,
   );
   return { channel: r.channel, ts: r.ts };
+}
+
+// How many pages of 200 a look reads before giving up as incomplete.
+const MAX_LOOKUP_PAGES = 20;
+
+// The post carrying marker, or null. Looks in the thread, or in the channel for a root post,
+// following Slack's cursor so a busy thread cannot hide it. groups:history and im:history
+// are in the manifest, so the read needs no scope the app lacks.
+export async function findMarkedPost(
+  { channel, thread_ts, marker, oldest },
+  opts,
+) {
+  let cursor;
+  for (let page = 0; page < MAX_LOOKUP_PAGES; page += 1) {
+    const common = {
+      channel,
+      oldest,
+      include_all_metadata: true,
+      limit: 200,
+      cursor,
+    };
+    // eslint-disable-next-line no-await-in-loop -- each page names the next.
+    const r = await (thread_ts
+      ? slackFetch("conversations.replies", { ...common, ts: thread_ts }, opts)
+      : slackFetch("conversations.history", common, opts));
+    const hit = (r.messages ?? []).find(
+      (m) => m.metadata?.event_payload?.marker === marker,
+    );
+    if (hit) return { channel, ts: hit.ts };
+    cursor = r.response_metadata?.next_cursor;
+    if (!cursor) return null;
+  }
+  throw new SlackApiError({
+    method: thread_ts ? "conversations.replies" : "conversations.history",
+    slackError: "lookup_incomplete",
+    retryable: true,
+  });
+}
+
+// The working indicator: the thread status (Slack clears it on the app's next
+// reply and after 2 minutes).
+export const WORKING_STATUS = "is working...";
+
+export function setThreadStatus({ channel, thread_ts, status }, opts) {
+  return slackFetch(
+    "assistant.threads.setStatus",
+    { channel_id: channel, thread_ts, status },
+    opts,
+  );
 }
 
 export async function createPrivateChannel(name, opts) {

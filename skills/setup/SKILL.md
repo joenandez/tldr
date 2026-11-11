@@ -90,7 +90,7 @@ After email connects, run `drafts list` through the same launcher. For each pend
 
 Run the Slack operations above only when the user asks. Setup serves a local page; the user does the Slack clicks there. Report Slack from its own `status` entry; Slack problems never change messaging, tasks, or email.
 
-- Run `setup --channel slack` in the background. Add `--agents <name,name>` to create a private channel for each name now (for example `--agents clio,stow`). Or add `--agents-json <file|->` (`-` reads stdin) with rows `{name,cwd,runtime,command}`; this gives each name a launch command so a new top-level post starts a session. It cannot be combined with `--agents`.
+- Run `setup --channel slack` in the background. Add `--agents <name,name>` to create a private channel for each name now (for example `--agents clio,stow`). Or add `--agents-json <file|->` (`-` reads stdin) with rows `{name,cwd,runtime}`; this gives each name a folder and runtime so a new top-level post starts a session (a `command` key is accepted but ignored). It cannot be combined with `--agents`.
 - **Not an Academy agent** (no `ACADEMY_AGENT_NAME` in the environment): run `setup --channel slack` without `--agents` or `--agents-json`.
 - **Academy agent:** get your rows from `academy list --slack-rows <name>` and pipe them in: `academy list --slack-rows <name> | tldr-agents setup --channel slack --agents-json -`.
 - Read the `url` and `steps` line from its output. Send the user the link and that line, unchanged (“Open this link and follow the 3 steps on the page.”). The page shows the steps one at a time; do not repeat them in chat. Never open a browser; links only.

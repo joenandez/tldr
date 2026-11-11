@@ -11,6 +11,8 @@ import {
   resolveScope,
   runLogPaths,
 } from "./store.mjs";
+import { countable } from "./held_at_exit.mjs";
+import { nextHeldRetry } from "./held_state.mjs";
 import { loadJobHistory, loadPublicEvents } from "./read_store.mjs";
 import {
   HISTORY_RING_SIZE,
@@ -49,21 +51,16 @@ export function decorateJob(
     String(a.ts || "").localeCompare(String(b.ts || "")),
   );
   const running = activeRunStatus(activeRunEntry);
+  // held failures are excluded, as in the auto-pause count
+  const counted = new Set(countable(recent));
+  const streak = recent.filter((e) => e.kind !== "completed" || counted.has(e));
   const failureCount = (() => {
     let count = 0;
-    for (let i = recent.length - 1; i >= 0; i--) {
-      const evt = recent[i];
-      if (
-        evt.kind !== "completed" &&
-        evt.kind !== "skipped" &&
-        evt.kind !== "cancelled"
-      )
-        continue;
-      if (evt.status === "failure" || evt.status === "timeout") {
-        count += 1;
-        continue;
-      }
-      break;
+    for (let i = streak.length - 1; i >= 0; i--) {
+      const evt = streak[i];
+      if (!["completed", "skipped", "cancelled"].includes(evt.kind)) continue;
+      if (evt.status !== "failure" && evt.status !== "timeout") break;
+      count += 1;
     }
     return count;
   })();
@@ -77,6 +74,7 @@ export function decorateJob(
   })();
   const lifecycleStatus = (() => {
     if (running) return "running";
+    if (job.state.held) return "held";
     if (!job.state.enabled) {
       if (
         job.state.last_status === "failure" ||
@@ -273,6 +271,9 @@ export function jobStatusPayload(scope, id, atIso = nowIso()) {
     job_id: job.id,
     exists: true,
     enabled: job.state.enabled,
+    held: job.state.held
+      ? { ...job.state.held, next_retry_at: nextHeldRetry(job.state.held) }
+      : null,
     lifecycle_status: decorated.lifecycle_status,
     active_run: decorated.active_run,
     last_run: lastRun

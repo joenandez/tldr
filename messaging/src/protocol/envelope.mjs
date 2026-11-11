@@ -48,6 +48,9 @@ export const RESUME_ASSERT_ACTIVE_V1 = 'resume.assert-active.v1';
 // The daemon captures a package-bound Copilot owner with its Academy permission
 // mode and wakes an exited owner only by exact managed resume under that mode.
 export const RESUME_COPILOT_WAKE_V1 = 'resume.copilot-wake.v1';
+// delivery.claim's message projection carries top-level sender_cwd (the sending
+// endpoint's session folder) when the sender endpoint has one.
+export const MESSAGING_SENDER_CWD = 'messaging.sender-cwd';
 
 // Stable names for the narrow operations introduced by those capabilities.
 // Keeping them at the protocol boundary prevents adapters from rebuilding
@@ -78,6 +81,7 @@ export const BASELINE_CAPABILITIES = Object.freeze([
   SESSION_HOSTS_V1,
   RESUME_ASSERT_ACTIVE_V1,
   RESUME_COPILOT_WAKE_V1,
+  MESSAGING_SENDER_CWD,
 ]);
 
 export class TightbeamError extends Error {

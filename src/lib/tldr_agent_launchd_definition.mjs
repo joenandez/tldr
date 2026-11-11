@@ -8,6 +8,11 @@ export function xmlEscape(value) {
     .replaceAll('"', "&quot;");
 }
 
+// Launchd holds this file open for the daemon and its children. It cannot rotate it, so
+// maintainTldrAgentDiagnostics trims it in place (tldr_agent_diagnostics.mjs).
+export const daemonStderrPath = (home) =>
+  join(home, "logs", "daemon.stderr.log");
+
 export function renderTldrAgentProductionPlist({
   schedulerScriptPath,
   home,
@@ -35,7 +40,7 @@ ${tightbeamBin ? `<key>TIGHTBEAM_BIN</key><string>${xmlEscape(tightbeamBin)}</st
 ${tightbeamStateRoot ? `<key>TIGHTBEAM_STATE_ROOT</key><string>${xmlEscape(tightbeamStateRoot)}</string>` : ""}
 </dict>
 <key>StandardOutPath</key><string>/dev/null</string>
-<key>StandardErrorPath</key><string>/dev/null</string>
+<key>StandardErrorPath</key><string>${xmlEscape(daemonStderrPath(home))}</string>
 </dict></plist>
   `;
 }

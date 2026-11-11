@@ -11,6 +11,7 @@ import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { CLAUDE_ENV, planEnv } from "../../messaging/src/cli/claude_env.mjs";
 import { defaultStateRoot, legacyStateRoot } from "./store.mjs";
 
 const TLDR_MARKER = "tldr-agent-managed:runtime-hooks-v1";
@@ -127,6 +128,22 @@ function planRemoval(settings, home) {
   return { next, changes, changed: changes.length > 0 };
 }
 
+const ENV_WRITES = new Set(["add", "refresh", "remove"]);
+
+// Phase 1 for one runtime: read, plan the retired-hook removal, and for Claude
+// merge the wait-window env (the reply wait needs it). A non-object Claude env
+// throws here, before any runtime is written.
+function planRuntime(action, runtime, home) {
+  const file = settingsPath(runtime, home);
+  const settings = readSettings(file);
+  const removal = planRemoval(settings, home);
+  const envChanges =
+    runtime === "claude" ? planEnv(removal.next, action, CLAUDE_ENV) : [];
+  const changed =
+    removal.changed || envChanges.some(({ op }) => ENV_WRITES.has(op));
+  return { runtime, file, settings, removal, envChanges, changed };
+}
+
 export function bootstrapHooks({
   action,
   runtime = null,
@@ -135,20 +152,22 @@ export function bootstrapHooks({
 } = {}) {
   if (!["install", "uninstall"].includes(action))
     return { ok: false, error: { code: "invalid_action" } };
+  const plans = (runtime ? [runtime] : ["claude", "codex"]).map((current) =>
+    planRuntime(action, current, home),
+  );
   const report = [];
-  for (const currentRuntime of runtime ? [runtime] : ["claude", "codex"]) {
-    const file = settingsPath(currentRuntime, home);
-    const settings = readSettings(file);
-    const removal = planRemoval(settings, home);
+  for (const plan of plans) {
+    const { file, removal } = plan;
     const entry = {
-      runtime: currentRuntime,
+      runtime: plan.runtime,
       file,
-      settings_existed: settings.exists,
+      settings_existed: plan.settings.exists,
       changes: removal.changes,
-      status: dryRun ? "dry_run" : removal.changed ? "written" : "unchanged",
+      status: dryRun ? "dry_run" : plan.changed ? "written" : "unchanged",
     };
+    if (plan.runtime === "claude") entry.env_changes = plan.envChanges;
     if (dryRun) entry.preview = removal.next;
-    else if (removal.changed) atomicWriteJson(file, removal.next);
+    else if (plan.changed) atomicWriteJson(file, removal.next);
     report.push(entry);
   }
   return { ok: true, action, dryRun, report, hook_marker: TLDR_MARKER };

@@ -13,6 +13,8 @@ import { admitParkExpiryRetirement } from '../endpoint_retirement.mjs';
 import { openOldestUnreadAdmission } from './delivery_admission.mjs';
 import { refreshSessionWatermark } from './message_shared.mjs';
 import { notificationContext } from './notification_context.mjs';
+// listener_operations <-> lifecycle_transition is a cycle: never read these imports at module load (TDZ).
+import { CANCEL_NOTICE_ROUTE_REASON, DELEGATION_NOTICE_ROUTE_REASON, oldestUnreadDeliveryForStop } from '../lifecycle_transition.mjs';
 
 const FENCE_FIELDS = ['endpoint_id', 'process_generation', 'listener_id', 'listener_generation'];
 const REQUEST_FIELDS = Object.freeze({
@@ -101,7 +103,7 @@ function requireAttachedConnection(context, listener, connection) {
 // authorize ingress, but it cannot nominate which live process may consume a
 // newly durable message: a later listener cycle can legitimately own the same
 // endpoint after the original binding was made.
-export function activeListenerForEndpoint(db, { endpointId, processGeneration, providerSessionId, nowMs = Date.now() }) {
+export function activeListenerForEndpoint(db, { endpointId, processGeneration, providerSessionId, nowMs = Date.now(), logger = null, messageId = null }) {
   const listener = db
     .prepare(
         `SELECT l.*
@@ -115,7 +117,66 @@ export function activeListenerForEndpoint(db, { endpointId, processGeneration, p
         LIMIT 1`,
     )
     .get(endpointId, processGeneration, providerSessionId, processGeneration, providerSessionId);
-  return listener && isUnexpired(listener, nowMs) ? listener : null;
+  if (listener && isUnexpired(listener, nowMs)) return listener;
+  if (logger) logListenerPresentationSkipped(logger, db, { endpointId, processGeneration, providerSessionId, messageId, nowMs });
+  return null;
+}
+
+// An arrival that found no usable listener while a non-ended row exists for the
+// endpoint says why (ac-jfv.103); no row at all is the ordinary case and stays silent.
+export function logListenerPresentationSkipped(logger, db, { endpointId, processGeneration, providerSessionId, messageId = null, nowMs = Date.now() }) {
+  const row = db
+    .prepare("SELECT * FROM listeners WHERE endpoint_id = ? AND state != 'ended' ORDER BY listener_generation DESC LIMIT 1")
+    .get(endpointId);
+  if (!row) return null;
+  const generationMatch = row.process_generation === processGeneration;
+  const sessionMatch = row.provider_session_id === providerSessionId;
+  // A matching unexpired waking listener is already presenting: the normal case, not a miss.
+  if (row.state === 'waking' && generationMatch && sessionMatch && isUnexpired(row, nowMs)) return null;
+  logger?.info?.({
+    event: 'listener_presentation_skipped',
+    params: {
+      listener_id: row.id,
+      endpoint_id: endpointId,
+      message_id: messageId,
+      state: row.state,
+      lease_expires_at: row.lease_expires_at,
+      park_deadline_at: row.park_deadline_at,
+      now: new Date(nowMs).toISOString(),
+      generation_match: generationMatch,
+      session_match: sessionMatch,
+    },
+  });
+  return null;
+}
+
+/**
+ * A live listener with no pending presentation is handed the oldest unread
+ * delivery of its endpoint and process generation, the same pick the Stop
+ * park makes, when arrival missed it (ac-jfv.103). A delivery this listener
+ * generation already presented in any state is left alone so a miss never
+ * loops. Runs inside the caller's transaction; the caller publishes the result.
+ */
+function backfillPresentation(context, listener, trigger) {
+  const { db } = context;
+  // createNoticeDeliveries' typed rows (recovery.switch is private to lifecycle_transfer): notices wake nobody.
+  // Built per call, not at module load: the import cycle leaves these bindings uninitialized at load time.
+  const skippedRouteReasons = [DELEGATION_NOTICE_ROUTE_REASON, CANCEL_NOTICE_ROUTE_REASON, 'recovery.switch'];
+  // Only an idle session needs waking; a busy one reads at its next tool boundary.
+  const own = [listener.id, listener.listener_generation];
+  if (listener.endpoint_state !== 'idle' || db.prepare("SELECT 1 FROM listener_presentations WHERE listener_id = ? AND listener_generation = ? AND state = 'pending'").get(...own)) return null;
+  const delivery = oldestUnreadDeliveryForStop(db, { endpointId: listener.endpoint_id, processGeneration: listener.process_generation, excludeRouteReasons: skippedRouteReasons });
+  if (!delivery || db.prepare('SELECT 1 FROM listener_presentations WHERE listener_id = ? AND listener_generation = ? AND target_delivery_id = ?').get(...own, delivery.delivery_id)) return null;
+  const now = new Date().toISOString();
+  const presentation = createPendingPresentation(db, { listener, messageId: delivery.message_id, deliveryId: delivery.delivery_id, now });
+  db.prepare("UPDATE listeners SET state = 'waking', updated_at = ? WHERE id = ? AND listener_generation = ? AND state IN ('parked', 'attached')").run(now, listener.id, listener.listener_generation);
+  listener.state = 'waking';
+  const created = db.prepare('SELECT created_at FROM deliveries WHERE id = ?').get(delivery.delivery_id)?.created_at;
+  context.logger?.info?.({
+    event: 'listener_presentation_backfilled',
+    params: { listener_id: listener.id, delivery_id: delivery.delivery_id, message_id: delivery.message_id, age_ms: created ? Date.parse(now) - Date.parse(created) : null, trigger },
+  });
+  return presentation;
 }
 
 /**
@@ -226,7 +287,10 @@ export const listenerAttachOp = operation(LISTENER_ATTACH_OPERATION, (context, r
       listener.state = 'attached';
     }
     const presentations = pendingPresentations(context.db, listener);
-    if (presentations.length > 0) {
+    if (presentations.length === 0) {
+      const backfilled = backfillPresentation(context, listener, 'attach');
+      if (backfilled) presentations.push(backfilled);
+    } else {
       context.db.prepare("UPDATE listeners SET state = 'waking', updated_at = ? WHERE id = ? AND state = 'attached'").run(new Date().toISOString(), listener.id);
       listener.state = 'waking';
     }
@@ -240,7 +304,7 @@ export const listenerAttachOp = operation(LISTENER_ATTACH_OPERATION, (context, r
 });
 
 export const listenerHeartbeatOp = operation(LISTENER_HEARTBEAT_OPERATION, (context, request, connection) => {
-  const leaseExpiresAt = withTransaction(context.db, () => {
+  const { leaseExpiresAt, presentation } = withTransaction(context.db, () => {
     const listener = exactListener(context.db, connection, request);
     requireAttachedConnection(context, listener, connection);
     const nowMs = Date.now();
@@ -248,8 +312,9 @@ export const listenerHeartbeatOp = operation(LISTENER_HEARTBEAT_OPERATION, (cont
     const next = new Date(Math.min(nowMs + REPLY_BINDING_POLICY.listenerLeaseMs, Date.parse(listener.park_deadline_at))).toISOString();
     const updated = context.db.prepare("UPDATE listeners SET lease_expires_at = ?, updated_at = ? WHERE id = ? AND state IN ('attached', 'waking') AND listener_generation = ?").run(next, new Date(nowMs).toISOString(), listener.id, listener.listener_generation);
     if (updated.changes !== 1) conflict('listener is no longer renewable');
-    return next;
+    return { leaseExpiresAt: next, presentation: backfillPresentation(context, listener, 'heartbeat') };
   });
+  if (presentation) publishPresentation(context, presentation);
   return { result: { listener_id: request.listener_id, listener_generation: request.listener_generation, lease_expires_at: leaseExpiresAt } };
 });
 

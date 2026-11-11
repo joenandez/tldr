@@ -88,8 +88,9 @@
 
 import { applyMigrations, listAppliedMigrations } from './migrations.mjs';
 import { reconcileTachyonArmingFromAudit } from './tachyon_arming.mjs';
+import { applyScheduledWakesMigration } from './scheduled_wakes.mjs';
 
-export const SCHEMA_VERSION = 29;
+export const SCHEMA_VERSION = 30;
 
 // The schema version at which the guarded lifecycle cutover landed. A
 // state document stamped below this version was written by a pre-cutover
@@ -1565,10 +1566,7 @@ export const MIGRATIONS = [
   {
     // Session-host binding (TIGHTBEAM_HOST / TIGHTBEAM_HOST_REF); historical rows stay NULL (a host is never guessed).
     schemaVersion: 26,
-    apply(db) {
-      db.exec('ALTER TABLE endpoints ADD COLUMN host_name TEXT');
-      db.exec('ALTER TABLE endpoints ADD COLUMN host_ref TEXT');
-    },
+    apply: (db) => db.exec('ALTER TABLE endpoints ADD COLUMN host_name TEXT; ALTER TABLE endpoints ADD COLUMN host_ref TEXT'),
   },
   {
     // subagent-safe-delivery W2. `background_wait_at` marks a listener a
@@ -1577,9 +1575,7 @@ export const MIGRATIONS = [
     // armed, so the reconciler's unarmed sweep must skip it; NULL is every
     // ordinary listener.
     schemaVersion: 27,
-    apply(db) {
-      db.exec('ALTER TABLE listeners ADD COLUMN background_wait_at TEXT');
-    },
+    apply: (db) => db.exec('ALTER TABLE listeners ADD COLUMN background_wait_at TEXT'),
   },
   {
     // The resumer tick, the listener reconciler and endpoint.list run
@@ -1596,6 +1592,8 @@ export const MIGRATIONS = [
   },
   // The Academy permission mode a Copilot owner was launched under; it follows the owner. NULL: unknown, never inferred.
   { schemaVersion: 29, apply: (db) => db.exec("ALTER TABLE endpoints ADD COLUMN academy_permission_mode TEXT CHECK (academy_permission_mode IS NULL OR academy_permission_mode IN ('approve-all', 'approve-reads', 'deny-all'))") },
+  // scheduled_wakes plus the upgrade-time cutoff (this row's applied_at); see scheduled_wakes.mjs.
+  { schemaVersion: 30, apply: applyScheduledWakesMigration },
 ];
 
 /**

@@ -139,8 +139,8 @@ export function createSlackContext({
   const invocation = tightbeamInvocation({ command, commandPrefix });
   const execute = (options) => run({ ...invocation, ...options });
   const admin = (args) => execute({ admin: true, credentials: null, args });
-  const asApp = (credentials, args) =>
-    execute({ admin: false, credentials, args });
+  const asApp = (credentials, args, options) =>
+    execute({ admin: false, credentials, args, ...options });
 
   // begin(event) returns finish(status, params) which logs with latency.
   function begin(event) {

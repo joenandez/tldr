@@ -174,3 +174,82 @@ export function assertGrantRuntimesRegistered(db, allowedRuntimeTypes, { registr
       `(this daemon starts ${managedNames}; any other runtime must have a registered endpoint before it can be claimed for)`,
   );
 }
+
+// Read-only checks endpoint.register runs against an existing row.
+// Automatic recovery (the agent CLI's refresh after endpoint_dead) names the
+// dead custody it observed. It may only revive that one; if the row has moved
+// on (another process revived it first) the recovery is refused instead of
+// restamping the new live owner. endpoint.register calls this in the same
+// synchronous handler as the revival, so nothing can interleave. Foreign and
+// unknown rows answer the same way, so this is no existence oracle.
+export function assertObservedDead(
+  db,
+  { payload, authorityName, providerSessionId, appId },
+) {
+  const generation = payload.revive_dead_generation;
+  if (generation === undefined) return;
+  if (
+    !Number.isInteger(generation) ||
+    generation < 1 ||
+    providerSessionId === null
+  ) {
+    throw new TightbeamError(
+      "malformed_request",
+      "revive_dead_generation must be a positive integer and needs provider_session_id",
+      { field: "revive_dead_generation" },
+    );
+  }
+  const observed = db
+    .prepare(
+      "SELECT state, process_generation, created_by_app_id FROM endpoints WHERE authority_name = ? AND provider_session_id = ?",
+    )
+    .get(authorityName, providerSessionId);
+  if (
+    observed?.created_by_app_id !== appId ||
+    observed.state !== "dead" ||
+    observed.process_generation !== generation
+  ) {
+    throw new TightbeamError(
+      "obligation_conflict",
+      "the endpoint is no longer dead at the observed generation; another process already revived it",
+      {
+        field: "revive_dead_generation",
+        reason: "endpoint_revived",
+      },
+    );
+  }
+}
+
+export function availabilityTakeoverReplay(
+  db,
+  { endpoint, providerSessionId, launchToken },
+) {
+  if (endpoint.state !== "idle" || launchToken !== endpoint.owner_launch_token)
+    return null;
+  return db
+    .prepare(
+      `SELECT r.id
+       FROM resume_requests r
+       JOIN deliveries d ON d.endpoint_id = r.endpoint_id AND d.message_id = r.message_id
+      WHERE r.endpoint_id = ? AND r.reason = 'availability_takeover'
+        AND r.session_id = ? AND d.takeover_decided_at IS NOT NULL
+        AND d.admission_process_generation = ? - 1
+        AND d.admission_provider_session_id IS ?
+        AND d.admission_owner_epoch = ? - 1
+        AND d.admission_owner_launch_token IS NOT ?
+        AND ((r.state = 'claimed' AND EXISTS (
+              SELECT 1 FROM claims c WHERE c.resource_type = 'resume_request' AND c.resource_id = r.id AND c.state = 'claimed'
+            )) OR (r.state = 'completed' AND r.admitted_process_generation = ? AND r.admitted_provider_session_id IS ?))
+      LIMIT 1`,
+    )
+    .get(
+      endpoint.id,
+      providerSessionId,
+      endpoint.process_generation,
+      providerSessionId,
+      endpoint.owner_epoch,
+      endpoint.owner_launch_token,
+      endpoint.process_generation,
+      providerSessionId,
+    );
+}

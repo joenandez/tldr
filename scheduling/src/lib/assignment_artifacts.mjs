@@ -14,6 +14,7 @@ import {
   copyFileSync,
   cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   realpathSync,
@@ -47,6 +48,36 @@ export function slugifyForAssignment(name) {
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "");
   return slug.length > 0 ? slug : "helm";
+}
+
+// A skill_path outside <scope>/.helm/assignments, or reached through a
+// symlink, belongs to someone else (a shared skill, another agent's home).
+// Helm runs and reads it but never writes, moves, or deletes it. Returns the
+// path when external, else null.
+export function externalSkillPath({ scope, job }) {
+  const persisted = job?.metadata?.assignment?.skill_path;
+  if (typeof persisted !== "string" || !persisted.trim()) return null;
+  const skillPath = resolve(persisted);
+  const root = realOrResolved(resolve(scope.cwd, ".helm", "assignments"));
+  const rel = relative(root, realOrResolved(dirname(skillPath)));
+  const inside = rel && !rel.startsWith("..") && !isAbsolute(rel);
+  return inside && !isSymlink(skillPath) ? null : skillPath;
+}
+
+function realOrResolved(path) {
+  try {
+    return realpathSync(path);
+  } catch {
+    return resolve(path);
+  }
+}
+
+function isSymlink(path) {
+  try {
+    return lstatSync(path).isSymbolicLink();
+  } catch {
+    return false;
+  }
 }
 
 // Persisted paths may use a historical slug, but must name a local SKILL.md.
@@ -213,12 +244,13 @@ export function assignmentArtifactPaths({
   sourceHome = assignmentHome(scope.cwd, slug),
   runIds,
 }) {
+  // A null sourceHome is an external skill: it is not this assignment's to delete.
   return [
     sourceHome,
     jobHistoryPath(scope, jobId),
     jobLogsDir(scope, jobId),
     ...runIds.map((runId) => runReportPath(scope.cwd, runId)),
-  ];
+  ].filter(Boolean);
 }
 
 export function removeAll(paths) {

@@ -14,6 +14,7 @@ import { deriveSessionState, SESSION_LIST_LIMIT, sessionHandlesFor } from './age
 import { confirmationWarning, routedRecipient } from './agent_address.mjs';
 import { ambiguousThread, handleHex, MIN_HANDLE_LENGTH } from './agent_threads.mjs';
 import { tightbeamRecipeCommand } from './package_context.mjs';
+import { sendClosedFollowUp } from './agent_reply_flow.mjs';
 
 const shortId = (id) => String(id ?? '').replace(/^cnv_/, '').slice(0, 8);
 
@@ -183,9 +184,14 @@ export async function sendFollowUp(client, session, command, { log = debugLog } 
   try {
     const thread = await threadHeader(client, session, command.thread);
     const owed = thread.owed_by;
-    if (!owed) throw nobodyOwesYou(thread);
+    if (!owed || owed.root_status !== 'open') {
+      // Nothing is owed: a participant may still follow up once no work is open (A2).
+      const sent = await sendClosedFollowUp({ client, session }, command, thread);
+      if (!sent) throw owed ? workClosed(thread, owed) : nobodyOwesYou(thread);
+      log({ event: 'agent_follow_up', params, result: { owed_by: null, outcome: 'closed_follow_up' }, status: 'ok', latency_ms: Date.now() - started });
+      return sent;
+    }
     owedKind = owed.replaced_endpoint_id ? 'replacement' : 'custodian';
-    if (owed.root_status !== 'open') throw workClosed(thread, owed);
     const sent = await commitFollowUp(client, session, command, thread, owed, log);
     log({ event: 'agent_follow_up', params, result: { owed_by: owedKind, delegated: Boolean(owed.delegated_to), recipient: shortId(owed.endpoint_id), outcome: 'committed' }, status: 'ok', latency_ms: Date.now() - started });
     return sent;

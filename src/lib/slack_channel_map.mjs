@@ -21,14 +21,15 @@ function secureFiles(home) {
   }
 }
 
-// Dogfood DBs were created before launch info existed.
-function addLaunchColumns(db) {
-  const have = db.prepare("PRAGMA table_info(agent_channel)").all();
-  for (const column of ["launch_cwd", "launch_runtime", "launch_command"]) {
-    if (!have.some((c) => c.name === column)) {
-      db.exec(`ALTER TABLE agent_channel ADD COLUMN ${column} TEXT`);
-    }
-  }
+// Dogfood DBs predate launch info and partial-send receipts.
+const LAUNCH_COLUMNS = ["launch_cwd", "launch_runtime", "launch_command"].map(
+  (name) => `${name} TEXT`,
+);
+function addColumns(db, table, columns) {
+  const have = db.prepare(`PRAGMA table_info(${table})`).all();
+  for (const column of columns)
+    if (!have.some((c) => c.name === column.split(" ")[0]))
+      db.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
 }
 
 function openWritable(home) {
@@ -45,8 +46,12 @@ function openWritable(home) {
     CREATE TABLE IF NOT EXISTS standing_conversation (channel_id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS processed_event (seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE);
     CREATE TABLE IF NOT EXISTS thread_launch (channel_id TEXT NOT NULL, root_ts TEXT NOT NULL, session_key TEXT NOT NULL, runtime TEXT NOT NULL, launched_at TEXT NOT NULL, PRIMARY KEY (channel_id, root_ts));
-    CREATE TABLE IF NOT EXISTS outbound_post (seq INTEGER PRIMARY KEY AUTOINCREMENT, delivery_id TEXT NOT NULL UNIQUE, channel_id TEXT NOT NULL, ts TEXT NOT NULL, thread_ts TEXT);`);
-    addLaunchColumns(db);
+    CREATE TABLE IF NOT EXISTS outbound_post (seq INTEGER PRIMARY KEY AUTOINCREMENT, delivery_id TEXT NOT NULL UNIQUE, channel_id TEXT NOT NULL, ts TEXT NOT NULL, thread_ts TEXT, parts_sent INTEGER);
+    CREATE TABLE IF NOT EXISTS slack_working (channel_id TEXT NOT NULL, thread_ts TEXT NOT NULL, ts TEXT NOT NULL, reacted INTEGER NOT NULL, accepted_at INTEGER NOT NULL, last_set_at INTEGER NOT NULL, message_id TEXT, cleared_at INTEGER NOT NULL DEFAULT 0, last_checked_at INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (channel_id, thread_ts));`);
+    addColumns(db, "agent_channel", LAUNCH_COLUMNS);
+    addColumns(db, "thread_launch", ["endpoint_id TEXT", "principal_id TEXT"]);
+    addColumns(db, "thread_launch", ["retry_since TEXT"]);
+    addColumns(db, "outbound_post", ["parts_sent INTEGER"]);
     secureFiles(home);
     return db;
   } catch (error) {
@@ -56,7 +61,8 @@ function openWritable(home) {
 }
 
 // Runs fn(db) in one immediate transaction, then tightens file modes.
-function write(home, fn) {
+// Exported for slack_working_store.mjs: the migrating open gives an old DB its table.
+export function write(home, fn) {
   const db = openWritable(home);
   try {
     db.exec("BEGIN IMMEDIATE");
@@ -75,7 +81,7 @@ function write(home, fn) {
 }
 
 // Returns null when the db file is absent; sql columns are aliased to camelCase.
-function readOne(home, sql, ...params) {
+export function readOne(home, sql, ...params) {
   if (!existsSync(mapPath(home))) return null;
   const db = new DatabaseSync(mapPath(home), {
     readOnly: true,
@@ -206,29 +212,27 @@ export function lookupChannelAgent(home, channelId) {
   );
 }
 
-// A post root's launch uuid, recorded before the spawn so a retry reuses it.
-// INSERT OR IGNORE: returns true only for the call that inserted.
+// The placeholder a post root's session will adopt, recorded before the commit
+// so a retry reuses it. Callers write only when no usable row exists, so a
+// pre-upgrade row (no endpoint_id) is replaced. session_key (NOT NULL) = endpoint,
+// or THREAD_PREPARING with a null endpoint: the first attempt's time, stored
+// before the placeholder exists so a stuck prepare still has a deadline.
+export const THREAD_PREPARING = "preparing";
 export function recordThreadLaunch(home, record) {
-  return write(home, (db) => {
-    const { changes } = db
-      .prepare("INSERT OR IGNORE INTO thread_launch VALUES (?, ?, ?, ?, ?)")
-      .run(
-        record.channelId,
-        record.rootTs,
-        record.sessionKey,
-        record.runtime,
-        record.launchedAt,
-      );
-    return changes > 0;
-  });
+  write(home, (db) =>
+    db
+      .prepare(
+        "INSERT OR REPLACE INTO thread_launch (channel_id, root_ts, session_key, runtime, launched_at, endpoint_id, principal_id) VALUES (:channelId, :rootTs, COALESCE(:endpointId, 'preparing'), :runtime, :launchedAt, :endpointId, :principalId)",
+      )
+      .run(record),
+  );
 }
 
+// SELECT *: a read-only open cannot migrate an old table (no endpoint_id/retry_since: old row).
 export function lookupThreadLaunch(home, { channelId, rootTs }) {
   return readOne(
     home,
-    `SELECT channel_id AS channelId, root_ts AS rootTs, session_key AS sessionKey,
-            runtime, launched_at AS launchedAt
-       FROM thread_launch WHERE channel_id = ? AND root_ts = ?`,
+    "SELECT * FROM thread_launch WHERE channel_id = ? AND root_ts = ?",
     channelId,
     rootTs,
   );
@@ -279,6 +283,15 @@ export function lookupThreadRoot(home, { channelId, rootTs }) {
   );
 }
 
+export function lookupThreadRootByConversation(home, conversationId) {
+  return readOne(
+    home,
+    `SELECT channel_id AS channelId, root_ts AS threadTs FROM thread_root
+       WHERE conversation_id = ? ORDER BY rowid DESC LIMIT 1`,
+    conversationId,
+  );
+}
+
 // INSERT OR REPLACE gives a replaced row a fresh rowid, so max(rowid) is the latest outbound post.
 export function lookupLatestReplyBinding(home, channelId) {
   return readOne(
@@ -319,21 +332,17 @@ export function recordStandingConversation(home, record) {
 }
 
 // One receipt per delivered Slack post, so a re-offered delivery is never posted twice.
+// `sent` (parts posted) marks a partial send: the root is out, a later part failed.
 export function recordOutboundPost(
   home,
-  record,
+  { deliveryId, channelId, ts, threadTs = null, sent = null },
   limit = PROCESSED_EVENT_LIMIT,
 ) {
   write(home, (db) => {
     db.prepare(
-      `INSERT OR IGNORE INTO outbound_post (delivery_id, channel_id, ts, thread_ts)
-         VALUES (?, ?, ?, ?)`,
-    ).run(
-      record.deliveryId,
-      record.channelId,
-      record.ts,
-      record.threadTs ?? null,
-    );
+      `INSERT OR IGNORE INTO outbound_post (delivery_id, channel_id, ts, thread_ts, parts_sent)
+         VALUES (?, ?, ?, ?, ?)`,
+    ).run(deliveryId, channelId, ts, threadTs, sent);
     db.prepare(
       `DELETE FROM outbound_post WHERE seq NOT IN
          (SELECT seq FROM outbound_post ORDER BY seq DESC LIMIT ?)`,
@@ -341,13 +350,13 @@ export function recordOutboundPost(
   });
 }
 
+// SELECT *: a read-only open cannot migrate; an old receipt (no parts_sent) is a full send.
 export function lookupOutboundPost(home, deliveryId) {
-  return readOne(
-    home,
-    `SELECT channel_id AS channelId, ts, thread_ts AS threadTs
-       FROM outbound_post WHERE delivery_id = ?`,
-    deliveryId,
-  );
+  const sql = "SELECT * FROM outbound_post WHERE delivery_id = ?";
+  const row = readOne(home, sql, deliveryId);
+  if (!row) return null;
+  const { channel_id: channelId, ts, thread_ts: threadTs } = row;
+  return { channelId, ts, threadTs, sent: row.parts_sent ?? null };
 }
 
 // limit is injectable for tests; production callers use the default.

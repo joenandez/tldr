@@ -10,7 +10,7 @@ import { tldrAgentHomeFor } from "./store.mjs";
 
 // `tldr-agents slack channels add <name>...` or `--agents-json <file|->` [--json]
 const usage = [
-  "tldr-agents slack channels add <name>... [--launch-cwd <dir> --launch-runtime <claude-code|codex> --launch-command <shell-quoted command>] [--json]",
+  "tldr-agents slack channels add <name>... [--launch-cwd <dir> --launch-runtime <claude-code|codex>] [--json]",
   "tldr-agents slack channels add --agents-json <file|-> [--json]",
 ].join("\n");
 
@@ -56,17 +56,25 @@ function scanChannelsArgs(rest) {
   return seen;
 }
 
+// Academy still passes --launch-command (flag or row key), so it is accepted;
+// it is never applied, and the caller is told so.
+const LAUNCH_COMMAND_NOTICE =
+  "--launch-command ignored: Slack sessions use the runtime's shared launch template";
+const noticesFor = (launches) =>
+  Object.values(launches ?? {})
+    .filter((launch) => launch.commandIgnored)
+    .slice(0, 1)
+    .map(() => LAUNCH_COMMAND_NOTICE);
+
 const usageError = (message) =>
   new SlackChannelsError("SLACK_CHANNELS_USAGE", message);
 
-// Launch info is per agent: all three flags, one name.
+// Launch info is per agent: cwd and runtime together, one name. --launch-command
+// is still accepted but unused: the shared path runs the runtime's own template.
 function launchesFor({ launch, names }) {
-  const given = Object.keys(launch).length;
-  if (!given) return {};
-  if (given < 3) {
-    throw usageError(
-      "Pass --launch-cwd, --launch-runtime and --launch-command together.",
-    );
+  if (!Object.keys(launch).length) return {};
+  if (!launch.cwd || !launch.runtime) {
+    throw usageError("Pass --launch-cwd and --launch-runtime together.");
   }
   if (names.length !== 1)
     throw usageError("Launch flags apply to one agent name.");
@@ -113,7 +121,9 @@ export async function runChannelsEntry(
   { fetchImpl, home, readInput } = {},
 ) {
   const parsed = parseChannelsArgs(args, { readInput });
-  if (parsed.error) return { envelope: parsed.error, exitCode: 2, lines: [] };
+  if (parsed.error)
+    return { envelope: parsed.error, exitCode: 2, lines: [], notices: [] };
+  const notices = noticesFor(parsed.launches);
   try {
     const data = await addSlackChannels({
       home: home ?? tldrAgentHomeFor(),
@@ -126,6 +136,7 @@ export async function runChannelsEntry(
       envelope: { ok: data.ok, data, error: null },
       exitCode: data.ok ? 0 : 1,
       lines: data.results.map(humanLine),
+      notices,
     };
   } catch (error) {
     const code = typeof error?.code === "string" ? error.code : "SLACK_FAILED";
@@ -134,6 +145,7 @@ export async function runChannelsEntry(
       envelope: failure(code, error?.message ?? "Slack channels add failed."),
       exitCode: 1,
       lines: [],
+      notices,
     };
   }
 }
@@ -143,7 +155,8 @@ if (
   basename(process.argv[1]) === "slack_channels_entry.mjs"
 ) {
   const args = process.argv.slice(2);
-  const { envelope, exitCode, lines } = await runChannelsEntry(args);
+  const { envelope, exitCode, lines, notices } = await runChannelsEntry(args);
+  process.stderr.write(notices.map((notice) => `${notice}\n`).join(""));
   const json = args.includes("--json");
   if (json) process.stdout.write(`${JSON.stringify(envelope)}\n`);
   else if (envelope.ok) process.stdout.write(`${lines.join("\n")}\n`);

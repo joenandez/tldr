@@ -20,7 +20,9 @@ export function fail(command, code, message, details = {}, pretty = false) {
   output(command, false, details, [{ code, message }], pretty);
 }
 
-export function parseArgs(argv) {
+// `booleans` names flags that never take a value, so `--flag <id>` leaves the
+// id positional. Callers that pass none keep the historical greedy parse.
+export function parseArgs(argv, { booleans = [] } = {}) {
   const args = [...argv];
   const positionals = [];
   const flags = {};
@@ -39,7 +41,12 @@ export function parseArgs(argv) {
     }
     const key = token.slice(2);
     const next = args[i + 1];
-    if (!next || next === "--" || next.startsWith("--")) {
+    if (
+      booleans.includes(key) ||
+      !next ||
+      next === "--" ||
+      next.startsWith("--")
+    ) {
       flags[key] = true;
       continue;
     }

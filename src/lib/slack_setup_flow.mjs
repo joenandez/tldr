@@ -16,10 +16,10 @@ import { SLACK_SETUP_LINK_LINE } from "./slack_setup_steps.mjs";
 
 const fail = (code, extra = {}) => Object.freeze({ ok: false, code, ...extra });
 const quote = (text) => `'${text.replaceAll("'", "'\\''")}'`;
-// Words are re-quoted so splitLaunchCommand gives back the same argv.
-const word = (text) => (/^[\w@%+=:,./-]+$/u.test(text) ? text : quote(text));
-const launchFlags = ({ cwd, runtime, command }) =>
-  ` --launch-cwd ${quote(cwd)} --launch-runtime ${runtime} --launch-command ${quote(command.map(word).join(" "))}`;
+// Folder and runtime only: a stored launch command has no effect, so a retry
+// never presents it as configuration.
+const launchFlags = ({ cwd, runtime }) =>
+  ` --launch-cwd ${quote(cwd)} --launch-runtime ${runtime}`;
 // Launch info is per agent, so each launching name gets its own command.
 const retryCommand = (names, launches) => {
   const add = (rest) => `tldr-agents slack channels add ${rest}`;
@@ -39,8 +39,8 @@ export function setupRetryCommand(names, launches = {}) {
     .filter((name) => launches[name])
     .map((name) => ({
       name,
-      ...launches[name],
-      command: launches[name].command.map(word).join(" "),
+      cwd: launches[name].cwd,
+      runtime: launches[name].runtime,
     }));
   if (rows.length) {
     return `printf '%s' ${quote(JSON.stringify(rows))} | ${base} --agents-json -`;

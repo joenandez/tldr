@@ -65,7 +65,9 @@ export function isPendingReference(value) {
 }
 
 export function validateWaitOutcome(value) {
+  // A message hint names its message: progress is counted per message.
   const fields = [
+    ...(value?.outcome === "message" ? ["message_id"] : []),
     "action_id",
     "endpoint_id",
     "provider_session_id",
@@ -75,7 +77,13 @@ export function validateWaitOutcome(value) {
     "outcome",
   ];
   if (!validWaitOutcome(value, fields)) return null;
+  if (fields.includes("message_id") && !validMessageId(value.message_id))
+    return null;
   return { ...value, pending_references: [...value.pending_references] };
+}
+
+function validMessageId(value) {
+  return typeof value === "string" && value.length > 0;
 }
 
 function validWaitOutcome(value, fields) {
@@ -109,7 +117,7 @@ function hasWaitIdentity(value) {
     validStrings &&
     Number.isSafeInteger(value.process_generation) &&
     value.process_generation > 0 &&
-    ["timeout", "cancelled"].includes(value.outcome)
+    ["timeout", "cancelled", "message"].includes(value.outcome)
   );
 }
 
@@ -190,38 +198,90 @@ function isDirectWaitGuard(db, { appId, endpoint, processGeneration, hint }) {
   );
 }
 
-// Not consumed: once the agent has waited for these exact replies, every later
-// Stop is its own call. A new or revised expected reply changes the references.
-function validEscape(
-  db,
-  { appId, endpoint, processGeneration, hint, references },
-) {
-  if (!hint) return false;
+// Progress is keyed by message, not by wait: an unread delivery that every
+// `agent wait` returns again under a new action id is counted once per
+// reference set on an endpoint/generation, then it is just another Stop.
+function progressCounted(db, context, { hint, guardReference }) {
+  return Boolean(
+    db
+      .prepare(
+        "SELECT 1 AS counted FROM lifecycle_commands WHERE app_id = ? AND operation = 'session.stop' AND json_extract(result_payload, '$.progress_message_id') = ? AND json_extract(result_payload, '$.endpoint_id') = ? AND json_extract(result_payload, '$.process_generation') = ? AND json_extract(result_payload, '$.guard_reference') = ? LIMIT 1",
+      )
+      .get(
+        context.appId,
+        hint.message_id,
+        context.endpoint.id,
+        context.processGeneration,
+        guardReference,
+      ),
+  );
+}
+
+function provenWait(db, { appId, endpoint, processGeneration, hint }) {
   return (
     matchesSession(hint, endpoint, processGeneration) &&
-    referencesEqual(hint.pending_references, references) &&
     (priorGuardMatches(db, { appId, endpoint, processGeneration, hint }) ||
       isDirectWaitGuard(db, { appId, endpoint, processGeneration, hint }))
   );
 }
 
+// Not consumed: once the agent has waited for these exact replies and the wait
+// ended in timeout or cancelled, every later Stop is its own call. A new or
+// revised expected reply changes the references and re-arms the guard.
+function validEscape(db, context, { hint, references }) {
+  if (!["timeout", "cancelled"].includes(hint?.outcome)) return false;
+  return (
+    referencesEqual(hint.pending_references, references) &&
+    provenWait(db, { ...context, hint })
+  );
+}
+
+// A message outcome proves the agent really waited: the Stop stays blocked (the
+// agent is nudged to wait again) but is not counted toward the cap, once per message.
+function validProgress(db, context, { hint, guardReference }) {
+  if (hint?.outcome !== "message") return false;
+  return (
+    provenWait(db, { ...context, hint }) &&
+    !progressCounted(db, context, { hint, guardReference })
+  );
+}
+
+// Consecutive blocks since the last Stop that used a wait hint; a wait resets it.
 function explicitBlockCount(
   db,
   { appId, endpoint, processGeneration, guardReference },
 ) {
   return db
     .prepare(
-      "SELECT COUNT(DISTINCT idempotency_key) AS count FROM lifecycle_commands WHERE app_id = ? AND operation = 'session.stop' AND json_extract(result_payload, '$.wait_mode') = 'explicit' AND json_extract(result_payload, '$.endpoint_id') = ? AND json_extract(result_payload, '$.process_generation') = ? AND json_extract(result_payload, '$.guard_reference') = ?",
+      "SELECT COUNT(DISTINCT idempotency_key) AS count FROM lifecycle_commands WHERE app_id = ? AND operation = 'session.stop' AND json_extract(result_payload, '$.wait_mode') = 'explicit' AND json_extract(result_payload, '$.endpoint_id') = ? AND json_extract(result_payload, '$.process_generation') = ? AND json_extract(result_payload, '$.guard_reference') = ? AND rowid > COALESCE((SELECT MAX(rowid) FROM lifecycle_commands WHERE app_id = ? AND operation = 'session.stop' AND json_extract(result_payload, '$.consumed_endpoint_id') = ? AND json_extract(result_payload, '$.consumed_process_generation') = ?), 0)",
     )
-    .get(appId, endpoint.id, processGeneration, guardReference).count;
+    .get(
+      appId,
+      endpoint.id,
+      processGeneration,
+      guardReference,
+      appId,
+      endpoint.id,
+      processGeneration,
+    ).count;
+}
+
+// STOP_BLOCK_CAP consecutive blocks with no wait means the wait path itself is
+// broken (command failing, daemon down): allow rather than wedge the session.
+function capReached(db, context, guardReference) {
+  const count = explicitBlockCount(db, { ...context, guardReference });
+  if (count < STOP_BLOCK_CAP) return false;
+  if (context.trace)
+    context.trace.explicit_cap_allow = {
+      endpoint_id: context.endpoint.id,
+      count,
+    };
+  return true;
 }
 
 function callerBlock(action, command, context) {
   const guardReference = action.reference;
-  if (
-    explicitBlockCount(context.db, { ...context, guardReference }) >=
-    STOP_BLOCK_CAP
-  )
+  if (capReached(context.db, context, guardReference))
     return { decision: "allow", obligation_ids: [] };
   const verb = action.action === "accept" ? "accept" : "complete";
   const instruction =
@@ -244,22 +304,16 @@ function callerBlock(action, command, context) {
 function pendingBlock(db, { context, command, pending }) {
   const references = pending.map((item) => item.reference).sort();
   const guardReference = JSON.stringify(references);
-  if (
-    validEscape(db, {
-      ...context,
-      hint: context.request.wait_outcome,
-      references,
-    })
-  ) {
-    return {
-      decision: "allow",
-      obligation_ids: [],
-      consumed_wait_action_id: context.request.wait_outcome.action_id,
-      consumed_endpoint_id: context.endpoint.id,
-      consumed_process_generation: context.processGeneration,
-    };
-  }
-  if (explicitBlockCount(db, { ...context, guardReference }) >= STOP_BLOCK_CAP)
+  const hint = context.request.wait_outcome;
+  const consumed = hint && {
+    consumed_wait_action_id: hint.action_id,
+    consumed_endpoint_id: context.endpoint.id,
+    consumed_process_generation: context.processGeneration,
+  };
+  if (validEscape(db, context, { hint, references }))
+    return { decision: "allow", obligation_ids: [], ...consumed };
+  const progress = validProgress(db, context, { hint, guardReference });
+  if (!progress && capReached(db, context, guardReference))
     return { decision: "allow", obligation_ids: [] };
   const labels = pending.map((item) => `  - ${item.label}`).join("\n");
   return {
@@ -272,16 +326,17 @@ function pendingBlock(db, { context, command, pending }) {
     process_generation: context.processGeneration,
     provider_session_id: context.endpoint.provider_session_id ?? null,
     wait_mode: "explicit",
+    ...(progress ? { ...consumed, progress_message_id: hint.message_id } : {}),
     reason: `[tightbeam] Cannot stop: ${pending.length} expected reply/replies remain:\n${labels}\nRun ${command} agent wait and stop again after it returns.`,
   };
 }
 
 export function explicitWaitGuard(
   db,
-  { appId, endpoint, processGeneration, request, pending, callerAction },
+  { appId, endpoint, processGeneration, request, pending, callerAction, trace },
   command,
 ) {
-  const context = { db, appId, endpoint, processGeneration, request };
+  const context = { db, appId, endpoint, processGeneration, request, trace };
   if (callerAction) return callerBlock(callerAction, command, context);
   if (pending.length) return pendingBlock(db, { context, command, pending });
   return request.background_wait

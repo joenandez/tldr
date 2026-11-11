@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { requestAegisStatusSafe } from "./aegis_client.mjs";
@@ -100,13 +100,17 @@ export function createTldrAgentSourceInstallLifecycle({
   );
   const launchd = createLaunchdLifecycle({
     schedulerScriptPath,
-    renderDefinition: (path) =>
-      productionPlist(path, {
+    renderDefinition: (path) => {
+      // Launchd opens the daemon's stderr file (home/logs) and does not create its directory.
+      if (existsSync(home))
+        mkdirSync(join(home, "logs"), { recursive: true, mode: 0o700 });
+      return productionPlist(path, {
         home,
         nodePath,
         tightbeamBin,
         tightbeamStateRoot,
-      }),
+      });
+    },
   });
   const assertRootsCreatable = (operation) =>
     assertSourceLifecycleRootsCreatable({

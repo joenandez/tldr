@@ -1,4 +1,3 @@
-import { postMessage } from "./slack_api.mjs";
 import {
   hasProcessedEvent,
   lookupChannelAgent,
@@ -11,6 +10,9 @@ import {
   deliverByName,
   targetLaunchedThread,
 } from "./slack_inbound_by_name.mjs";
+import { withFiles } from "./slack_inbound_files.mjs";
+import { hintAndMark } from "./slack_inbound_hint.mjs";
+import { noteWorkingMessage, trackWorking } from "./slack_working_store.mjs";
 import {
   parseEntry,
   readPending,
@@ -31,8 +33,6 @@ const PERMANENT_CODES = new Set([
   "idempotency_collision",
   "conversation_binding_conflict",
 ]);
-const HINT_TEXT =
-  "I can't route this. Reply in an agent's thread, or post in an agent's channel.";
 
 // A thread reply goes to the session that owns its root (AC-20).
 function threadRoute(home, entry) {
@@ -66,33 +66,6 @@ function send(channel, route, text) {
   });
 }
 
-async function hint(ctx, entry, text = HINT_TEXT) {
-  const { home, credentials, fetchImpl, logger, signal } = ctx;
-  try {
-    await postMessage(
-      {
-        channel: entry.channel,
-        text,
-        thread_ts: entry.thread_ts ?? entry.ts,
-      },
-      { home, credentials, fetchImpl, logger, signal },
-    );
-  } catch (error) {
-    logger?.({
-      event: "slack_inbound_hint_failed",
-      status: "error",
-      params: { channel: entry.channel, ts: entry.ts },
-      result: { slack_error: error.slackError ?? null },
-    });
-  }
-}
-
-async function hintAndMark({ ctx, entry, eventId }, text) {
-  await hint(ctx, entry, text);
-  markEventProcessed(ctx.home, eventId);
-  return "hinted";
-}
-
 async function refused({ ctx, entry, route, result, eventId }) {
   const code = result.tightbeam_code;
   // A by-name target that vanished is a retry (the next drain re-checks), not a refusal.
@@ -116,6 +89,19 @@ async function refused({ ctx, entry, route, result, eventId }) {
       rootTs: route.ts,
     });
   return permanent ? hintAndMark({ ctx, entry, eventId }) : "retry";
+}
+
+// The working indicator is a courtesy: its bookkeeping never fails the routing.
+function noteWorking(ctx, write) {
+  try {
+    write();
+  } catch (error) {
+    ctx.logger?.({
+      event: "slack_working_track_failed",
+      status: "error",
+      result: { message: error.message, stack: error.stack },
+    });
+  }
 }
 
 async function deliver({ ctx, entry, route, eventId }) {
@@ -143,14 +129,22 @@ async function deliver({ ctx, entry, route, eventId }) {
     channelId: route.channelId,
     threadTs: route.threadTs,
   });
+  noteWorking(ctx, () =>
+    noteWorkingMessage(home, {
+      channelId: route.channelId,
+      threadTs: route.threadTs,
+      ts: route.ts,
+      messageId: result.message_id,
+    }),
+  );
   markEventProcessed(home, eventId);
   return route.kind === "reply" ? "published" : "committed";
 }
 
-async function deliverThreadReply(ctx, entry, eventId) {
+async function deliverThreadReply({ ctx, entry, eventId, tell }) {
   const planned = threadRoute(ctx.home, entry);
   const { route, outcome } = planned
-    ? await targetLaunchedThread(ctx, planned)
+    ? await targetLaunchedThread(ctx, planned, tell)
     : {};
   if (outcome) return outcome;
   return route
@@ -158,11 +152,32 @@ async function deliverThreadReply(ctx, entry, eventId) {
     : hintAndMark({ ctx, entry, eventId });
 }
 
+// Download the owner's files first so deliver and deliverByName carry the list.
+async function routeWithFiles({ ctx, entry, agent, eventId }) {
+  const routed = await withFiles(ctx, entry, eventId);
+  if (!routed) return "retry";
+  // The welcome post says "reply in a thread, or post here": both mean the agent.
+  const byName = isTopLevel(routed) || routed.thread_ts === agent.welcomeTs;
+  const tell = (text) => hintAndMark({ ctx, entry: routed, eventId }, text);
+  return byName
+    ? deliverByName({ ctx, entry: routed, agent, eventId, deliver, tell })
+    : deliverThreadReply({ ctx, entry: routed, eventId, tell });
+}
+
 // Returns one of: published, committed, hinted, skipped, pending, retry.
 async function handle(ctx, entry, owner) {
   const eventId = entry.event_id ?? `slack:${entry.channel}:${entry.ts}`;
   if (entry.user !== owner || hasProcessedEvent(ctx.home, eventId))
     return "skipped";
+  // Waiting from here until the agent's first post (or a hint) in this thread.
+  noteWorking(ctx, () =>
+    trackWorking(ctx.home, {
+      channelId: entry.channel,
+      threadTs: entry.thread_ts ?? entry.ts,
+      ts: entry.ts,
+      now: (ctx.now ?? Date.now)(),
+    }),
+  );
   const agent = lookupChannelAgent(ctx.home, entry.channel);
   // Slack is for named agents only: a channel with no agent row routes nothing.
   if (!agent) {
@@ -174,12 +189,7 @@ async function handle(ctx, entry, owner) {
     });
     return hintAndMark({ ctx, entry, eventId });
   }
-  // The welcome post says "reply in a thread, or post here": both mean the agent.
-  const byName = isTopLevel(entry) || entry.thread_ts === agent.welcomeTs;
-  const tell = (text) => hintAndMark({ ctx, entry, eventId }, text);
-  return byName
-    ? deliverByName({ ctx, entry, agent, eventId, deliver, tell })
-    : deliverThreadReply(ctx, entry, eventId);
+  return routeWithFiles({ ctx, entry, agent, eventId });
 }
 
 function outcomeFor(ctx, entry, owner) {
@@ -189,10 +199,20 @@ function outcomeFor(ctx, entry, owner) {
 }
 
 // A launch still starting is waiting, not failing: ok stays true.
-function stopDrain(counts, entry, outcome) {
-  if (outcome === "retry") counts.ok = false;
-  else counts.pending += 1;
+function stopDrain({ counts, entry, outcome, signal }) {
+  if (outcome === "retry") {
+    counts.ok = false;
+    counts.abort_cause = abortCause(signal);
+  } else counts.pending += 1;
   counts.stopped_at = `slack:${entry.channel}:${entry.ts}`;
+}
+
+// Why an aborted phase stopped the drain; the drain stops at the first line, so once per tick.
+function abortCause(signal) {
+  if (!signal?.aborted) return undefined;
+  return signal.reason?.code === "daemon_phase_timeout"
+    ? "phase_timeout"
+    : "aborted";
 }
 
 async function drain(options) {
@@ -218,7 +238,7 @@ async function drain(options) {
     // eslint-disable-next-line no-await-in-loop
     const outcome = await outcomeFor(ctx, entry, owner);
     if (outcome === "retry" || outcome === "pending") {
-      stopDrain(counts, entry, outcome);
+      stopDrain({ counts, entry, outcome, signal: ctx.signal });
       break;
     }
     counts[outcome] += 1;

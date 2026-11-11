@@ -236,7 +236,8 @@ async function _evaluateOneJob(
   maxCatchupRuns,
   dryRun = false,
 ) {
-  if (!job.state.next_run_at)
+  // Disabled: a fired one-off keeps next_run_at null, else it reads as an operator pause (isOperatorPaused).
+  if (!job.state.next_run_at && job.state.enabled !== false)
     job.state.next_run_at = computeInitialNextRun(job, at);
   migrateLegacyInfrastructureMarker(job);
 

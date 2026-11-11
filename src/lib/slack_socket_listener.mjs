@@ -12,6 +12,7 @@ import { pathToFileURL } from "node:url";
 import { connectionsOpen } from "./slack_api.mjs";
 import { readSlackCredentials } from "./slack_credentials.mjs";
 import { tldrAgentHomeFor } from "./store.mjs";
+import { processedBefore, showWorking } from "./slack_working_show.mjs";
 
 const SEEN_LIMIT = 5000;
 const PARENT_CHECK_MS = 2000;
@@ -49,33 +50,50 @@ export function watchParent({
   return () => clearInterval(timer);
 }
 
-const isKeptSubtype = (subtype) => !subtype || subtype === "thread_broadcast";
+const KEPT_SUBTYPES = new Set(["thread_broadcast", "file_share"]);
+const isKeptSubtype = (subtype) => !subtype || KEPT_SUBTYPES.has(subtype);
 const isPrivateChat = (event) => PRIVATE_CHANNEL_TYPES.has(event.channel_type);
 const isOwnerHuman = (event, ownerUserId) =>
   Boolean(ownerUserId) && event.user === ownerUserId && !event.bot_id;
 
-function keepable(envelope, ownerUserId) {
+const isOwnerDm = (envelope, ownerUserId) => {
   const event = envelope.payload?.event;
-  if (envelope.type !== "events_api" || event?.type !== "message") return false;
   return (
+    envelope.type === "events_api" &&
+    event?.type === "message" &&
     isPrivateChat(event) &&
-    isKeptSubtype(event.subtype) &&
     isOwnerHuman(event, ownerUserId)
   );
-}
+};
+
+const keepable = (envelope, ownerUserId) =>
+  isOwnerDm(envelope, ownerUserId) &&
+  isKeptSubtype(envelope.payload.event.subtype);
+
+// Only what the inbound lane needs to download. A file with no download url
+// (Slack Connect) stays listed so the lane can say why it was not fetched.
+const fileRefs = (files) =>
+  Array.isArray(files) && files.length
+    ? files.map((f) => ({
+        id: f.id,
+        name: f.name,
+        mimetype: f.mimetype,
+        size: f.size,
+        url: f.url_private_download,
+      }))
+    : undefined;
 
 function readSeededIds(path) {
   if (!existsSync(path)) return [];
   const ids = [];
   for (const line of readFileSync(path, "utf8").split("\n")) {
     try {
-      const id = JSON.parse(line).event_id;
-      if (id) ids.push(id);
+      ids.push(JSON.parse(line).event_id);
     } catch {
       // blank or torn line: ignore
     }
   }
-  return ids;
+  return ids.filter(Boolean);
 }
 
 function createSeen(path) {
@@ -98,17 +116,25 @@ function appendInbox(path, entry) {
 // Resolves after ms, or at once on abort.
 const sleep = (ms, signal) => pause(ms, undefined, { signal }).catch(() => {});
 
-// Durable dedupe after the inbox is drained is the inbound lane's job
-// (it records processed event ids in the channel map).
-function createHandler({ path, ownerUserId, counters }) {
+// The inbound lane records processed event ids in the channel map and owns
+// durable dedupe once the inbox is drained.
+function createHandler({ home, path, ownerUserId, counters, log, slackOpts }) {
   const seen = createSeen(path);
   return function handle(envelope) {
     if (!keepable(envelope, ownerUserId)) {
       counters.dropped += 1;
+      // An owner message dropped here is dropped for its subtype: say which.
+      if (isOwnerDm(envelope, ownerUserId))
+        log({
+          event: "slack_socket_subtype_drop",
+          status: "info",
+          params: { subtype: envelope.payload.event.subtype },
+        });
       return;
     }
     const { event_id: eventId, event } = envelope.payload;
-    if (eventId && seen.has(eventId)) {
+    // seen never holds an undefined id, so a missing event id is not a repeat
+    if (seen.has(eventId) || processedBefore(home, event, eventId)) {
       counters.dropped += 1;
       return;
     }
@@ -119,9 +145,11 @@ function createHandler({ path, ownerUserId, counters }) {
       thread_ts: event.thread_ts ?? null,
       text: event.text,
       user: event.user,
+      files: fileRefs(event.files),
     });
     if (eventId) seen.add(eventId);
     counters.kept += 1;
+    showWorking(event, { slackOpts, log });
   };
 }
 
@@ -196,15 +224,20 @@ export async function runSlackSocketListener({
   signal = new AbortController().signal,
   logger,
   backoff = {},
+  // credentials / fetchImpl for the working-indicator calls (tests inject them)
+  slackOpts = {},
 }) {
   const log = (entry) => logger?.(entry);
   const initialMs = backoff.initialMs ?? 1000;
   const maxMs = backoff.maxMs ?? 30000;
   const counters = { kept: 0, dropped: 0 };
   const handle = createHandler({
+    home,
     path: slackInboxPath(home),
     ownerUserId,
     counters,
+    log,
+    slackOpts: { home, logger: log, ...slackOpts },
   });
   let delay = initialMs;
   const wait = async (event, extra = {}) => {

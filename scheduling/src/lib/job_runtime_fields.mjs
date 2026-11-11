@@ -21,6 +21,7 @@ export function normalizeJobRuntimeFields(input, now) {
       last_failed_step: input.state?.last_failed_step || null,
       deferred_since: input.state?.deferred_since || null,
       deferred_reason: input.state?.deferred_reason || null,
+      held: input.state?.held || null,
       infrastructure_deferred_slot:
         input.state?.infrastructure_deferred_slot || null,
       infrastructure_deferred_reason:

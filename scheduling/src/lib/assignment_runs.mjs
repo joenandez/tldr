@@ -14,49 +14,7 @@ export function handleAssignmentRuns(flags, positionals, pretty, resolveJob) {
     process.exit(2);
   }
   if (flags["all-scopes"]) {
-    if (query) {
-      fail(
-        cmd,
-        "invalid_args",
-        "<id|name> cannot be combined with --all-scopes",
-        {},
-        pretty,
-      );
-      process.exit(2);
-    }
-    const result = summarizeAssignmentRunsAcrossScopes({
-      partial: Boolean(flags.partial),
-    });
-    if (!result.ok) {
-      output(
-        cmd,
-        false,
-        {
-          failed_scopes: result.failures,
-          scanned_scopes: result.scanned_scopes,
-        },
-        result.failures.map((entry) => ({
-          code: entry.code,
-          message: entry.detail,
-        })),
-        pretty,
-      );
-      process.exit(1);
-    }
-    output(
-      cmd,
-      true,
-      {
-        runs: result.runs,
-        scopes: result.scopes,
-        scanned_scopes: result.scanned_scopes,
-        ...(result.complete === false
-          ? { failed_scopes: result.failures, complete: false }
-          : {}),
-      },
-      [],
-      pretty,
-    );
+    handleGlobalRuns(flags, query, pretty);
     return;
   }
   if (!query) {
@@ -65,12 +23,74 @@ export function handleAssignmentRuns(flags, positionals, pretty, resolveJob) {
   }
   const cwd = typeof flags.cwd === "string" ? flags.cwd : process.cwd();
   const scope = resolveScope({ cwd });
-  const jobs = loadJobsReadOnly(scope).filter(isAssignment);
+  const includeTasks = Boolean(flags["include-tasks"]);
+  const jobs = loadJobsReadOnly(scope).filter(
+    (job) => includeTasks || isAssignment(job),
+  );
   const job = resolveJob(cmd, jobs, query, pretty);
   output(
     cmd,
     true,
     { runs: summarizeJobRuns({ scope, jobId: job.id, job }) },
+    [],
+    pretty,
+  );
+}
+
+function handleGlobalRuns(flags, query, pretty) {
+  const cmd = "runs";
+  if (flags["include-tasks"]) {
+    // The global projection feeds assignment-run surfaces; plain-job history
+    // is read per id.
+    fail(
+      cmd,
+      "invalid_flag",
+      "--include-tasks applies to runs <id>, not --all-scopes",
+      {},
+      pretty,
+    );
+    process.exit(2);
+  }
+  if (query) {
+    fail(
+      cmd,
+      "invalid_args",
+      "<id|name> cannot be combined with --all-scopes",
+      {},
+      pretty,
+    );
+    process.exit(2);
+  }
+  const result = summarizeAssignmentRunsAcrossScopes({
+    partial: Boolean(flags.partial),
+  });
+  if (!result.ok) {
+    output(
+      cmd,
+      false,
+      {
+        failed_scopes: result.failures,
+        scanned_scopes: result.scanned_scopes,
+      },
+      result.failures.map((entry) => ({
+        code: entry.code,
+        message: entry.detail,
+      })),
+      pretty,
+    );
+    process.exit(1);
+  }
+  output(
+    cmd,
+    true,
+    {
+      runs: result.runs,
+      scopes: result.scopes,
+      scanned_scopes: result.scanned_scopes,
+      ...(result.complete === false
+        ? { failed_scopes: result.failures, complete: false }
+        : {}),
+    },
     [],
     pretty,
   );

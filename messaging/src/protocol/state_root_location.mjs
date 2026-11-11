@@ -26,6 +26,11 @@ export function defaultStateRoot(home = os.homedir()) {
   return path.join(home, UMBRELLA_DIR, COMPONENT_DIR);
 }
 
+// The tldr agent root, where slack-channel-map.sqlite lives (src/lib/store.mjs tldrAgentHomeFor is the source of truth).
+export function agentHome({ env = process.env, home = os.homedir() } = {}) {
+  return env.TLDR_AGENT_HOME || path.join(home, UMBRELLA_DIR, 'agent');
+}
+
 export function legacyStateRoot(home = os.homedir()) {
   return path.join(home, LEGACY_DIR);
 }

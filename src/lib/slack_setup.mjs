@@ -28,6 +28,9 @@ export const SLACK_MANIFEST = Object.freeze(
     "bot_user": {
       "display_name": "tldr",
       "always_online": true
+    },
+    "agent_view": {
+      "agent_description": "Messages between you and your tldr agents"
     }
   },
   "oauth_config": {
@@ -37,7 +40,14 @@ export const SLACK_MANIFEST = Object.freeze(
         "groups:write",
         "groups:history",
         "im:write",
-        "im:history"
+        "im:history",
+        "files:read",
+        "files:write",
+        "reactions:read",
+        "reactions:write",
+        "chat:write.customize",
+        "assistant:write",
+        "app_mentions:read"
       ]
     }
   },
@@ -45,7 +55,10 @@ export const SLACK_MANIFEST = Object.freeze(
     "event_subscriptions": {
       "bot_events": [
         "message.groups",
-        "message.im"
+        "message.im",
+        "reaction_added",
+        "app_mention",
+        "app_home_opened"
       ]
     },
     "interactivity": {
@@ -60,7 +73,15 @@ export const SLACK_MANIFEST = Object.freeze(
 
 // Scopes, one reason each (docs.slack.dev/reference/scopes): chat:write posts;
 // groups:write creates private channels and invites; groups:history backs
-// message.groups; im:write opens the owner DM; im:history backs message.im.
+// message.groups; im:write opens the owner DM; im:history backs message.im;
+// files:read downloads the files the owner attaches to a message;
+// files:write lets an agent post files; reactions:read backs reaction_added
+// (owner approvals) and reactions:write lets an agent ack with a reaction;
+// chat:write.customize posts under each agent's name; assistant:write (with
+// features.agent_view) backs the agent working status; app_mentions:read
+// backs app_mention; Slack's manifest check asks agent_view apps to subscribe
+// app_home_opened (no scope). Granted ahead of the features that use them (ac-jfv.63)
+// so the owner reinstalls once.
 // The owner is the installing user from OAuth, so no users:read* scope.
 // groups:read is never needed (no info/list calls).
 

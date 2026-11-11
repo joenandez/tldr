@@ -53,7 +53,7 @@ function workCommandFields(work) {
   return {
     update_command: commands.update,
     complete_command: commands.complete,
-    delegate_command: commands.delegate,
+    delegate_command: commands.delegate, park_command: commands.park,
     ...(work.ack_pending === true ? { ack_command: commands.ack } : {}),
   };
 }

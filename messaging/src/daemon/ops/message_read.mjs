@@ -111,7 +111,9 @@ export const messageReadOp = {
           .get(messageId, principalId)
       : null;
 
-    if (!message || !receivedByPrincipal) {
+    // The sender may read its own outbound (a follow-up replies to it). A
+    // pure sender owns no delivery row, so the read below marks nothing.
+    if (!message || (!receivedByPrincipal && message.sender_principal_id !== principalId)) {
       throw new TightbeamError('permission_denied', 'read_inbox is not granted for this message');
     }
 

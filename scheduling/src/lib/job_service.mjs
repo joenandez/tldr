@@ -16,6 +16,7 @@ import {
   carryRuntimeState,
   mergeJobDefinition,
 } from "./job_reregistration.mjs";
+import { clearHeldWhenPaused } from "./held_release_expire.mjs";
 
 function resolveSource(opts) {
   return opts?.source || "cli";
@@ -818,7 +819,7 @@ function ensureMutatedJob(scope, patchOrJob, existing = null) {
       }
     : patchOrJob;
   const next = normalizeJob(merged, scope);
-  setNextIfMissing(next);
+  if (!existing || next.state.enabled !== false) setNextIfMissing(next); // a fired one-off stays fired (not paused)
   const validation = validateJob(next, { scope });
   if (!validation.valid) {
     throw Object.assign(new Error("job validation failed"), {
@@ -984,8 +985,6 @@ export async function deleteJob(scope, id, opts = {}) {
 
 export async function setJobPaused(scope, id, enabled, opts = {}) {
   const owner = scopeOwner(enabled ? "resume" : "pause");
-  const source = resolveSource(opts);
-  let emittedJob = null;
   const result = await mutateJobs(scope, owner, async (jobs) => {
     const job = jobs.find((entry) => entry.id === id);
     if (!job) {
@@ -995,8 +994,8 @@ export async function setJobPaused(scope, id, enabled, opts = {}) {
       });
     }
     job.state.enabled = enabled;
+    clearHeldWhenPaused(job);
     job.meta.updated_at = nowIso();
-    emittedJob = decorateJob(job);
     return { job: decorateJob(job) };
   });
   if (result.ok) {
@@ -1005,8 +1004,8 @@ export async function setJobPaused(scope, id, enabled, opts = {}) {
       scope_id: scope.scope_id,
       cwd: scope.cwd,
       job_id: id,
-      source,
-      data: { job: emittedJob },
+      source: resolveSource(opts),
+      data: { job: result.value.job },
     });
   }
   return result;
@@ -1024,6 +1023,7 @@ export async function bulkSetPausedByTag(scope, tag, enabled, opts = {}) {
       matched++;
       if (job.state.enabled !== enabled) {
         job.state.enabled = enabled;
+        clearHeldWhenPaused(job);
         job.meta.updated_at = nowIso();
         mutated++;
         mutatedJobs.push(decorateJob(job));

@@ -8,6 +8,7 @@ import {
 } from "./store.mjs";
 import { listRegisteredScopes } from "./scopes.mjs";
 import { deleteJob, setJobPaused } from "./job_service.mjs";
+import { nextHeldRetry } from "./held_state.mjs";
 
 function nowMs() {
   return process.env.HELM_NOW
@@ -52,6 +53,7 @@ function runnerLabel(job) {
 
 function lifecycleStatus(job, activeRun, atMs) {
   if (activeRun) return "running";
+  if (job?.state?.held) return "held";
   if (job?.state?.enabled !== true) return "paused";
   const nextMs = parseTimeMs(job?.state?.next_run_at);
   if (nextMs !== null && nextMs <= atMs) return "due";
@@ -67,6 +69,7 @@ function lifecycleStatus(job, activeRun, atMs) {
 
 function currentState(job, activeRun, atMs) {
   if (activeRun) return "running";
+  if (job?.state?.held) return "held";
   if (job?.state?.enabled !== true) return "paused";
   if (job?.state?.deferred_reason || job?.state?.infrastructure_deferred_reason)
     return "deferred";
@@ -99,6 +102,15 @@ function projectTask({ entry, scope, job, activeRun, atMs }) {
     lifecycle_status: lifecycleStatus(job, activeRun, atMs),
     current_state: currentState(job, activeRun, atMs),
     active_run: activeRun,
+    held: job?.state?.held
+      ? {
+          reason: job.state.held.reason ?? null,
+          provider: job.state.held.provider ?? null,
+          until: job.state.held.until ?? null,
+          deadline: job.state.held.deadline ?? null,
+          next_retry_at: nextHeldRetry(job.state.held),
+        }
+      : null,
     runner: runnerLabel(job),
     schedule: {
       type: job?.schedule?.type || null,

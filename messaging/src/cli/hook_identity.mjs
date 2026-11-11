@@ -225,7 +225,7 @@ export function normalizeLaunchMode(value) {
 /**
  * True when this process has a controlling terminal. Opening /dev/tty
  * fails with ENXIO when it does not, which is the same fact Helm reads
- * with `ps -o tty=` (helm/hooks/helm-capture-session-identity.sh:67-72) —
+ * with `ps -o tty=` (the retired helm capture-session-identity hook, lines 67-72) —
  * without spawning anything.
  */
 export function hasControllingTerminal() {
@@ -724,7 +724,7 @@ function resolveByEvidence(records, hintsOf, present) {
  * trust axis, read through `registry`'s records. Transcript path first for
  * the same reason session id prefers the payload: the runtime stamps it
  * per fire, whatever env wraps the spawn
- * (helm/hooks/helm-capture-session-identity.sh:38-44).
+ * (the retired helm capture-session-identity hook, lines 38-44).
  *
  * An explicit binding short-circuits ALL sniffing and is validated against
  * the registry — canonical ids, legacy aliases, and registered manifest

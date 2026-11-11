@@ -84,3 +84,35 @@ export function logReceiptAdmitted(logger, input, result) {
     status: "ok",
   });
 }
+
+// A dead endpoint has no receipt path until a session re-registers it
+// (endpoint.register revives a dead row). Say so, and give the agent CLI a
+// stable reason to re-register and retry on (agent_commands runAgentCommand).
+// Dead outranks a stale cached generation: registering fixes both, and the
+// stale text would hide the cause (round-2 finding 3).
+// Only the endpoint's own application and provider session may learn it is
+// dead (or that its id exists); anyone else gets the generic refusal.
+export function noReceiptRefusal({
+  endpoint,
+  appId,
+  providerSessionId,
+  messageId,
+  message,
+}) {
+  const own =
+    endpoint?.created_by_app_id === appId &&
+    endpoint.provider_session_id === providerSessionId;
+  if (!own || endpoint.state !== "dead")
+    return new TightbeamError("permission_denied", message);
+  return new TightbeamError(
+    "permission_denied",
+    "this session's endpoint is recorded dead, so it has no receipt path for this message until the session re-registers (its SessionStart hook does this); the message stays unread",
+    {
+      reason: "endpoint_dead",
+      endpoint_state: "dead",
+      // The dead custody observed: the CLI recovery revives exactly this one.
+      process_generation: endpoint.process_generation,
+      message_id: messageId,
+    },
+  );
+}

@@ -68,7 +68,11 @@ import {
   withIdempotency,
 } from './ops/message_shared.mjs';
 import { validateConversationMetadata } from './ops/conversation_create.mjs';
+import { createChannelDeliveries, requireOriginRoute } from './ops/origin_route.mjs';
 import { tightbeamCommandName } from '../cli/package_context.mjs';
+import { resolveOriginRouteId } from './origin_route_resolution.mjs';
+import { applyWakeEffects, readUpdateFields } from './update_wakes.mjs';
+import { DELIVERY_FAILED_ATTENTION_SOURCE as STAGED_FAILED_SOURCE, ensureHeldCoverage, ensureStagedFailureCoverage, hasActiveStagedResolution, heldRequestStop } from './held_request_stop.mjs';
 
 const COMPLETION_MODES = ['message_committed', 'delivery_confirmed'];
 const TERMINAL_OUTCOMES = ['success', 'failure', 'blocked'];
@@ -79,7 +83,7 @@ const TERMINAL_OUTCOMES = ['success', 'failure', 'blocked'];
 // (INV-02), and effects are never inferred from prose or extra fields.
 const EFFECT_FIELDS = {
   'open': ['target_principal_id', 'target_endpoint_id', 'completion_mode', 'sender_endpoint_id', 'process_generation'],
-  'update': ['obligation_id', 'generation', 'sender_endpoint_id', 'process_generation', 'acknowledgement'],
+  'update': ['obligation_id', 'generation', 'sender_endpoint_id', 'process_generation', 'acknowledgement', 'wake_at'],
   'handoff.offer': [
     'obligation_id',
     'generation',
@@ -175,12 +179,7 @@ export function validateEffect(declaredEffect) {
   effect.generation = requireEffectPositiveInteger(declaredEffect, 'generation');
   effect.sender_endpoint_id = requireEffectString(declaredEffect, 'sender_endpoint_id');
   effect.process_generation = requireEffectPositiveInteger(declaredEffect, 'process_generation');
-  if (type === 'update' && declaredEffect.acknowledgement !== undefined) {
-    if (declaredEffect.acknowledgement !== true) {
-      throw new TightbeamError('malformed_request', 'obligation_effect.acknowledgement must be true when present', { field: 'acknowledgement' });
-    }
-    effect.acknowledgement = true;
-  }
+  if (type === 'update') readUpdateFields(declaredEffect, effect);
   if (type === 'handoff.offer') {
     effect.target_principal_id = requireEffectString(declaredEffect, 'target_principal_id');
     effect.registration_key = requireEffectString(declaredEffect, 'registration_key');
@@ -260,7 +259,7 @@ export function requireActingEndpoint(db, { appId, senderPrincipalId, senderEndp
  * authorized through its one open attempt: the executing child's custodian
  * closes the chain head in the same transaction.
  */
-function requireCustody(db, { node, senderEndpointId }) {
+export function requireCustody(db, { node, senderEndpointId }) {
   if (node.role === 'root') {
     const ownedAttempt = db
       .prepare("SELECT 1 FROM obligations WHERE parent_id = ? AND role = 'attempt' AND status = 'open' AND custodian_endpoint_id = ?")
@@ -921,7 +920,7 @@ function routeChildResultDelivery(db, { conversationId, messageId, senderPrincip
 export const DELIVERY_CONFIRMED_ROUTE_REASON = 'close.delivery_confirmed';
 
 /** Attention source for a staged report whose exact delivery failed (DELIVERY-FAIL). */
-export const DELIVERY_FAILED_ATTENTION_SOURCE = 'delivery.failed';
+export const DELIVERY_FAILED_ATTENTION_SOURCE = STAGED_FAILED_SOURCE;
 
 /**
  * A root's completion mode, read from its own immutable open-effect audit.
@@ -971,27 +970,6 @@ function immutableOriginForRoot(db, rootId) {
         WHERE me.effect = 'open' AND me.obligation_id = ?`,
     )
     .get(rootId) ?? null;
-}
-
-/**
- * True while a staged terminal report still has an ACTIVE (pending/claimed)
- * typed delivery for this root. A failed delivery drops out of the predicate:
- * the candidate stays as audit and a later close.fulfilled may stage a fresh
- * one (LC-D05 "terminal candidate is retained for audit").
- */
-function hasActiveStagedResolution(db, rootId) {
-  return Boolean(
-    db
-      .prepare(
-        `SELECT 1
-           FROM deliveries d
-           JOIN message_effects me ON me.message_id = d.message_id AND me.effect IN ('close.fulfilled', 'close.cancelled') AND me.obligation_id = ?
-          WHERE d.route_reason = ? AND d.source_obligation_id = ?
-            AND d.state IN ('pending', 'claimed')
-          LIMIT 1`,
-      )
-      .get(rootId, DELIVERY_CONFIRMED_ROUTE_REASON, rootId),
-  );
 }
 
 function stageDeliveryConfirmedTerminal(db, { node, messageId, effect, now, origin }) {
@@ -1086,10 +1064,10 @@ export function closeStagedDeliveryConfirmedChain(db, { deliveryId, now }) {
  * DELIVERY-FAIL's leave_delivery_confirmed_root_open + mark_root_attention
  * writes, run INSIDE the delivery.complete transaction: the root stays open
  * and actionable, and one visibility mark lands on it (the same upsert shape
- * as the custody reconciler's, with its own attention_source). Inert for any
- * non-typed delivery and for a root that already closed.
+ * as the custody reconciler's, with its own attention_source; a held-block row
+ * keeps its source, so its budget stays exact). Inert for a non-typed delivery or closed root.
  */
-export function markStagedDeliveryFailedAttention(db, { deliveryId, now }) {
+export function markStagedDeliveryFailedAttention(db, { deliveryId, now, logger }) {
   const markedAt = now instanceof Date ? now.toISOString() : now;
   const delivery = db.prepare('SELECT id, route_reason, source_obligation_id FROM deliveries WHERE id = ?').get(deliveryId);
   if (!delivery || delivery.route_reason !== DELIVERY_CONFIRMED_ROUTE_REASON || !delivery.source_obligation_id) {
@@ -1103,10 +1081,11 @@ export function markStagedDeliveryFailedAttention(db, { deliveryId, now }) {
     `INSERT INTO root_attention (root_obligation_id, stop_block_count, attention_source, first_marked_at, last_block_at, updated_at)
        VALUES (?, 1, '${DELIVERY_FAILED_ATTENTION_SOURCE}', ?, ?, ?)
        ON CONFLICT(root_obligation_id) DO UPDATE SET
-         attention_source = excluded.attention_source,
+         attention_source = CASE WHEN attention_source LIKE 'session.stop.blocked%' THEN attention_source ELSE excluded.attention_source END,
          last_block_at = excluded.last_block_at,
          updated_at = excluded.updated_at`,
   ).run(delivery.source_obligation_id, markedAt, markedAt, markedAt);
+  ensureStagedFailureCoverage(db, { rootId: delivery.source_obligation_id, now: markedAt, logger });
   return { root_obligation_id: delivery.source_obligation_id };
 }
 
@@ -1361,7 +1340,8 @@ function validateAwaitReply(db, { awaitReply, sendBranch, effect, channelRoutes,
     endpoint.principal_id === senderPrincipalId &&
     endpoint.state !== 'closed' &&
     endpoint.process_generation === effect.process_generation;
-  if (hasExactAgentSender && channelRoutes.some(routeSupportsReply)) return true;
+  // Explicit no-reply (any send): the sender does not wait; the reply binding stays so the user can still reply.
+  if (awaitReply !== false && hasExactAgentSender && channelRoutes.some(routeSupportsReply)) return true;
 
   if (!awaitReply) return false;
   if (sendBranch !== 'agent' || effect.type !== 'none') {
@@ -1432,11 +1412,11 @@ function resolveChannelRoutes(db, { selectors, conversationId, inReplyToMessageI
     if (!inReplyToMessageId) {
       throw new TightbeamError('origin_unavailable', 'origin selection requires in_reply_to_message_id', { field: 'in_reply_to_message_id' });
     }
-    const inbound = db.prepare('SELECT origin_channel_route_id FROM messages WHERE id = ? AND conversation_id = ?').get(inReplyToMessageId, conversationId);
-    if (!inbound?.origin_channel_route_id) {
+    const originRouteId = resolveOriginRouteId(db, { conversationId, inReplyToMessageId });
+    if (!originRouteId) {
       throw new TightbeamError('origin_unavailable', 'the replied-to message has no trusted channel origin', { field: 'in_reply_to_message_id' });
     }
-    const route = db.prepare(`${CHANNEL_ROUTE_SELECT} AND r.id = ?`).get(inbound.origin_channel_route_id);
+    const route = db.prepare(`${CHANNEL_ROUTE_SELECT} AND r.id = ?`).get(originRouteId);
     if (!route || !availableRoute(route) || !routeSupportsSend(route)) {
       throw new TightbeamError('origin_unavailable', 'the replied-to channel origin is unavailable', { field: 'in_reply_to_message_id' });
     }
@@ -1936,6 +1916,7 @@ export function commitMessageWithEffect(context, connection, request) {
           recipientEndpointId: exactRecipientEndpointId,
           exactRoute: exactRecipientEndpointId === null ? null : routeOf(requestedRecipientEndpointId, exactRecipientEndpointId),
         }) ?? {};
+      applyWakeEffects(context.db, { effect, now });
 
       // Delivery routing per transitions.yaml: acceptance wakes no one;
       // writers that route their own single wake (decline, CHILD-RESULT)
@@ -1955,19 +1936,16 @@ export function commitMessageWithEffect(context, connection, request) {
             ? ACK_PROVIDER_CONFIRMED_ROUTE_REASON
             : null;
         const sourceObligationId = writerResult.stageDeliveryConfirmedRootId ?? writerResult.stageAcknowledgementRootId ?? null;
-        if (writerResult.stageTerminalOriginRouteId && (channelRoutes.length !== 1 || channelRoutes[0].id !== writerResult.stageTerminalOriginRouteId)) {
-          throw new TightbeamError('obligation_conflict', 'a user terminal outcome must use its immutable origin route', { field: 'channel_selectors' });
-        }
-        if (writerResult.acknowledgementOriginRouteId && (channelRoutes.length !== 1 || channelRoutes[0].id !== writerResult.acknowledgementOriginRouteId)) {
-          throw new TightbeamError('obligation_conflict', 'an acknowledgement must use its immutable user origin route', { field: 'channel_selectors' });
-        }
-        ({ liveDeliveries } = createDeliveriesForChannelRoutes(context.db, {
+        const originRouteId = writerResult.stageTerminalOriginRouteId ?? writerResult.acknowledgementOriginRouteId ?? null;
+        requireOriginRoute(channelRoutes, originRouteId);
+        ({ liveDeliveries } = createChannelDeliveries(context.db, {
           conversationId,
           messageId,
           routes: channelRoutes,
           replyTargetEndpointId: effect.sender_endpoint_id ?? null,
           routeReason,
           sourceObligationId,
+          originRouteId,
         }));
         if (createsReplyWait) {
           replyWaitCount = createReplyWaitsForAwaitedMessage(context.db, { messageId, now });
@@ -2132,7 +2110,7 @@ function validateRecoveryRequest(request) {
  * principal — the same non-leaking isolation rule as close.cancelled: an
  * unknown and a foreign-app root are indistinguishable.
  */
-function requireRecoverableRoot(db, { appId, rootObligationId }) {
+export function requireRecoverableRoot(db, { appId, rootObligationId }) {
   const root = db.prepare('SELECT * FROM obligations WHERE id = ?').get(rootObligationId);
   const ownerApp = root && db.prepare('SELECT created_by_app_id FROM principals WHERE id = ?').get(root.accountable_principal_id);
   if (!root || !ownerApp || ownerApp.created_by_app_id !== appId) {
@@ -2391,7 +2369,7 @@ function inheritStrandedRoots(context, { appId, admittedRootId, target, predeces
   return inherited;
 }
 
-function runRecoveryCommand(context, connection, rawRequest, operation) {
+export function runRecoveryCommand(context, connection, rawRequest, operation, { wrap = (body) => body } = {}) {
   const request = validateRecoveryRequest(rawRequest);
 
   const hash = payloadHash({
@@ -2409,7 +2387,7 @@ function runRecoveryCommand(context, connection, rawRequest, operation) {
   const startedAt = Date.now();
   let outcome;
   try {
-    outcome = withTransaction(context.db, () => {
+    outcome = withTransaction(context.db, wrap(() => {
       const root = requireRecoverableRoot(context.db, { appId: connection.appId, rootObligationId: request.root_obligation_id });
       requireOpen(root);
       fenceGeneration(root, request.root_generation);
@@ -2472,7 +2450,7 @@ function runRecoveryCommand(context, connection, rawRequest, operation) {
 
       const liveDeliveries = [admitted, ...inherited].flatMap((entry) => entry.liveDeliveries);
       return { result: resultPayload, conversationId: root.conversation_id, liveDeliveries };
-    });
+    }));
   } catch (error) {
     if (isUniqueConstraintError(error)) {
       // Two competing commands passed their pre-checks concurrently; the
@@ -2688,7 +2666,7 @@ function recordBlockAttention(db, { rootId, now, listenerGeneration = null }) {
     `INSERT INTO root_attention (root_obligation_id, stop_block_count, attention_source, first_marked_at, last_block_at, updated_at)
        VALUES (?, 1, ?, ?, ?, ?)
        ON CONFLICT(root_obligation_id) DO UPDATE SET
-         stop_block_count = stop_block_count + 1,
+         stop_block_count = stop_block_count + CASE WHEN attention_source = '${DELIVERY_FAILED_ATTENTION_SOURCE}' THEN 0 ELSE 1 END,
          attention_source = excluded.attention_source,
          last_block_at = excluded.last_block_at,
          updated_at = excluded.updated_at`,
@@ -2714,7 +2692,7 @@ function activeListenerForStop(db, { endpointId, processGeneration }) {
     .get(endpointId, processGeneration);
 }
 
-function oldestUnreadDeliveryForStop(db, { endpointId, processGeneration }) {
+export function oldestUnreadDeliveryForStop(db, { endpointId, processGeneration, excludeRouteReasons = [] }) {
   return db
     .prepare(
       `SELECT d.id AS delivery_id, d.message_id
@@ -2731,6 +2709,7 @@ function oldestUnreadDeliveryForStop(db, { endpointId, processGeneration }) {
                AND l.endpoint_id = d.endpoint_id AND l.process_generation = ?
           )
           AND NOT ${closedWorkNoticeSql('d')}
+          AND (d.route_reason IS NULL OR d.route_reason NOT IN (SELECT value FROM json_each(?)))
         ORDER BY d.created_at ASC, d.id ASC
         LIMIT 1`,
     )
@@ -2739,7 +2718,7 @@ function oldestUnreadDeliveryForStop(db, { endpointId, processGeneration }) {
     // A delivery this process generation already acked was notified once;
     // the T+30 retry and availability takeover bound it from here, so Stop
     // must not wake the session for it again (protocol.md, bounded notices).
-    .get(endpointId, processGeneration);
+    .get(endpointId, processGeneration, JSON.stringify(excludeRouteReasons));
 }
 
 function replyWaitForDelivery(db, { endpointId, processGeneration, deliveryId }) {
@@ -2829,17 +2808,22 @@ function lastDeliveredListenerGeneration(db, { endpointId, processGeneration }) 
 // resumer — its registration stamped the launch token the resumer minted —
 // so it is a headless turn even when the SESSION is interactive (a closed
 // pane resumed in the background keeps launch_mode interactive). A headless
-// process must not park its Stop for hours; it finishes, exits, and the
-// owner reconciler turns that exit into the next resumable state.
+// process with no background work must not park its Stop for hours; it
+// finishes, exits, and the owner reconciler turns that exit into the next
+// resumable state.
 function isHeadlessDaemonProcess(endpoint) {
   return typeof endpoint.owner_launch_token === 'string' && endpoint.owner_launch_token.length > 0;
 }
 
-// subagent-safe-delivery W2: a fresh headless run (non_interactive, not
-// daemon-resumed) whose Stop reports background work in flight parks
-// without tachyon arming, so a message arriving mid-wait still wakes it.
+// subagent-safe-delivery W2: a headless run (non_interactive) whose Stop
+// reports background work in flight parks without tachyon arming, so a
+// message arriving mid-wait still wakes it. ac-jfv.5: this includes
+// daemon-started runs; Claude Code keeps their process alive for the
+// background work, and the resumer defers every wake on that live pid.
+// A daemon resume of an interactive session keeps launch_mode interactive
+// and still allows (out of ac-jfv.5 scope).
 function isBackgroundWaitPark(endpoint, processGeneration, backgroundWait) {
-  return backgroundWait && endpoint.launch_mode === 'non_interactive' && !isHeadlessDaemonProcess(endpoint) && Number.isInteger(processGeneration);
+  return backgroundWait && endpoint.launch_mode === 'non_interactive' && Number.isInteger(processGeneration);
 }
 
 // A session never stops with an unread message. The headless and
@@ -2870,7 +2854,7 @@ function unreadStopBlock(db, { endpoint, processGeneration, trace }) {
 function explicitWaitStop(db, { appId, endpoint, processGeneration, request, now, trace, obligationIds = [] }) {
   if (request.wait_mode !== 'explicit' || endpoint.state === 'retiring' || !Number.isInteger(processGeneration)) return null;
   const headless = endpoint.launch_mode === 'non_interactive' || isHeadlessDaemonProcess(endpoint); // the resumer restarts it when a reply lands
-  const result = unreadStopBlock(db, { endpoint, processGeneration, trace }) ?? explicitWaitGuard(db, { appId, endpoint, processGeneration, request, pending: headless ? [] : pendingReplyExpectations(db, endpoint, now), callerAction: callerActionForPendingOffer(db, endpoint, endpoint.principal_id) }, tightbeamCommandName());
+  const result = unreadStopBlock(db, { endpoint, processGeneration, trace }) ?? explicitWaitGuard(db, { appId, endpoint, processGeneration, request, trace, pending: headless ? [] : pendingReplyExpectations(db, endpoint, now), callerAction: callerActionForPendingOffer(db, endpoint, endpoint.principal_id) }, tightbeamCommandName());
   if (result) trace.reason ??= result.decision === 'allow' ? 'explicit_allow' : 'pending_reply';
   if (result?.decision !== 'allow') return result;
   trace.ended_listeners = endUnsupportedTachyonListeners(db, { endpointId: endpoint.id, processGeneration, now, ...(headless ? { reason: 'background_wait_ended' } : {}) });
@@ -2956,9 +2940,10 @@ function runSessionStop(context, connection, rawRequest) {
       const untracked = untrackedOffers(context.db, endpoint.id);
       const now = new Date().toISOString();
 
+      const held = () => heldRequestStop(context.db, { endpoint, now, trace, cap: STOP_BLOCK_CAP, rootOf: chainRootOf, recordBlock: recordBlockAttention, unreadFirst: () => Number.isInteger(request.process_generation) && !!unreadStopBlock(context.db, { endpoint, processGeneration: request.process_generation, trace: {} }), logger: context.logger });
       let resultPayload;
       if (untracked.length === 0) {
-        resultPayload = explicitWaitStop(context.db, { appId: connection.appId, endpoint, processGeneration: request.process_generation, request, now, trace }) ?? parkEligibleEndpoint(context.db, { endpoint, processGeneration: request.process_generation, now, backgroundWait: request.background_wait, trace });
+        resultPayload = held() ?? explicitWaitStop(context.db, { appId: connection.appId, endpoint, processGeneration: request.process_generation, request, now, trace }) ?? parkEligibleEndpoint(context.db, { endpoint, processGeneration: request.process_generation, now, backgroundWait: request.background_wait, trace });
         replyDiagnosticOutcomes.push(
           resultPayload.decision === 'park'
             ? 'parked'
@@ -2982,7 +2967,7 @@ function runSessionStop(context, connection, rawRequest) {
           for (const entry of counts) {
             context.db.prepare('UPDATE root_attention SET last_block_at = ?, updated_at = ? WHERE root_obligation_id = ?').run(now, now, entry.rootId);
           }
-          resultPayload = explicitWaitStop(context.db, { appId: connection.appId, endpoint, processGeneration: request.process_generation, request, now, trace, obligationIds: untracked.map((offer) => offer.id) }) ?? parkEligibleEndpoint(context.db, {
+          resultPayload = held() ?? explicitWaitStop(context.db, { appId: connection.appId, endpoint, processGeneration: request.process_generation, request, now, trace, obligationIds: untracked.map((offer) => offer.id) }) ?? parkEligibleEndpoint(context.db, {
             endpoint,
             processGeneration: request.process_generation,
             now,
@@ -3002,6 +2987,9 @@ function runSessionStop(context, connection, rawRequest) {
           resultPayload = { decision: 'block', obligation_ids: untracked.map((offer) => offer.id), reason: renderUnsafeReason(untracked) };
         }
       }
+
+      // Invariant D: a Stop that lets a held request go leaves a pending wake for it.
+      if (resultPayload.decision !== 'block') ensureHeldCoverage(context.db, { endpoint, now, rootOf: chainRootOf, logger: context.logger });
 
       context.db
         .prepare(
@@ -3024,9 +3012,8 @@ function runSessionStop(context, connection, rawRequest) {
     throw error;
   }
 
-  if (trace.unread_escape) {
-    context.logger?.warn?.({ event: 'session_stop_unread_escape', params: { endpoint_id: request.endpoint_id, process_generation: request.process_generation, ...trace.unread_escape }, result: 'allowed_with_unread', status: 'warn' });
-  }
+  if (trace.unread_escape) context.logger?.warn?.({ event: 'session_stop_unread_escape', params: { endpoint_id: request.endpoint_id, process_generation: request.process_generation, ...trace.unread_escape }, result: 'allowed_with_unread', status: 'warn' });
+  if (trace.explicit_cap_allow) context.logger?.warn?.({ event: 'explicit_wait_guard_cap_allow', params: { process_generation: request.process_generation, ...trace.explicit_cap_allow }, result: 'allowed_without_wait', status: 'warn' });
   const forced = outcome.decision === 'allow' && outcome.obligation_ids.length > 0;
   for (const replyDiagnosticOutcome of replyDiagnosticOutcomes) replyContinuityDiagnostic(context.logger, replyDiagnosticOutcome);
   context.logger?.info({

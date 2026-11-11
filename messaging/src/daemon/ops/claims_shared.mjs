@@ -59,6 +59,19 @@ export const MAX_DELIVERY_CLAIM_ATTEMPTS = 8;
 export const DELIVERY_RETRY_BASE_MS = 30_000;
 export const DELIVERY_RETRY_MAX_MS = 15 * 60 * 1000;
 
+// A claimant cut off before it sent anything (a daemon phase abort on an
+// overloaded host) releases with this outcome: the claim gives its attempt
+// back and auto-select offers the delivery again at once (ac-jfv.87). Only
+// delivery.release accepts it; a claimant that may have sent keeps the
+// plain release, which counts.
+export const UNSENT_ABORT_OUTCOME = 'aborted_unsent';
+// The stored outcome carries the run of unsent aborts that ends at that claim ("aborted_unsent:3"),
+// so the next release extends it from the previous claim instead of recounting the history.
+export const isUnsentOutcome = (outcome) => typeof outcome === 'string' && outcome.startsWith(UNSENT_ABORT_OUTCOME);
+export const unsentRun = (outcome) => (isUnsentOutcome(outcome) ? Number(outcome.split(':')[1]) || 1 : 0);
+// A delivery whose claimants abort unsent this many times in a row is logged (never failed).
+export const UNSENT_ABORT_WARN_EVERY = 10;
+
 /** Wait after the attempts-th unfinished claim before auto-select offers the delivery again. */
 export function deliveryRetryDelayMs(attempts) {
   if (!Number.isInteger(attempts) || attempts <= 0) return 0;
@@ -144,7 +157,7 @@ export function issueReplyBindingToken(db, { bindingId, now }) {
  * one (alreadyResolved: true, row.outcome is 'completed' or 'failed') so
  * the caller can short-circuit an idempotent replay.
  */
-export function verifyClaimToken(db, { resourceType, resourceId, token, now }) {
+export function verifyClaimToken(db, { resourceType, resourceId, token, now, allowUnreapedExpiry = false }) {
   if (typeof token !== 'string' || token.length === 0) {
     throw new TightbeamError('permission_denied', 'a claim token is required');
   }
@@ -157,7 +170,9 @@ export function verifyClaimToken(db, { resourceType, resourceId, token, now }) {
   }
 
   if (row.state === 'claimed') {
-    if (Date.parse(row.lease_expires_at) <= now.getTime()) {
+    // An unsent-abort release may land after the lease on a slow host; while
+    // the row is still unreaped nobody else holds the delivery, so it is honored.
+    if (!allowUnreapedExpiry && Date.parse(row.lease_expires_at) <= now.getTime()) {
       throw new TightbeamError('claim_expired', 'the claim lease has expired');
     }
     return { row, alreadyResolved: false };
@@ -202,9 +217,12 @@ export function reapExpired(db, resourceType, now) {
  * 'failed', or null for a voluntary release with no recorded outcome).
  */
 export function releaseClaim(db, { row, outcome, now }) {
-  db.prepare("UPDATE claims SET state = 'released', outcome = ?, released_at = ? WHERE id = ?").run(
+  // An unsent abort gives its attempt back, so the next claim restarts from the prior count.
+  const attemptCount = isUnsentOutcome(outcome) ? Math.max(row.attempt_count - 1, 0) : row.attempt_count;
+  db.prepare("UPDATE claims SET state = 'released', outcome = ?, released_at = ?, attempt_count = ? WHERE id = ?").run(
     outcome,
     now.toISOString(),
+    attemptCount,
     row.id,
   );
 }

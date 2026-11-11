@@ -1,5 +1,3 @@
-import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
 import {
   deriveMemoryAfterRun,
   spawnWrappedCommand,
@@ -10,75 +8,9 @@ import {
   positiveIntegerEnv,
 } from "./executor_process_utils.mjs";
 import { writeAgentRunSession } from "./agent_run_session.mjs";
+import { launchLogFileCommandUntilStarted } from "./executor_start_logfile.mjs";
 
 const DEFAULT_CAPTURE_BYTES = 64 * 1024;
-
-function initializeLogFiles(
-  logPaths = null,
-  { append = false, env = process.env } = {},
-) {
-  if (!logPaths) return null;
-  mkdirSync(dirname(logPaths.stdout), { recursive: true });
-  if (!append) {
-    writeFileSync(logPaths.stdout, "", "utf8");
-    writeFileSync(logPaths.stderr, "", "utf8");
-  }
-  const state = {
-    maxBytes: positiveIntegerEnv("HELM_LOG_MAX_BYTES", null, env),
-    stdoutBytes: 0,
-    stderrBytes: 0,
-    stdoutTruncated: false,
-    stderrTruncated: false,
-    errors: [],
-  };
-  const stdout = createWriteStream(logPaths.stdout, { flags: "a" });
-  const stderr = createWriteStream(logPaths.stderr, { flags: "a" });
-  stdout.on("error", (err) =>
-    state.errors.push({
-      stream: "stdout",
-      code: err?.code || "log_write_failed",
-      message: err?.message || String(err),
-    }),
-  );
-  stderr.on("error", (err) =>
-    state.errors.push({
-      stream: "stderr",
-      code: err?.code || "log_write_failed",
-      message: err?.message || String(err),
-    }),
-  );
-  return { stdout, stderr, state };
-}
-
-function closeLogStreams(streams) {
-  if (!streams) return;
-  streams.stdout.end();
-  streams.stderr.end();
-}
-
-function appendLogChunk(streams, name, chunk) {
-  if (!streams || streams.state.errors.length > 0) return;
-  const stream = streams[name];
-  if (!stream) return;
-  const key = name === "stdout" ? "stdoutBytes" : "stderrBytes";
-  const truncatedKey =
-    name === "stdout" ? "stdoutTruncated" : "stderrTruncated";
-  const maxBytes = streams.state.maxBytes;
-  let buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk));
-  if (maxBytes !== null) {
-    const remaining = maxBytes - streams.state[key];
-    if (remaining <= 0) {
-      streams.state[truncatedKey] = true;
-      return;
-    }
-    if (buffer.length > remaining) {
-      buffer = buffer.subarray(0, remaining);
-      streams.state[truncatedKey] = true;
-    }
-  }
-  streams.state[key] += buffer.length;
-  stream.write(buffer);
-}
 
 export function launchCommandUntilStarted({
   command,
@@ -95,8 +27,22 @@ export function launchCommandUntilStarted({
   if (typeof command !== "string" || command.trim() === "") {
     throw new TypeError("command is required");
   }
+  // With a run log the child owns the log fds, so it outlives the launcher (Skyhook handoff).
+  if (logPaths) {
+    return launchLogFileCommandUntilStarted({
+      command,
+      args,
+      cwd,
+      timeoutSec,
+      stdinText,
+      extraEnv,
+      memoryMode,
+      onSpawn,
+      logPaths,
+      startupWindowMs,
+    });
+  }
   const started = Date.now();
-  let logStreams = initializeLogFiles(logPaths, { env: extraEnv });
   const { child, evidence: wrapperEvidence } = spawnWrappedCommand({
     command,
     args,
@@ -132,8 +78,7 @@ export function launchCommandUntilStarted({
     wrapperEvidence.memory = memory;
     return memory;
   };
-  const currentOutput = () =>
-    outputMetadata(stdoutCapture, stderrCapture, logStreams);
+  const currentOutput = () => outputMetadata(stdoutCapture, stderrCapture);
   let startupTimer = null;
   const finishStart = (payload) => {
     if (startSettled) return;
@@ -154,8 +99,6 @@ export function launchCommandUntilStarted({
       output: currentOutput(),
       terminal,
       detach() {
-        closeLogStreams(logStreams);
-        logStreams = null;
         child.unref?.();
         child.stdout?.unref?.();
         child.stderr?.unref?.();
@@ -166,7 +109,6 @@ export function launchCommandUntilStarted({
   const finishTerminal = (payload) => {
     if (terminalSettled) return;
     terminalSettled = true;
-    closeLogStreams(logStreams);
     const memory = currentMemory();
     terminalResolve({
       ...payload,
@@ -178,14 +120,8 @@ export function launchCommandUntilStarted({
       output: currentOutput(),
     });
   };
-  child.stdout.on("data", (d) => {
-    stdoutCapture.append(d);
-    appendLogChunk(logStreams, "stdout", d);
-  });
-  child.stderr.on("data", (d) => {
-    stderrCapture.append(d);
-    appendLogChunk(logStreams, "stderr", d);
-  });
+  child.stdout.on("data", (d) => stdoutCapture.append(d));
+  child.stderr.on("data", (d) => stderrCapture.append(d));
   child.on("error", (err) => {
     const error = String(err.message || err);
     finishStart({ status: "failure", signal_source: "spawn_error", error });

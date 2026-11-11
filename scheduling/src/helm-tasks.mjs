@@ -13,6 +13,7 @@ import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { parseArgs, commandName, output, fail } from "./lib/json_io.mjs";
 import { TASKS_COMMAND } from "./lib/helm_context.mjs";
+import { RELEASE_HELD_HELP, runReleaseHeld } from "./cli/release_held.mjs";
 import {
   ensureWorkspaceConfigDir,
   helmHome,
@@ -173,6 +174,7 @@ function usage() {
       "clone",
       "pause",
       "resume",
+      "release-held",
       "list",
       "list-all",
       "get",
@@ -280,6 +282,7 @@ const HELP_COMMANDS = [
   "delete",
   "pause",
   "resume",
+  "release-held",
   "service status",
   "service update",
   "system migrate-home",
@@ -920,6 +923,7 @@ const HELP_CATALOG = {
     ],
     notes: [],
   },
+  "release-held": RELEASE_HELD_HELP,
   onboard: {
     command: "onboard",
     summary:
@@ -1845,6 +1849,10 @@ async function run() {
     return;
   }
 
+  if (cmd === "release-held") {
+    await runReleaseHeld({ flags, pretty });
+    return;
+  }
   const scope = resolveScope({
     cwd:
       flags.scope || flags.cwd || process.env.HELM_SCOPE_CWD || process.cwd(),
@@ -3082,36 +3090,12 @@ async function run() {
       );
       process.exit(2);
     }
-    if (tag && !id) {
-      let result;
-      try {
-        result = await bulkSetPausedByTag(scope, tag, cmd === "resume");
-      } catch (err) {
-        fail(
-          cmd,
-          err.code || "runtime_error",
-          String(err.message || err),
-          withScope(scope),
-          pretty,
-        );
-        process.exit(err.exitCode || 1);
-      }
-      if (!result.ok) {
-        fail(
-          cmd,
-          "scope_busy",
-          "scope mutation already in progress",
-          withScope(scope, { lock: result.details }),
-          pretty,
-        );
-        process.exit(1);
-      }
-      output(cmd, true, withScope(scope, result.value), [], pretty);
-      return;
-    }
     let result;
     try {
-      result = await setJobPaused(scope, id, cmd === "resume");
+      result =
+        tag && !id
+          ? await bulkSetPausedByTag(scope, tag, cmd === "resume")
+          : await setJobPaused(scope, id, cmd === "resume");
     } catch (err) {
       fail(
         cmd,

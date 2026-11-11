@@ -4,6 +4,7 @@ import {
   infrastructureDeferredSlot,
 } from "./dispatch_infrastructure_marker.mjs";
 import { persistRuntimePatch } from "./dispatch_runtime_persistence.mjs";
+import { stableStringify } from "./job_reregistration.mjs";
 import { computeNextAfterRun } from "./schedule_eval.mjs";
 
 export {
@@ -66,7 +67,7 @@ export function applyTerminalLedgerSkip(job, handle, scheduledAt) {
 export function runtimePatchFor(
   job,
   consumedInfrastructureSlot = null,
-  observedSourceSlot = undefined,
+  { observedSourceSlot = undefined, runSlot = null } = {},
 ) {
   const consumedSlot = consumedInfrastructureSlot || null;
   return {
@@ -91,7 +92,21 @@ export function runtimePatchFor(
     meta_updated_at: job.meta?.updated_at || nowIso(),
     consumed_phase_aborted_slot: consumedSlot,
     observed_source_slot: observedSourceSlot,
+    run_schedule: stableStringify(job.schedule), // what this run fired: a once-run settles fired (fgp.66)
+    run_slot: runSlot || null, // the slot it fired; null = none (an idle batch entry)
   };
+}
+
+/** Completion patch: runtimePatchFor plus this run's own hold outcome (set, or cleared on success/unholdable). */
+export function completionPatchFor(job, consumedSlot, { hold, scheduledAt }) {
+  const patch = runtimePatchFor(job, consumedSlot, {
+    runSlot: scheduledAt,
+  });
+  const held = hold?.decision === "held" ? job.state.held : null;
+  // A hold still in memory that this run did not set belongs to another slot: leave it alone.
+  if (held || !job.state.held) patch.state.held = held;
+  patch.held_slot = Date.parse(scheduledAt);
+  return patch;
 }
 
 function ordinaryDeferralPatchFor(job, observedSourceSlot = undefined) {
@@ -192,7 +207,10 @@ export async function persistInprocScheduleDecision(
       baselineUpdatedAt,
       ordinaryDeferral
         ? ordinaryDeferralPatchFor(decision.job, sourceSlot)
-        : runtimePatchFor(decision.job, consumedSlot, sourceSlot),
+        : runtimePatchFor(decision.job, consumedSlot, {
+            observedSourceSlot: sourceSlot,
+            runSlot: consumedSlot,
+          }),
       { durable: true },
     );
     if (!result.ok) {

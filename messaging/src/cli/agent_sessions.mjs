@@ -273,7 +273,7 @@ function collapsedLines(rows, now, folderLimit) {
 export function renderSessions(result, { now = Date.now(), youShortId = null, collapse = false } = {}) {
   const sessions = result.sessions ?? [];
   const more = result.truncated ? ['More sessions exist than shown; narrow with --runtime.'] : [];
-  if (!sessions.some((row) => !row.you)) return ['No other agent sessions. Start one with --to new:<runtime>:<cwd>.', ...more].join('\n');
+  if (!sessions.some((row) => !row.you)) return ['No other agent sessions. Start one with --to new:<runtime>:<cwd> or --to academy:<name>.', ...more].join('\n');
   const you = result.you ?? {};
   const label = result.includes_ended ? 'live, resumable, or ended' : 'live or resumable';
   const lines = [`Sessions · ${sessions.length} ${label} · you are ${you.runtime ?? 'agent'} ${youShortId ?? shortId(you.session_id)}`.trimEnd()];
@@ -291,6 +291,56 @@ export function renderSessions(result, { now = Date.now(), youShortId = null, co
     }
   }
   if (collapsed) lines.push("List one folder's sessions with --cwd <folder>; --all lists every session.");
-  lines.push(...more, 'Address one with --to session:<id>. Start a new agent with --to new:<runtime>:<cwd>.');
+  lines.push(...more, 'Address one with --to session:<id>. Start a new agent with --to new:<runtime>:<cwd> or --to academy:<name>.');
   return lines.join('\n');
+}
+
+// Refusals an agent command answers by re-registering the session once and retrying.
+export const ENDPOINT_DEAD_NEXT = 'Restart this agent session so its SessionStart hook re-registers it; the message stays unread until it does.';
+
+function staleGenerationConflict(error) {
+  if (error?.code !== 'obligation_conflict') return false;
+  if (error?.details?.reason === 'process_generation_stale') return true;
+  return /process generation|generation.*stale|stale.*generation/i.test(String(error?.message ?? ''));
+}
+
+// The daemon names a dead endpoint (message.receive); only registering revives it.
+const endpointDead = (error) => error?.code === 'permission_denied' && error.details?.reason === 'endpoint_dead';
+
+export const refreshableRefusal = (error) => staleGenerationConflict(error) || endpointDead(error);
+
+// Re-register once and replay the command. One boundary event per attempt says
+// how it ended: `recovered`, `refused` (the daemon found another process had
+// already revived the endpoint, so nothing was displaced) or `failed`.
+export async function refreshAndRetry({ error, session, command, refreshSession, retry }) {
+  const startedAt = Date.now();
+  const params = { command, reason: error.details?.reason ?? error.code, endpoint_id: session.endpoint_id, process_generation: session.process_generation };
+  try {
+    // A dead endpoint is revived only at the generation the daemon reported.
+    const refreshed = await refreshSession({ reviveDeadGeneration: error.details?.reason === 'endpoint_dead' ? error.details.process_generation : undefined });
+    const result = await retry(refreshed);
+    debugLog({ event: 'agent_session_refresh', params, result: { outcome: 'recovered' }, status: 'ok', latency_ms: Date.now() - startedAt });
+    return result;
+  } catch (failure) {
+    const outcome = failure?.details?.reason === 'endpoint_revived' ? 'refused' : 'failed';
+    debugLog({ event: 'agent_session_refresh', params, result: { outcome, error_code: failure?.code ?? 'unknown' }, status: 'error', latency_ms: Date.now() - startedAt });
+    throw failure;
+  }
+}
+
+// Session variables a manifest session can also set; they prove no runtime.
+const GENERIC_SESSION_VARS = new Set(['CLAUDE_SESSION_ID']);
+
+// The runtime the agent CLI's refresh forces on the re-registration, or undefined
+// to let hook credentials decide (what the hook did before the self-heal). Only
+// runtime-specific evidence may force it: an explicit pin, process ancestry, or a
+// session variable that only the resolved runtime sets (CODEX_THREAD_ID, Claude
+// Code's CLAUDE_CODE_SESSION_ID, a manifest's own variable). A generic variable
+// forces nothing: a manifest session reading CLAUDE_SESSION_ID would otherwise
+// be re-registered as claude-code. identity is resolveAgentIdentity's result.
+export function refreshRuntime(identity, { env = process.env, registry } = {}) {
+  if (!identity.runtime) return undefined;
+  if (identity.source === 'pin' || identity.source === 'ancestry') return identity.runtime;
+  const own = registry?.get(identity.runtime)?.identity.sessionEnvVars ?? [];
+  return own.some((name) => !GENERIC_SESSION_VARS.has(name) && env[name] === identity.sessionId) ? identity.runtime : undefined;
 }

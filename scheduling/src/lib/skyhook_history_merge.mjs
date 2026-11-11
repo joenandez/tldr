@@ -29,6 +29,12 @@ function isSessionExitEvent(event) {
   return event?.payload?.session_exit === true;
 }
 
+// The held_release phase gives up a held run with a `skipped` event that shares
+// the failed run's run_id; it is its own record, not that run's terminal event.
+function isHeldGiveUpEvent(event) {
+  return event?.kind === "skipped" && event.reason === "held_expired";
+}
+
 export function mergeLedgerTerminalHistory(scope, jobId, events, limit) {
   const ledgerEvents = listSkyhookTerminalHistoryEvents({
     home: helmHome(),
@@ -46,6 +52,7 @@ export function mergeLedgerTerminalHistory(scope, jobId, events, limit) {
     if (
       !isTerminalHistoryEvent(event) ||
       isSessionExitEvent(event) ||
+      isHeldGiveUpEvent(event) ||
       !ledgerByRun.has(event.run_id)
     ) {
       return event;

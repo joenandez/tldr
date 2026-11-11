@@ -1,22 +1,92 @@
-import { randomUUID } from "node:crypto";
-
+import { AgentCommandError } from "../../messaging/src/cli/agent_commands.mjs";
+import { readHookCredentials } from "../../messaging/src/cli/hook_credentials.mjs";
+import { prepareNewAgent } from "../../messaging/src/cli/new_agent.mjs";
+import { resolveStateRoot } from "../../messaging/src/protocol/state_root_location.mjs";
+import { openHookClient } from "./email_intent_send_commit.mjs";
 import {
+  THREAD_PREPARING,
   lookupChannelAgent,
   lookupThreadLaunch,
   lookupThreadRoot,
   recordThreadLaunch,
   recordThreadRoot,
 } from "./slack_channel_map.mjs";
-import {
-  findLaunchedSession,
-  launchAgentSession,
-  waitForLaunchedSession,
-} from "./slack_session_launch.mjs";
+import { launchedEndpoint, leftMs, nowIso } from "./slack_inbound_legacy.mjs";
 
-// In-drain wait for a fresh session to register; the drain shares a 35 s phase.
-const REGISTER_WAIT_MS = 8_000;
-// Past this since launch a still-unregistered session counts as failed.
-const LAUNCH_DEADLINE_MS = 60_000;
+// A Slack top-level post starts its session the way `agent send --to
+// academy:<name>` does: register the `<runtime>:<cwd>` principal and a
+// sessionless placeholder endpoint that carries the Academy agent name. The
+// caller commits the post to that endpoint; Tightbeam's resumer then runs
+// `academy run <name> --runtime-once <runtime> -- <spawn template>`, and the
+// child's SessionStart adopts the placeholder. Nothing here launches a process
+// or writes a prompt: the first input is the tldr notification for the post.
+//
+// Resolves {ok, principal_id, endpoint_id}. {ok:false, code} is a refusal no
+// retry fixes (folder missing, runtime not installed); {ok:false, retry:true}
+// is a transport or daemon failure the next drain should try again.
+export async function prepareSlackSession({
+  agentName,
+  launch,
+  env = process.env,
+  logger,
+  openClient = openHookClient,
+}) {
+  const started = Date.now();
+  const params = { agent: agentName, runtime: launch?.runtime };
+  let client;
+  try {
+    const stateRoot = resolveStateRoot({ env });
+    const authorityName =
+      env.TIGHTBEAM_AUTHORITY || readHookCredentials(stateRoot)?.authority_name;
+    if (!authorityName) {
+      throw Object.assign(new Error("no authority to register under"), {
+        code: "session_unavailable",
+      });
+    }
+    client = await openClient(stateRoot);
+    const target = await prepareNewAgent(
+      client,
+      { authority_name: authorityName },
+      { runtime: launch.runtime, cwd: launch.cwd },
+      {
+        academyAgentName: agentName,
+        installed: () => true,
+        log: (fields) => logger?.(fields),
+      }, // academy run resolves the runtime; the launchd daemon PATH is minimal
+    );
+    logger?.({
+      event: "slack_session_prepared",
+      status: "ok",
+      params,
+      result: { endpoint_id: target.endpoint_id },
+      latency_ms: Date.now() - started,
+    });
+    return {
+      ok: true,
+      principal_id: target.principal_id,
+      endpoint_id: target.endpoint_id,
+    };
+  } catch (error) {
+    const refused = error instanceof AgentCommandError;
+    logger?.({
+      event: "slack_session_prepare_failed",
+      status: "error",
+      params,
+      result: {
+        code: error.code ?? null,
+        refused,
+        message: error.message,
+        stack: error.stack,
+      },
+      latency_ms: Date.now() - started,
+    });
+    return refused
+      ? { ok: false, code: error.code }
+      : { ok: false, retry: true, code: error.code ?? "prepare_failed" };
+  } finally {
+    await client?.close();
+  }
+}
 
 // The post's own conversation: a retry finds the one recorded before the
 // commit (a fresh one would trip idempotency_collision), else one is opened
@@ -76,8 +146,13 @@ export async function planRoute(ctx, { entry, agentName, session }) {
   };
 }
 
+const LATE_TEXT = "I couldn't deliver this in time. Post again to retry.";
+
+const didNotStart = (agent) =>
+  `${agent.agentName} did not start in time. Post again to retry.`;
+
 const NO_LAUNCH_TEXT = (name) =>
-  `${name} can't start a session yet: no launch info. Run: tldr-agents slack channels add ${name} --launch-cwd <dir> --launch-runtime <claude-code|codex> --launch-command <command>`;
+  `${name} can't start a session yet: no launch info. Run: tldr-agents slack channels add ${name} --launch-cwd <dir> --launch-runtime <claude-code|codex>`;
 
 const paramsOf = (entry, agent) => ({
   channel: entry.channel,
@@ -85,175 +160,170 @@ const paramsOf = (entry, agent) => ({
   agent: agent.agentName,
 });
 
-// The uuid is recorded before the spawn: a drain retry reuses it, never
-// relaunches. Null when a row already exists.
-function claimLaunch(ctx, key, runtime) {
-  const sessionKey = randomUUID();
-  const inserted = recordThreadLaunch(ctx.home, {
+const sessionOf = (row) => ({
+  principal_id: row.principal_id,
+  endpoint_id: row.endpoint_id,
+});
+
+// When this post was first tried, stored before the placeholder exists (a
+// THREAD_PREPARING row), so a prepare that keeps failing still hits the deadline.
+function firstAttemptAt(ctx, { key, agent, known }) {
+  if (known?.session_key === THREAD_PREPARING) return known.launched_at;
+  const launchedAt = nowIso(ctx);
+  recordThreadLaunch(ctx.home, {
     ...key,
-    sessionKey,
-    runtime,
-    launchedAt: new Date((ctx.now ?? Date.now)()).toISOString(),
+    endpointId: null,
+    principalId: null,
+    runtime: agent.launch.runtime,
+    launchedAt,
   });
-  return inserted ? sessionKey : null;
+  return launchedAt;
 }
 
-// {launched} once the spawn started, else {outcome}.
-async function startLaunch(ctx, { entry, agent, tell }) {
+// A fresh placeholder from the shared new-session path, recorded before the
+// commit so a retry reuses it and never prepares a second. {session, known} or
+// {outcome}. A retryable refusal waits only until the launch deadline.
+async function prepareSession(ctx, { entry, agent, tell, key, known }) {
   const { home, logger } = ctx;
-  const params = paramsOf(entry, agent);
-  if (!agent.launch) {
-    logger?.({ event: "slack_inbound_no_launch_spec", status: "ok", params });
-    return { outcome: await tell(NO_LAUNCH_TEXT(agent.agentName)) };
+  const firstAt = firstAttemptAt(ctx, { key, agent, known });
+  const prepared = await (ctx.prepareSession ?? prepareSlackSession)({
+    agentName: agent.agentName,
+    launch: agent.launch,
+    env: ctx.env,
+    logger,
+  });
+  // A concurrent drain (a phase timeout does not cancel the one before it) may have
+  // recorded this root's endpoint while we awaited: keep theirs, not a second one.
+  const raced = prepared.ok && lookupThreadLaunch(home, key);
+  if (raced?.endpoint_id) return { session: sessionOf(raced), known: raced };
+  if (prepared.ok) {
+    recordThreadLaunch(home, {
+      ...key,
+      endpointId: prepared.endpoint_id,
+      principalId: prepared.principal_id,
+      runtime: agent.launch.runtime,
+      launchedAt: nowIso(ctx),
+    });
+    return { session: prepared, known: lookupThreadLaunch(home, key) };
   }
-  const key = { channelId: entry.channel, rootTs: entry.ts };
-  const sessionKey = claimLaunch(ctx, key, agent.launch.runtime);
-  const spawned = sessionKey
-    ? await (ctx.launchSession ?? launchAgentSession)({
-        home,
-        launch: agent.launch,
-        sessionKey,
-        env: ctx.env,
-        logger,
-      })
-    : { ok: true };
-  if (spawned.ok) return { launched: lookupThreadLaunch(home, key) };
   logger?.({
     event: "slack_inbound_launch_failed",
     status: "error",
-    params,
-    result: { code: spawned.code },
+    params: paramsOf(entry, agent),
+    result: { code: prepared.code, retry: prepared.retry === true },
   });
   return {
-    outcome: await tell(`Couldn't start ${agent.agentName}: ${spawned.code}`),
+    outcome: prepared.retry
+      ? await retryOrFail(ctx, {
+          entry,
+          agent,
+          tell,
+          launchedAt: firstAt,
+          code: prepared.code,
+        })
+      : await tell(`Couldn't start ${agent.agentName}: ${prepared.code}`),
   };
 }
 
-const leftMs = (ctx, launched) =>
-  Math.max(
-    0,
-    Date.parse(launched.launchedAt) +
-      LAUNCH_DEADLINE_MS -
-      (ctx.now ?? Date.now)(),
-  );
-
-const failureText = (name, code) =>
-  code === "launch_exited"
-    ? `${name} could not start. Post again to retry.`
-    : `${name} did not start in time. Post again to retry.`;
-
-// Any wait that is not ok retries until the launch deadline, then fails, so
-// one stuck post never blocks the drain forever.
-function waitVerdict(waited, left) {
-  if (waited.code === "launch_exited") return "failed";
-  return left > 0 ? "pending" : "failed";
+// The session a root already has, from its launch row: an endpoint an earlier
+// drain recorded, or, for a root launched before the upgrade (a provider id, no
+// endpoint), the legacy resolver's answer and its durable deadline, instead of a
+// second session. The row is never overwritten until resolved. {session, known},
+// {outcome}, or null: no row, a never-prepared one, or an old session that is gone.
+async function recordedSession(ctx, { agent, tell, key, known }) {
+  if (!known || known.session_key === THREAD_PREPARING) return null;
+  const found = await launchedEndpoint(ctx, known, key);
+  if (found.endpointId) {
+    const row = lookupThreadLaunch(ctx.home, key);
+    return { session: sessionOf(row), known: row };
+  }
+  const waiting = found.retry || leftMs(ctx, known.launched_at) > 0;
+  return waiting || found.expired
+    ? { outcome: waiting ? "retry" : await tell(didNotStart(agent)) }
+    : null;
 }
 
-async function failLaunch(ctx, { entry, agent, tell, code, left }) {
+// {session} for the post's placeholder: the one recorded by an earlier drain,
+// else a fresh one. Else {outcome}.
+async function startSession(ctx, { entry, agent, tell }) {
+  const key = { channelId: entry.channel, rootTs: entry.ts };
+  const known = lookupThreadLaunch(ctx.home, key);
+  const recorded = await recordedSession(ctx, { agent, tell, key, known });
+  if (recorded) return recorded;
+  if (agent.launch)
+    return prepareSession(ctx, { entry, agent, tell, key, known });
+  ctx.logger?.({
+    event: "slack_inbound_no_launch_spec",
+    status: "ok",
+    params: paramsOf(entry, agent),
+  });
+  return { outcome: await tell(NO_LAUNCH_TEXT(agent.agentName)) };
+}
+
+// A retry within the launch deadline stays a retry; past it the post fails
+// once, in its thread, and the drain moves on.
+async function retryOrFail(ctx, { entry, agent, tell, launchedAt, code }) {
+  const left = leftMs(ctx, launchedAt);
+  if (left > 0) return "retry";
   ctx.logger?.({
     event: "slack_inbound_launch_failed",
     status: "error",
     params: paramsOf(entry, agent),
     result: { code, left_ms: left },
   });
-  return tell(failureText(agent.agentName, code));
+  return tell(didNotStart(agent));
 }
 
-// {session} once registered; else {outcome}: the line is done or must wait.
-async function awaitSession(ctx, { entry, agent, launched, tell }) {
-  const { logger } = ctx;
-  const left = leftMs(ctx, launched);
-  const waited = await (ctx.waitForSession ?? waitForLaunchedSession)({
-    home: ctx.home,
-    runtime: launched.runtime,
-    sessionKey: launched.sessionKey,
-    env: ctx.env,
-    listSessions: ctx.listSessions,
-    timeoutMs: Math.min(REGISTER_WAIT_MS, left),
-    logger,
-  });
-  if (waited.ok) return { session: waited.session };
-  const verdict = waitVerdict(waited, left);
-  if (verdict === "pending") {
-    logger?.({
-      event: "slack_inbound_launch_pending",
-      status: "ok",
-      params: paramsOf(entry, agent),
-      result: { code: waited.code, left_ms: left },
-    });
-    // lookup errors retry the line; a plain registration timeout just waits
-    const lookup = waited.code !== "launch_registration_timeout";
-    return { outcome: lookup ? "retry" : "pending" };
-  }
-  const code = waited.code;
-  return { outcome: await failLaunch(ctx, { entry, agent, tell, code, left }) };
-}
-
-// A thread reply whose root has no reply binding yet but was launched by name
-// goes to that launched endpoint only: untargeted, the bridge fans out to every
-// session of the agent. {route} to send, {outcome:"retry"} to wait, {} to hint.
-export async function targetLaunchedThread(ctx, route) {
-  const threadCommit = route.kind === "commit" && !route.newRoot;
+// A thread reply whose root has no reply binding yet but was started by name
+// goes to that session's endpoint only (the placeholder until its first
+// SessionStart): untargeted, the bridge fans out to every session of the agent.
+// {route} to send, {outcome} to stop here (retry, or told it was not delivered
+// in time), {} to hint.
+export async function targetLaunchedThread(ctx, route, tell) {
+  const key = { channelId: route.channelId, rootTs: route.threadTs };
   const launched =
-    threadCommit &&
-    lookupThreadLaunch(ctx.home, {
-      channelId: route.channelId,
-      rootTs: route.threadTs,
-    });
+    route.kind === "commit" &&
+    !route.newRoot &&
+    lookupThreadLaunch(ctx.home, key);
   if (!launched) return { route };
-  const found = await (ctx.findSession ?? findLaunchedSession)({
-    home: ctx.home,
-    runtime: launched.runtime,
-    sessionKey: launched.sessionKey,
-    env: ctx.env,
-    listSessions: ctx.listSessions,
-  });
+  const { endpointId, retry, expired } = await launchedEndpoint(
+    ctx,
+    launched,
+    key,
+  );
   ctx.logger?.({
     event: "slack_inbound_thread_reply_targeted",
-    status: found.status === "lookup_failed" ? "error" : "ok",
+    status: "ok",
     params: { channel: route.channelId, ts: route.ts },
-    result: { found: found.status },
+    result: { targeted: Boolean(endpointId), retry: Boolean(retry) },
   });
-  if (found.status === "registered")
-    return { route: { ...route, targetEndpointId: found.session.endpoint_id } };
-  return found.status === "lookup_failed" ? { outcome: "retry" } : {};
+  if (retry || expired)
+    return { outcome: retry ? "retry" : await tell(LATE_TEXT) };
+  return endpointId
+    ? { route: { ...route, targetEndpointId: endpointId } }
+    : {};
 }
 
-// A session without a principal retries only until the launch deadline.
-async function planFailure(ctx, { entry, agent, tell, plan, started }) {
-  const left = leftMs(ctx, started.launched);
-  if (plan.reason !== "no_principal" || left > 0) return "retry";
-  const code = plan.reason;
-  return failLaunch(ctx, { entry, agent, tell, code, left });
-}
-
-// Top-level post (or welcome-thread reply) in a named agent's channel: start a
-// new session of that agent for it, then commit the post to that session's endpoint.
+// Top-level post (or welcome-thread reply) in a named agent's channel: register
+// a placeholder for a new session of that agent, then commit the post to it.
+// The daemon's resumer starts the session; its first input is the tldr
+// notification for this post, the same block any session gets.
 export async function deliverByName(args) {
   const { ctx, entry, agent, eventId, deliver } = args;
-  const known = lookupThreadLaunch(ctx.home, {
-    channelId: entry.channel,
-    rootTs: entry.ts,
-  });
-  const started = known ? { launched: known } : await startLaunch(ctx, args);
-  const waiting = started.launched
-    ? await awaitSession(ctx, { ...args, launched: started.launched })
-    : started;
-  if (!waiting.session) return waiting.outcome;
-  const { session } = waiting;
+  const started = await startSession(ctx, args);
+  if (!started.session) return started.outcome;
+  const { session, known } = started;
   const agentName = agent.agentName;
+  const retry = (code) =>
+    retryOrFail(ctx, { ...args, launchedAt: known.launched_at, code });
   const plan = await planRoute(ctx, { entry, agentName, session });
-  if (!plan.route) return planFailure(ctx, { ...args, plan, started });
+  if (!plan.route) return retry(plan.reason);
   const outcome = await deliver({ ctx, entry, route: plan.route, eventId });
   ctx.logger?.({
     event: "slack_inbound_routed_by_name",
     status: outcome === "retry" ? "error" : "ok",
     params: paramsOf(entry, agent),
-    result: {
-      endpoint_id: session.endpoint_id,
-      session_key: started.launched.sessionKey,
-      outcome,
-    },
+    result: { endpoint_id: session.endpoint_id, outcome },
   });
-  return outcome;
+  return outcome === "retry" ? retry("commit_retry") : outcome;
 }

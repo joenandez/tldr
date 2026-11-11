@@ -26,6 +26,7 @@
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
 import { releaseClaim, verifyClaimToken } from './claims_shared.mjs';
+import { ensureStagedDeliveryCoverage } from '../held_request_stop.mjs';
 import { acceptProviderAcknowledgement, advanceReplyWaitForDelivery, closeStagedDeliveryConfirmedChain, markStagedDeliveryFailedAttention } from '../lifecycle_transition.mjs';
 
 const OUTCOME_TO_CLAIM_OUTCOME = { delivered: 'completed', failed: 'failed' };
@@ -69,6 +70,8 @@ export const deliveryCompleteOp = {
       if (outcomeValue === 'delivered') {
         const acknowledgement = acceptProviderAcknowledgement(context.db, { deliveryId, now });
         const closure = closeStagedDeliveryConfirmedChain(context.db, { deliveryId, now });
+        // Another route failed earlier and this was the last one in flight: the request is held again (invariant D).
+        if (!closure) ensureStagedDeliveryCoverage(context.db, { deliveryId, now, logger: context.logger });
         context.logger?.info({
           event: closure ? 'delivery_staged_closure_committed' : acknowledgement ? 'delivery_acknowledgement_accepted' : 'delivery_complete_transport_only',
           params: { delivery_id: deliveryId, ...(acknowledgement ?? {}), ...(closure ?? {}) },
@@ -77,7 +80,7 @@ export const deliveryCompleteOp = {
           latency_ms: Date.now() - startedAt,
         });
       } else {
-        const attention = markStagedDeliveryFailedAttention(context.db, { deliveryId, now });
+        const attention = markStagedDeliveryFailedAttention(context.db, { deliveryId, now, logger: context.logger });
         context.logger?.info({
           event: attention ? 'delivery_staged_failure_marked' : 'delivery_complete_transport_only',
           params: { delivery_id: deliveryId, ...(attention ?? {}) },

@@ -80,9 +80,10 @@ function normalizeRetryMaxAttempts(value) {
   return Math.floor(parsed);
 }
 
-function isRetryableTerminalLogicalRun(row) {
+function isRetryableTerminalLogicalRun(row, heldAttempt = 0) {
   if (!row) return false;
   return (
+    (heldAttempt > 0 && row.status === "succeeded") || // Skyhook handoff `success` only proves the launch; see succeeded_count
     RETRYABLE_LOGICAL_STATUSES.has(row.status) ||
     RETRYABLE_LOGICAL_STATUSES.has(row.state)
   );
@@ -300,6 +301,7 @@ export function claimLogicalRun({
   jobKind = null,
   supervisorVersion = null,
   retryMaxAttempts = 0,
+  heldAttempt = 0,
   now = nowIso(),
 } = {}) {
   const slotKey = deriveSlotKey({
@@ -318,15 +320,14 @@ export function claimLogicalRun({
   const timestamp = requireNonEmptyString(now, "now");
   const metadataJson = metadata === null ? null : stableJson(metadata);
   const normalizedRetryMaxAttempts =
-    normalizeRetryMaxAttempts(retryMaxAttempts);
-  const normalizedIdentityKey =
-    identityKey === null || identityKey === undefined
-      ? null
-      : requireNonEmptyString(identityKey, "identityKey");
-  const normalizedJobKind =
-    jobKind === null || jobKind === undefined
-      ? null
-      : requireNonEmptyString(jobKind, "jobKind");
+    normalizeRetryMaxAttempts(retryMaxAttempts) +
+    normalizeRetryMaxAttempts(heldAttempt);
+  const normalizedIdentityKey = [null, undefined].includes(identityKey)
+    ? null
+    : requireNonEmptyString(identityKey, "identityKey");
+  const normalizedJobKind = [null, undefined].includes(jobKind)
+    ? null
+    : requireNonEmptyString(jobKind, "jobKind");
 
   return runWithRuntimeStore(home, (db) => {
     db.exec("BEGIN IMMEDIATE");
@@ -339,8 +340,7 @@ export function claimLogicalRun({
       let recoveringTerminal = false;
       let recoveredStatus = null;
       if (existing) {
-        const retryableTerminal = isRetryableTerminalLogicalRun(existing);
-        if (retryableTerminal) {
+        if (isRetryableTerminalLogicalRun(existing, heldAttempt)) {
           const recovery = db
             .prepare(
               `
@@ -356,8 +356,8 @@ export function claimLogicalRun({
                   ) AS active_count,
                   SUM(
                     CASE
-                      WHEN COALESCE(state, status) = 'succeeded'
-                        OR status = 'succeeded'
+                      WHEN (COALESCE(state, status) = 'succeeded'
+                        OR status = 'succeeded') AND COALESCE(terminal_source, '') != 'skyhook-handoff'
                       THEN 1
                       ELSE 0
                     END
@@ -381,11 +381,8 @@ export function claimLogicalRun({
               terminal_duplicate: true,
             };
           }
-          const retryBudgetRemaining =
-            attemptCount < 1 + normalizedRetryMaxAttempts;
           recoveringTerminal =
-            attemptCount > 0 &&
-            retryBudgetRemaining &&
+            attemptCount < 1 + normalizedRetryMaxAttempts &&
             Number(recovery?.active_count || 0) === 0 &&
             Number(recovery?.succeeded_count || 0) === 0;
           if (!recoveringTerminal) {
@@ -597,6 +594,8 @@ export function claimLogicalRunForJob({
   daemonInstanceId,
   leaseToken,
   deadlineAt = null,
+  retryMaxAttempts = job?.retry?.max_attempts,
+  heldAttempt = 0,
   now = nowIso(),
 } = {}) {
   const identity = ledgerIdentityForJob({ scope, job, scheduledAt });
@@ -619,7 +618,8 @@ export function claimLogicalRunForJob({
     identityKey: shadow ? skyhookIdentityKeyForJob({ scope, job }) : null,
     jobKind: shadow ? skyhookJobKindForJob(job) : null,
     supervisorVersion: shadow ? "skyhook-shadow-v1" : null,
-    retryMaxAttempts: job.retry?.max_attempts,
+    retryMaxAttempts,
+    heldAttempt,
     now,
   });
 }

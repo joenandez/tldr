@@ -13,7 +13,7 @@
 //     pending-bg/          one empty file per open Codex background item:
 //                          bash-<tool_use_id>, agent-<agent_id>
 //
-// Ported from helm/hooks/helm-prefetch-session-inbox.sh:29-33, whose
+// Ported from the retired helm prefetch-session-inbox hook, lines 29-33, whose
 // per-session directory under ~/.helm/sessions/<id>/ carried the former
 // injection roles. Tightbeam retains their paths only for compatibility;
 // durable deliveries are never stored there.

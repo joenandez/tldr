@@ -1,6 +1,8 @@
 import { mutateActionStore, readActionStore } from "./agent_action_store.mjs";
 
 const OUTCOMES = new Set(["timeout", "cancelled"]);
+// Stop hints also carry "message": progress the guard nudges past, never an escape.
+const HINT_OUTCOMES = new Set([...OUTCOMES, "message"]);
 
 function legacyWaitKey(actionId) {
   return `wait:${actionId}`;
@@ -61,7 +63,7 @@ function validOutcome({
   guard = validGuard(session),
 }) {
   const actionMatches =
-    hint?.action_id === actionId && OUTCOMES.has(hint?.outcome);
+    hint?.action_id === actionId && HINT_OUTCOMES.has(hint?.outcome);
   const ownerMatches = sameOwner(hint, session) && Boolean(guard);
   const guardMatches = guard?.guard_stop_key === hint?.guard_stop_key;
   const referencesMatch =
@@ -94,19 +96,62 @@ export function readWaitMessage(session, actionId) {
 export function recordWaitMessage(session, actionId, messageId) {
   if (!actionId || !session.agent_action_store_path) return;
   const key = waitKey(session, actionId);
+  const guard = validGuard(session);
   mutateActionStore(session, (store) => {
     clearOwnerHints(store.envelopes, session);
     clearCompletedWait(store, session);
     const entry = store.envelopes[key] ?? {};
     const { wait_outcome: _staleOutcome, ...current } = entry;
+    // A wait that already ended in a terminal outcome keeps it; only a wait
+    // that ended on this message publishes the progress hint.
+    const hint =
+      guard && !entry.wait_terminal
+        ? {
+            action_id: actionId,
+            ...guardSnapshot(session, guard),
+            outcome: "message",
+            message_id: messageId,
+          }
+        : null;
     store.envelopes[key] = {
       ...current,
       endpoint_id: session.endpoint_id,
       provider_session_id: session.session_id,
       process_generation: session.process_generation,
       message_id: messageId,
+      ...(hint
+        ? { wait_guard: guardSnapshot(session, guard), wait_outcome: hint }
+        : {}),
     };
+    if (hint) publishCompletedWait(store, session, hint);
   });
+}
+
+function guardSnapshot(session, guard) {
+  return {
+    endpoint_id: session.endpoint_id,
+    provider_session_id: session.session_id,
+    process_generation: session.process_generation,
+    guard_stop_key: guard.guard_stop_key,
+    pending_references: [...guard.pending_references],
+  };
+}
+
+function publishCompletedWait(store, session, hint) {
+  if (
+    !store.completed_waits ||
+    typeof store.completed_waits !== "object" ||
+    Array.isArray(store.completed_waits)
+  )
+    store.completed_waits = {};
+  store.completed_waits[completedWaitKey(session)] = {
+    version: 1,
+    action_id: hint.action_id,
+    endpoint_id: session.endpoint_id,
+    provider_session_id: session.session_id,
+    process_generation: session.process_generation,
+    guard_stop_key: hint.guard_stop_key,
+  };
 }
 
 export function readWaitTerminal(session, actionId) {
@@ -153,6 +198,11 @@ export function readCompletedWaitOutcome(session) {
   const entry = readWaitEnvelope(store, session, selector?.action_id);
   const terminal = entry?.wait_terminal;
   const guard = canonicalStoredGuard(entry?.wait_guard, session);
+  // A message hint has no terminal: the wait ended on the stored message_id.
+  const messageHint =
+    entry?.wait_outcome?.outcome === "message" &&
+    typeof entry.message_id === "string" &&
+    !terminal;
   const invalid = [
     !completedWaits,
     typeof completedWaits !== "object",
@@ -164,9 +214,9 @@ export function readCompletedWaitOutcome(session) {
     typeof selector?.guard_stop_key !== "string",
     !selector?.guard_stop_key,
     !sameOwner(entry, session),
-    terminal?.action_id !== selector?.action_id,
-    !sameOwner(terminal, session),
-    !OUTCOMES.has(terminal?.outcome),
+    !messageHint && terminal?.action_id !== selector?.action_id,
+    !messageHint && !sameOwner(terminal, session),
+    !messageHint && !OUTCOMES.has(terminal?.outcome),
     !guard,
     guard?.guard_stop_key !== selector?.guard_stop_key,
     !validOutcome({
@@ -175,7 +225,7 @@ export function readCompletedWaitOutcome(session) {
       actionId: selector?.action_id,
       guard,
     }),
-    entry?.wait_outcome?.outcome !== terminal?.outcome,
+    !messageHint && entry?.wait_outcome?.outcome !== terminal?.outcome,
   ];
   return invalid.some(Boolean) ? null : entry.wait_outcome;
 }
@@ -203,23 +253,9 @@ export function recordWaitOutcome(session, actionId, outcome) {
   };
   const guard = validGuard(session);
   const hint = guard
-    ? {
-        action_id: actionId,
-        endpoint_id: session.endpoint_id,
-        provider_session_id: session.session_id,
-        process_generation: session.process_generation,
-        guard_stop_key: guard.guard_stop_key,
-        pending_references: [...guard.pending_references],
-        outcome,
-      }
+    ? { action_id: actionId, ...guardSnapshot(session, guard), outcome }
     : null;
   mutateActionStore(session, (store) => {
-    if (
-      !store.completed_waits ||
-      typeof store.completed_waits !== "object" ||
-      Array.isArray(store.completed_waits)
-    )
-      store.completed_waits = {};
     const key = waitKey(session, actionId);
     const entry = store.envelopes[key] ?? {};
     const { wait_outcome: _staleOutcome, ...current } = entry;
@@ -229,29 +265,10 @@ export function recordWaitOutcome(session, actionId, outcome) {
       endpoint_id: session.endpoint_id,
       provider_session_id: session.session_id,
       process_generation: session.process_generation,
-      ...(guard
-        ? {
-            wait_guard: {
-              endpoint_id: session.endpoint_id,
-              provider_session_id: session.session_id,
-              process_generation: session.process_generation,
-              guard_stop_key: guard.guard_stop_key,
-              pending_references: [...guard.pending_references],
-            },
-          }
-        : {}),
+      ...(guard ? { wait_guard: guardSnapshot(session, guard) } : {}),
       wait_terminal: terminal,
       ...(publishHint ? { wait_outcome: hint } : {}),
     };
-    if (publishHint) {
-      store.completed_waits[completedWaitKey(session)] = {
-        version: 1,
-        action_id: actionId,
-        endpoint_id: session.endpoint_id,
-        provider_session_id: session.session_id,
-        process_generation: session.process_generation,
-        guard_stop_key: guard.guard_stop_key,
-      };
-    }
+    if (publishHint) publishCompletedWait(store, session, hint);
   });
 }

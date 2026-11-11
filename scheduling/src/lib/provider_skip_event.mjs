@@ -101,5 +101,6 @@ export function exitBeforeSessionResult({ agent, code, stdout, jobId }) {
       code === 0
         ? `missing_agent_session_id: ${agent} completed without a captured session_id`
         : `exit_code_${code}`,
+    exit_code: code, // the pre-start completed record carries the code its error names
   };
 }

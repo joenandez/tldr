@@ -5,10 +5,12 @@
 // whenever the mode is missing, unusable or cannot run `agent receive`. No
 // path here defaults a mode, starts a new session, or admits a replacement.
 
+import { copilotRecipePrefix } from "../cli/copilot_hook_runtime.mjs";
 import { TightbeamError } from "../protocol/envelope.mjs";
 import { isSafeRuntimeId } from "../runtimes/registry.mjs";
 import {
   ACADEMY_AGENT_NAME_PATTERN,
+  buildCopilotSpawnInvocation,
   buildCopilotWakeInvocation,
   COPILOT_WAKE_SESSION_ID,
   hasWakeVehicle,
@@ -16,10 +18,6 @@ import {
   isPackageBoundCopilotRecord,
   WAKE_MESSAGE_ID,
 } from "../runtimes/copilot_wake_contract.mjs";
-import {
-  offerActionCommands,
-  tightbeamCommandName,
-} from "../cli/package_context.mjs";
 import { buildAssertActivePayload } from "./ops/resume_claim.mjs";
 
 export const WAKE_PERMISSION_UNAVAILABLE =
@@ -118,14 +116,15 @@ export function normalizeAcademyAgentName(value) {
  * Candidate-query scope for wake runtimes: a Copilot endpoint is selected
  * only with an Academy agent name AND the confirmed exit of its recorded
  * owner. Without that proof a live (or unobserved) ACP process may still
- * hold the session, and a second writer must never be started. Ids come
+ * hold the session, and a second writer must never be started. A sessionless
+ * named placeholder has no session to hold, so it needs no proof. Ids come
  * from the registry and are safe-id checked before they reach the SQL text.
  */
 export function copilotWakeScopeSql(records) {
   const ids = records.map((record) => record.id).filter(isSafeRuntimeId);
   if (ids.length === 0) return "1 = 1";
   const list = ids.map((id) => `'${id}'`).join(",");
-  return `(e.runtime NOT IN (${list}) OR (e.academy_agent_name IS NOT NULL AND e.owner_process_exited_at IS NOT NULL))`;
+  return `(e.runtime NOT IN (${list}) OR (e.academy_agent_name IS NOT NULL AND (e.owner_process_exited_at IS NOT NULL OR e.provider_session_id IS NULL)))`;
 }
 
 const MODE_REFUSALS = Object.freeze({
@@ -166,34 +165,42 @@ function refusalFor(request, messageIds) {
   return MODE_REFUSALS[modeKind(request.academy_permission_mode)];
 }
 
-// The exact answer command one pending message owes, or null when it owes none.
-function answerLine(tb, id, context) {
-  // A delegate answers an offer with accept or decline; a reply is not one.
-  if (typeof context?.delegation_id === "string") {
-    const offer = offerActionCommands(context.delegation_id, tb);
-    return `- ${id}: ${offer.accept}, or ${offer.decline}`;
-  }
-  if (typeof context?.work_id === "string")
-    return `- ${id}: ${tb} agent complete --work ${context.work_id} --body "<result, or why you decline>"`;
-  return context?.reply_required === true
-    ? `- ${id}: ${tb} agent reply --message ${id} --body "<reply, or why you decline>"`
-    : null;
+function isSessionlessNamed(request) {
+  return (
+    !request.session_id &&
+    !request.endpoint_session_id &&
+    ACADEMY_AGENT_NAME_PATTERN.test(request.academy_agent_name ?? "")
+  );
 }
 
-// Copilot has no Stop hook to hold the turn, so the wake prompt itself says
-// how each owed message is answered; plain final text reaches no one.
-function answerLines(messageIds, pendingContext) {
-  const tb = tightbeamCommandName();
-  const owed = messageIds
-    .map((id) => answerLine(tb, id, pendingContext.get(id)))
-    .filter(Boolean);
-  return owed.length === 0
-    ? ""
-    : [
-        "Plain final text in this run reaches no one. Before you end this turn, answer each message below through tldr with its exact command (an explicit decline is an answer):",
-        ...owed,
-        "",
-      ].join("\n");
+// A placeholder has no stored mode: Academy stamps approve-all when it adopts.
+// It has no session yet either, so its commands cannot state a session binding:
+// the brief keeps the renderer's default prefix (the installed front door), as
+// any session's commands do before its first hook runs.
+function planNamedSpawn(
+  request,
+  messageIds,
+  { externalMessageIds, briefFor, pendingContext },
+) {
+  if (!messageIdsAreExact(messageIds))
+    return {
+      refusal: {
+        reason: WAKE_IDENTITY_UNAVAILABLE,
+        attentionSource: WAKE_ATTENTION_SOURCE,
+      },
+    };
+  const prompt = briefFor({
+    messageId: messageIds[0],
+    messageIds,
+    externalMessageIds,
+    pendingContext,
+  });
+  return {
+    invocation: buildCopilotSpawnInvocation({
+      agentName: request.academy_agent_name,
+      prompt,
+    }),
+  };
 }
 
 /**
@@ -211,22 +218,39 @@ export function planCopilotWake({
   pendingContext = new Map(),
 }) {
   if (!isPackageBoundCopilotRecord(record)) return null;
+  const plan = isSessionlessNamed(request) ? planNamedSpawn : planResumeWake;
+  return plan(request, messageIds, {
+    record,
+    externalMessageIds,
+    briefFor,
+    pendingContext,
+  });
+}
+
+// The resumed session is known, so the first input states the same session
+// binding the live Copilot hook renders (the manifest has no verified session
+// variable); the identity check above has already vouched for the session id.
+function planResumeWake(
+  request,
+  messageIds,
+  { record, externalMessageIds, briefFor, pendingContext },
+) {
   const reason = refusalFor(request, messageIds);
   if (reason !== null)
     return { refusal: { reason, attentionSource: WAKE_ATTENTION_SOURCE } };
   const prompt = briefFor({
     messageId: messageIds[0],
     messageIds,
-    form: "resume",
     externalMessageIds,
     pendingContext,
+    prefix: copilotRecipePrefix(record.id, request.session_id),
   });
   return {
     invocation: buildCopilotWakeInvocation({
       agentName: request.academy_agent_name,
       sessionId: request.session_id,
       mode: request.academy_permission_mode,
-      prompt: `${prompt}${answerLines(messageIds, pendingContext)}`,
+      prompt,
     }),
   };
 }

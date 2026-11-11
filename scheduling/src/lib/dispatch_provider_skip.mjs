@@ -4,9 +4,10 @@ import { appendActivityEvent } from "./activity_stream.mjs";
 import { appendJobHistoryEvent } from "./read_store.mjs";
 import { computeNextAfterRun } from "./schedule_eval.mjs";
 import {
-  persistRuntimePatch,
+  completionPatchFor,
   runtimePatchFor,
 } from "./dispatch_schedule_finalization.mjs";
+import { persistCompletionPatch } from "./dispatch_runtime_persistence.mjs";
 
 function nowIso() {
   return process.env.HELM_NOW
@@ -21,10 +22,12 @@ function isPlainObject(value) {
 // C1 of the provider-run outcome contract: the provider exited 0 without a
 // session and printed its helm.skip line. The run is a deliberate no-op —
 // recorded as skipped with the provider's reason, never retried or replaced
-// by a fallback agent.
+// by a fallback agent. A skip of the held slot (its release) ends that hold: the skipped record is its
+// terminal record; a hold left behind would end next tick as a false "gave up".
 export async function finalizeProviderSkip(scope, job, result, ctx) {
   const {
     finalizeAttempt,
+    reason,
     runId,
     startedAt,
     scheduledAt,
@@ -32,6 +35,7 @@ export async function finalizeProviderSkip(scope, job, result, ctx) {
     logPaths,
     baselineUpdatedAt,
     consumedPhaseAbortedSlot,
+    heldDeadline,
   } = ctx;
   const finishedAt = nowIso();
   const skip = result.skip;
@@ -105,8 +109,10 @@ export async function finalizeProviderSkip(scope, job, result, ctx) {
       signal_source: result.signal_source || null,
     },
   });
+  const heldSlot =
+    Boolean(scheduledAt) && job.state.held?.slot === Date.parse(scheduledAt);
   process.stderr.write(
-    `[helm provider-skip] recorded scope=${scope.scope_id || "unknown"} job=${job.id} run=${runId} reason=${skip.reason} fallback=none\n`,
+    `[helm provider-skip] recorded scope=${scope.scope_id || "unknown"} job=${job.id} run=${runId} reason=${skip.reason} fallback=none held_cleared=${heldSlot}\n`,
   );
   job.state.last_run_at = finishedAt;
   job.state.last_status = "skipped";
@@ -118,11 +124,23 @@ export async function finalizeProviderSkip(scope, job, result, ctx) {
   job.state.next_run_at = next.next_run_at;
   if (!next.enabled) job.state.enabled = false;
   job.meta.updated_at = nowIso();
-  await persistRuntimePatch(
+  if (heldSlot) job.state.held = null;
+  await persistCompletionPatch(
     scope,
-    job.id,
-    baselineUpdatedAt,
-    runtimePatchFor(job, consumedPhaseAbortedSlot),
+    {
+      jobId: job.id,
+      baselineUpdatedAt,
+      patch: heldSlot
+        ? completionPatchFor(job, consumedPhaseAbortedSlot, {
+            hold: null,
+            scheduledAt,
+          })
+        : runtimePatchFor(job, consumedPhaseAbortedSlot, {
+            runSlot: scheduledAt || finishedAt,
+          }),
+      heldDeadline,
+    },
+    reason,
   );
   return skippedEvent;
 }

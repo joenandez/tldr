@@ -225,7 +225,7 @@ export const emailTransport = {
       event(
         "transport_email_send_outcome",
         scope,
-        { code: error.code },
+        { code: error.code, broker_code: cause?.code },
         "error",
       );
       throw error;

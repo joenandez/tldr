@@ -27,7 +27,7 @@ import { markDispatchFinished, markDispatchStarted } from "./runtime.mjs";
 import { withExecutionLease } from "./scope_runtime.mjs";
 import { reapWorkspace } from "./reaper.mjs";
 import { acquireSlot } from "./inflight_registry.mjs";
-import { isProcessAlive, processStartEvidence } from "./process_liveness.mjs";
+import { isProcessAlive } from "./process_liveness.mjs";
 import { appendPerfEvent } from "./resource_sampler.mjs";
 import {
   claimLogicalRunForJob,
@@ -42,11 +42,18 @@ import {
 } from "./skyhook_dispatch_policy.mjs";
 import { recordRunSessionOutcome } from "./run_session_outcome.mjs";
 import {
+  appendHeld,
+  countable,
+  decidingAgent,
+  holdAtExit,
+} from "./held_at_exit.mjs";
+import {
   finalizeProviderRunOutcome,
   recordPendingProviderRun,
   sweepProviderRunOutcomes,
 } from "./provider_run_outcome.mjs";
 import { finalizeProviderSkip } from "./dispatch_provider_skip.mjs";
+import { finalizeSkyhookPrestartFailure } from "./skyhook_prestart_outcome.mjs";
 import {
   evaluateScopeDispatch,
   advanceAfterOverflow,
@@ -55,6 +62,7 @@ import { infrastructureMarkerThroughSlot } from "./dispatch_infrastructure_marke
 import {
   NON_LAUNCH_SCHEDULE_ADVANCES,
   applyTerminalLedgerSkip,
+  completionPatchFor,
   persistRuntimePatch,
   persistRuntimePatches,
   runtimePatchFor,
@@ -65,6 +73,13 @@ import {
   withRuntimeStoreTransactionRetryAsync,
 } from "./runtime_store_retry.mjs";
 import { assignmentRunContract } from "./assignment_completion_delivery.mjs";
+import { persistCompletionPatch } from "./dispatch_runtime_persistence.mjs";
+import {
+  clearActiveRunBestEffort,
+  pidStartTimeOf,
+  spawnIdentity,
+  stopSpawnedChild,
+} from "./dispatch_spawn_guard.mjs";
 
 export {
   persistInprocScheduleDecision,
@@ -81,16 +96,6 @@ function nowIso() {
 function commandStartupWindowMs() {
   const raw = Number.parseInt(process.env.HELM_COMMAND_STARTUP_WINDOW_MS, 10);
   return Number.isFinite(raw) && raw > 0 ? raw : 250;
-}
-
-// Opportunity #4: capture start-time evidence at spawn so the reaper can
-// verify PID identity before any orphan decision or kill signal.
-function pidStartTimeOf(pid) {
-  try {
-    return processStartEvidence(pid).start_time;
-  } catch {
-    return null;
-  }
 }
 
 function isPlainObject(value) {
@@ -217,6 +222,7 @@ function historyCompleteEvent(
       memory: result.memory || result.wrapper?.memory || null,
       output: result.output || null,
       notification_results: notificationResults || [],
+      agent: decidingAgent(result.agent_fallback),
     },
   };
 }
@@ -793,7 +799,6 @@ export function startRun(scope, job, opts = {}) {
     return null;
   }
 
-  let ledgerClaim = null;
   const claimAttempt = withRuntimeStoreLockRetrySync(
     { scope, stage: "claim", jobId: job.id, daemonInstanceId },
     () =>
@@ -804,6 +809,9 @@ export function startRun(scope, job, opts = {}) {
         attemptId: runId,
         daemonInstanceId: daemonInstanceId || "manual",
         leaseToken: runId,
+        // Skyhook never retries in-run (.37): a lost attempt must not make the slot claimable again (.45).
+        ...(skyhookAgentRun ? { retryMaxAttempts: 0 } : {}),
+        heldAttempt: opts.heldAttempt,
         now: startedAt,
       }),
   );
@@ -829,7 +837,7 @@ export function startRun(scope, job, opts = {}) {
     });
     return null;
   }
-  ledgerClaim = claimAttempt.value;
+  const ledgerClaim = claimAttempt.value;
 
   if (!ledgerClaim.claimed) {
     if (skyhookAdmission?.release) skyhookAdmission.release();
@@ -862,7 +870,9 @@ export function startRun(scope, job, opts = {}) {
         blocking_attempt_id: ledgerClaim.blocking_attempt_id || null,
       },
     });
-    appendJobHistoryEvent(scope, job.id, skippedEvent);
+    // A held release's refusal is recorded once by held_release (a retried tick must not append).
+    if (reason !== "held_release")
+      appendJobHistoryEvent(scope, job.id, skippedEvent);
     return {
       skipped: true,
       reason: skipReason,
@@ -1029,7 +1039,7 @@ async function executeAndFinalizeSkyhookAgent(
     consumedPhaseAbortedSlot,
   } = ctx;
   let spawned = false;
-  let livePid = null;
+  let liveChild = null; // { pid, startTime } captured first in onSpawn (.51)
   let result;
   try {
     result = await executeJob(job, {
@@ -1044,7 +1054,7 @@ async function executeAndFinalizeSkyhookAgent(
       startupWindowMs: skyhookStartupWindowMs(job),
       onSpawn: (processInfo) => {
         spawned = true;
-        livePid = processInfo.pid;
+        liveChild = spawnIdentity(processInfo.pid);
         recordLaunchEvidenceWithRuntimeStoreRetry({
           scope,
           jobId: job.id,
@@ -1057,7 +1067,7 @@ async function executeAndFinalizeSkyhookAgent(
         setActiveRun(scope, job.id, {
           run_id: runId,
           pid: processInfo.pid,
-          pid_start_time: pidStartTimeOf(processInfo.pid),
+          pid_start_time: liveChild.startTime,
           heartbeat_path: runHeartbeatPath(scope, runId),
           started_at: startedAt,
           command: processInfo.command,
@@ -1071,6 +1081,14 @@ async function executeAndFinalizeSkyhookAgent(
       },
     });
   } catch (err) {
+    // .46: no session outlives its failure record.
+    stopSpawnedChild({
+      spawned,
+      child: liveChild,
+      err,
+      jobId: job.id,
+      runId,
+    });
     result = {
       status: "failure",
       error: String(err?.message || err),
@@ -1082,9 +1100,10 @@ async function executeAndFinalizeSkyhookAgent(
 
   if (result.status === "skipped" && result.skip?.reason) {
     releaseCapacity();
-    if (spawned) clearActiveRun(scope, job.id);
+    if (spawned) clearActiveRunBestEffort(scope, job.id, runId);
     return finalizeProviderSkip(scope, job, result, {
       finalizeAttempt: finalizeRunAttemptWithRuntimeStoreRetry,
+      reason,
       runId,
       startedAt,
       scheduledAt,
@@ -1092,89 +1111,30 @@ async function executeAndFinalizeSkyhookAgent(
       logPaths,
       baselineUpdatedAt,
       consumedPhaseAbortedSlot,
+      heldDeadline: opts.heldDeadline,
     });
   }
 
   if (result.status !== "started") {
     releaseCapacity();
-    if (spawned) clearActiveRun(scope, job.id);
-    const finishedAt = nowIso();
-    finalizeRunAttemptWithRuntimeStoreRetry({
+    if (spawned) clearActiveRunBestEffort(scope, job.id, runId);
+    return finalizeSkyhookPrestartFailure(job, result, {
+      ...ctx,
+      heldDeadline: opts.heldDeadline,
       scope,
-      jobId: job.id,
-      runId,
-      daemonInstanceId,
-      metadata: job.metadata || null,
-      status: "failure",
-      error: result.error || "agent_start_failed",
-      cleanup: result.wrapper?.cleanup || null,
-      exitCode: result.exit_code ?? null,
-      terminalSource: "supervisor",
-      signalSource: result.signal_source || null,
-      startupWindowMs: result.startup_window_ms || null,
-      now: finishedAt,
+      livePid: liveChild?.pid ?? null,
+      finalizeAttempt: finalizeRunAttemptWithRuntimeStoreRetry,
+      completedEvent: historyCompleteEvent,
+      failureDetail: deriveFailureDetail,
     });
-    const failedEvent = historyCompleteEvent(
-      job,
-      runId,
-      startedAt,
-      finishedAt,
-      { ...result, status: "failure" },
-      logPaths,
-      [],
-    );
-    appendJobHistoryEvent(scope, job.id, {
-      ...failedEvent,
-      scope_id: scope.scope_id,
-      cwd: scope.cwd,
-      scheduled_at: scheduledAt,
-    });
-    appendActivityEvent({
-      type: "job_run_completed_failure",
-      kind: "run",
-      level: "error",
-      daemon_instance_id: daemonInstanceId,
-      scope_id: scope.scope_id,
-      cwd: scope.cwd,
-      job_id: job.id,
-      run_id: runId,
-      status: "failure",
-      reason,
-      scheduled_at: scheduledAt,
-      started_at: startedAt,
-      finished_at: finishedAt,
-      duration_ms: result.duration_ms,
-      elapsed_ms: result.elapsed_ms ?? result.duration_ms,
-      pid: livePid,
-      error: result.error || "agent_start_failed",
-      data: {
-        metadata: isPlainObject(job.metadata) ? job.metadata : {},
-        log_paths: logPaths,
-        wrapper: result.wrapper || null,
-        memory: result.memory || result.wrapper?.memory || null,
-        output: result.output || null,
-        pid: result.pid || livePid || null,
-        signal_source: result.signal_source || null,
-        startup_window_ms: result.startup_window_ms || null,
-        elapsed_ms: result.elapsed_ms ?? result.duration_ms ?? null,
-        agent_session_required: result.agent_session_required === true,
-        skyhook: true,
-      },
-    });
-    return {
-      ...failedEvent,
-      scope_id: scope.scope_id,
-      cwd: scope.cwd,
-      scheduled_at: scheduledAt,
-    };
   }
 
   const startedMemory = result.memory || result.wrapper?.memory || null;
   if (spawned) {
     setActiveRun(scope, job.id, {
       run_id: runId,
-      pid: result.pid || livePid,
-      pid_start_time: pidStartTimeOf(result.pid || livePid),
+      pid: result.pid || liveChild?.pid,
+      pid_start_time: pidStartTimeOf(result.pid || liveChild?.pid),
       heartbeat_path: runHeartbeatPath(scope, runId),
       started_at: startedAt,
       command: result.wrapper?.command || null,
@@ -1200,7 +1160,7 @@ async function executeAndFinalizeSkyhookAgent(
     reason,
     scheduled_at: scheduledAt,
     started_at: startedAt,
-    pid: result.pid || livePid,
+    pid: result.pid || liveChild?.pid,
     data: {
       metadata: isPlainObject(job.metadata) ? job.metadata : {},
       session_id: result.session_id || null,
@@ -1265,21 +1225,39 @@ async function executeAndFinalizeSkyhookAgent(
 
   {
     const finishedAt = nowIso();
-    if (spawned) clearActiveRun(scope, job.id);
-    finalizeRunAttemptWithRuntimeStoreRetry({
-      scope,
+    // Marker first: it must exist before the active run and ledger identity go. A failed write (never throws)
+    // leaves the ledger attempt live, the run's only in-flight evidence; the reconciler closes it when the pid dies.
+    const pending = recordPendingProviderRun(scope, {
       jobId: job.id,
       runId,
-      daemonInstanceId,
-      metadata: job.metadata || null,
-      status: "success",
-      error: "skyhook_started",
-      cleanup: result.wrapper?.cleanup || null,
-      terminalSource: "skyhook-handoff",
-      signalSource: result.signal_source || null,
-      startupWindowMs: result.startup_window_ms || null,
-      now: finishedAt,
+      startedAt,
+      scheduledAt,
+      handedOffAt: finishedAt,
+      pid: result.pid || liveChild?.pid || null,
+      pidStartTime: pidStartTimeOf(result.pid || liveChild?.pid),
+      pgid: result.pgid || null,
+      sessionId: result.session_id || null,
+      logPaths,
+      outcomeCwds: [job.process?.cwd || scope.cwd],
+      agent: result.agent_fallback?.selected_agent || null,
+      runSchedule: job.schedule,
     });
+    if (spawned) clearActiveRun(scope, job.id);
+    if (pending.written)
+      finalizeRunAttemptWithRuntimeStoreRetry({
+        scope,
+        jobId: job.id,
+        runId,
+        daemonInstanceId,
+        metadata: job.metadata || null,
+        status: "success",
+        error: "skyhook_started",
+        cleanup: result.wrapper?.cleanup || null,
+        terminalSource: "skyhook-handoff",
+        signalSource: result.signal_source || null,
+        startupWindowMs: result.startup_window_ms || null,
+        now: finishedAt,
+      });
     appendActivityEvent({
       type: "job_run_completed_success",
       kind: "run",
@@ -1295,7 +1273,7 @@ async function executeAndFinalizeSkyhookAgent(
       started_at: startedAt,
       finished_at: finishedAt,
       duration_ms: result.duration_ms,
-      pid: result.pid || livePid,
+      pid: result.pid || liveChild?.pid,
       error: null,
       data: {
         metadata: isPlainObject(job.metadata) ? job.metadata : {},
@@ -1335,30 +1313,14 @@ async function executeAndFinalizeSkyhookAgent(
         outcome_pending: true,
       },
     });
-    const pending = recordPendingProviderRun(scope, {
-      jobId: job.id,
-      runId,
-      startedAt,
-      scheduledAt,
-      handedOffAt: finishedAt,
-      pid: result.pid || livePid || null,
-      pidStartTime: pidStartTimeOf(result.pid || livePid),
-      pgid: result.pgid || null,
-      sessionId: result.session_id || null,
-      logPaths,
-      outcomeCwds: [job.process?.cwd || scope.cwd],
-    });
     job.state.last_run_at = finishedAt;
     job.state.last_status = "started";
     job.state.last_error = null;
     job.state.last_failed_step = null;
     job.state.deferred_since = null;
     job.state.deferred_reason = null;
-    const next = computeNextAfterRun(
-      job,
-      scheduledAt || finishedAt,
-      finishedAt,
-    );
+    const slot = scheduledAt || finishedAt; // the slot this run fired (fgp.63)
+    const next = computeNextAfterRun(job, slot, finishedAt);
     job.state.next_run_at = next.next_run_at;
     if (!next.enabled) job.state.enabled = false;
     job.meta.updated_at = nowIso();
@@ -1366,7 +1328,7 @@ async function executeAndFinalizeSkyhookAgent(
       scope,
       job.id,
       baselineUpdatedAt,
-      runtimePatchFor(job, consumedPhaseAbortedSlot),
+      runtimePatchFor(job, consumedPhaseAbortedSlot, { runSlot: slot }),
     );
     if (pending.written) {
       observeProviderRunOutcome({
@@ -1624,15 +1586,14 @@ async function executeAndFinalizeCommandStarted(scope, job, opts, ctx) {
   // Advance the schedule only; last_run_at/last_status wait for the exit.
   job.state.deferred_since = null;
   job.state.deferred_reason = null;
-  const next = computeNextAfterRun(
-    job,
-    scheduledAt || handedOffAt,
-    handedOffAt,
-  );
+  const slot = scheduledAt || handedOffAt; // the slot this run fired (fgp.63)
+  const next = computeNextAfterRun(job, slot, handedOffAt);
   job.state.next_run_at = next.next_run_at;
   if (!next.enabled) job.state.enabled = false;
   job.meta.updated_at = nowIso();
-  const schedulePatch = runtimePatchFor(job, consumedPhaseAbortedSlot);
+  const schedulePatch = runtimePatchFor(job, consumedPhaseAbortedSlot, {
+    runSlot: slot,
+  });
   for (const field of [
     "last_run_at",
     "last_status",
@@ -1739,14 +1700,15 @@ async function executeAndFinalize(scope, job, opts, ctx) {
   } = ctx;
 
   let spawned = false;
-  let livePid = null;
+  let liveChild = null; // { pid, startTime } captured first in onSpawn (.51)
   let result;
   let retryAttempt = 0;
+  let postSpawnThrow = false;
   const maxRetries = job.retry?.max_attempts || 0;
 
   for (;;) {
     spawned = false;
-    livePid = null;
+    liveChild = null;
     try {
       // Retry attempts must execute serially for one run_id so history,
       // active-run, and wrapper cleanup evidence remain ordered.
@@ -1761,7 +1723,7 @@ async function executeAndFinalize(scope, job, opts, ctx) {
         memoryMode: opts.memoryMode || null,
         onSpawn: (processInfo) => {
           spawned = true;
-          livePid = processInfo.pid;
+          liveChild = spawnIdentity(processInfo.pid);
           recordLaunchEvidenceWithRuntimeStoreRetry({
             scope,
             jobId: job.id,
@@ -1774,7 +1736,7 @@ async function executeAndFinalize(scope, job, opts, ctx) {
           setActiveRun(scope, job.id, {
             run_id: runId,
             pid: processInfo.pid,
-            pid_start_time: pidStartTimeOf(processInfo.pid),
+            pid_start_time: liveChild.startTime,
             heartbeat_path: runHeartbeatPath(scope, runId),
             started_at: startedAt,
             command: processInfo.command,
@@ -1786,11 +1748,33 @@ async function executeAndFinalize(scope, job, opts, ctx) {
           });
         },
       });
+    } catch (err) {
+      // A throw is this attempt's failure, as on the Skyhook path: the ledger attempt is finalized below,
+      // never left claimed for a reconcile to call lost. After the spawn (onSpawn's evidence writes) the
+      // child is stopped and not retried, so the run never has an unsupervised or second child (.46).
+      postSpawnThrow = stopSpawnedChild({
+        spawned,
+        child: liveChild,
+        err,
+        jobId: job.id,
+        runId,
+      });
+      result = {
+        status: "failure",
+        error: String(err?.message || err),
+        duration_ms: 0,
+        wrapper: null,
+        output: null,
+      };
     } finally {
-      if (spawned) clearActiveRun(scope, job.id);
+      if (spawned) clearActiveRunBestEffort(scope, job.id, runId);
     }
 
-    if (result.status === "success" || retryAttempt >= maxRetries) {
+    if (
+      result.status === "success" ||
+      retryAttempt >= maxRetries ||
+      postSpawnThrow
+    ) {
       if (
         result.status !== "success" &&
         maxRetries > 0 &&
@@ -1919,7 +1903,7 @@ async function executeAndFinalize(scope, job, opts, ctx) {
     started_at: startedAt,
     finished_at: finishedAt,
     duration_ms: result.duration_ms,
-    pid: livePid,
+    pid: liveChild?.pid ?? null,
     error: result.error,
     data: {
       metadata: isPlainObject(job.metadata) ? job.metadata : {},
@@ -2027,15 +2011,15 @@ async function executeAndFinalize(scope, job, opts, ctx) {
 
   job.state.last_run_at = finishedAt;
   job.state.last_status = result.status;
-  // Persist failure detail to job state so a failed run is diagnosable from
-  // jobs.json alone, not just the activity stream (COE-2026-05-22
-  // orchestrator-tick AI-1: job state stored only last_status, leaving us
-  // blind to which step failed and why). Cleared to null on success.
+  // Failure detail makes a failed run diagnosable from jobs.json alone
+  // (COE-2026-05-22 orchestrator-tick AI-1). Cleared to null on success.
   const failureDetail = deriveFailureDetail(result);
   job.state.last_error = failureDetail.last_error;
   job.state.last_failed_step = failureDetail.last_failed_step;
   job.state.deferred_since = null;
   job.state.deferred_reason = null;
+  const runRef = { runId, scheduledAt, logPaths };
+  const hold = holdAtExit(job, result, { ...runRef, finishedAt });
   const next = computeNextAfterRun(job, scheduledAt || finishedAt, finishedAt);
   const previousNextRunAt = job.state.next_run_at;
   job.state.next_run_at = laterIsoOrCandidate(
@@ -2074,10 +2058,8 @@ async function executeAndFinalize(scope, job, opts, ctx) {
 
   // Auto-pause on consecutive failure threshold
   const failureThreshold = job.notify?.on_consecutive_failures;
-  if (failureThreshold && result.status !== "success") {
-    const recentEvents = loadJobHistory(scope, job.id, 1000).filter(
-      (evt) => evt.kind === "completed",
-    );
+  if (failureThreshold && result.status !== "success" && !hold?.held) {
+    const recentEvents = countable(loadJobHistory(scope, job.id, 1000));
     // The current completion has not been appended yet, so seed the streak with it.
     let consecutive =
       result.status === "failure" || result.status === "timeout" ? 1 : 0;
@@ -2131,17 +2113,23 @@ async function executeAndFinalize(scope, job, opts, ctx) {
     },
   };
   appendJobHistoryEvent(scope, job.id, completedEvent);
+  appendHeld(scope, { ...runRef, finishedAt }, hold);
 
-  // Persist the post-run job state. With concurrent dispatch, the calling
-  // dispatch loop may have already returned, so the completion handler owns
-  // the persist. The optimistic-concurrency check against baselineUpdatedAt
-  // means a parallel writer (e.g., the dispatch loop's own end-of-tick patch)
-  // cannot clobber our next_run_at advancement.
-  await persistRuntimePatch(
+  // Persist the post-run job state (the completion handler owns it under concurrent
+  // dispatch). The baselineUpdatedAt check keeps a parallel writer (e.g., the dispatch
+  // loop's end-of-tick patch) from clobbering our next_run_at advancement.
+  await persistCompletionPatch(
     scope,
-    job.id,
-    baselineUpdatedAt,
-    runtimePatchFor(job, consumedPhaseAbortedSlot),
+    {
+      jobId: job.id,
+      baselineUpdatedAt,
+      patch: completionPatchFor(job, consumedPhaseAbortedSlot, {
+        hold,
+        scheduledAt,
+      }),
+      heldDeadline: opts.heldDeadline,
+    },
+    reason,
   );
 
   return completedEvent;
@@ -2613,13 +2601,11 @@ export async function dispatchScope(scope, opts = {}) {
       for (const job of jobs) {
         if (spawnedJobIds.has(job.id) && !scheduleAdvanceJobIds.has(job.id))
           continue;
+        const consumed = consumedInfrastructureSlots.get(job.id) || null; // also the slot it fired, if any
         runtimeUpdates.push({
           jobId: job.id,
           baselineUpdatedAt: baselineUpdatedAt.get(job.id) || null,
-          patch: runtimePatchFor(
-            job,
-            consumedInfrastructureSlots.get(job.id) || null,
-          ),
+          patch: runtimePatchFor(job, consumed, { runSlot: consumed }),
         });
       }
       // One catalog mutation preserves the existing per-job conflict checks

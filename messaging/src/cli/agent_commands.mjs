@@ -9,16 +9,19 @@ import { TextDecoder } from 'node:util';
 
 import { confirmationWarning, formatAddress, parseAgentAddress, resolveAgentAddress, routedRecipient } from './agent_address.mjs';
 import { sendFollowUp } from './agent_follow_up.mjs';
-import { deriveSessionState, listAgentSessions, SESSION_LIST_LIMIT, SESSION_STATES, sessionHandleLookup, sessionHandlesFor } from './agent_sessions.mjs';
+import { ackPending, allRoutesWithOrigin, replyOnWork, requireSlackAdded } from './agent_reply_flow.mjs';
+import { delegateAt, parseWakeAt } from './agent_delegate_at.mjs';
+import { deriveSessionState, ENDPOINT_DEAD_NEXT, listAgentSessions, refreshableRefusal, refreshAndRetry, SESSION_LIST_LIMIT, SESSION_STATES, sessionHandleLookup, sessionHandlesFor } from './agent_sessions.mjs';
 import { launchFailureNotice, listAgentThreads, readAgentThread } from './agent_threads.mjs';
 import { settleNewAgent } from './new_agent.mjs';
+import { runTransfer } from './agent_transfer.mjs';
 import { resolveAgentIdentity } from './hook_identity.mjs';
 import { mutateActionStore } from './agent_action_store.mjs';
 import { LEGACY_RUNTIME_ALIASES as BUILTIN_RUNTIME_ALIASES } from '../runtimes/builtins.mjs';
 import { localTightbeamAction, offerActionCommands, tightbeamCommandHint, tightbeamRecipeCommand, workActionCommands } from './package_context.mjs';
 import { sessionPaths } from '../protocol/session_paths.mjs';
 import { deliveryStepFor } from '../protocol/delivery_step.mjs';
-import { routeOpenTo } from '../protocol/session_env.mjs';
+import { routeOpenTo, slackChannelAdded } from '../protocol/session_env.mjs';
 import { parseWaitTimeout, readActionStore, waitForAgent } from './agent_wait.mjs';
 
 export class AgentCommandError extends Error {
@@ -31,7 +34,7 @@ export class AgentCommandError extends Error {
 }
 
 const RAW_FLAGS = new Set(['from', 'sender-endpoint', 'process-generation', 'key', 'conversation', 'target-principal', 'target-endpoint', 'obligation', 'generation', 'idempotency-key']);
-const COMMANDS = new Set(['send', 'request', 'reply', 'ack', 'update', 'delegate', 'accept', 'decline', 'complete', 'cancel', 'inbox', 'receive', 'status', 'sessions', 'threads', 'thread', 'wait']);
+const COMMANDS = new Set(['send', 'request', 'reply', 'ack', 'update', 'delegate', 'transfer', 'accept', 'decline', 'complete', 'cancel', 'inbox', 'receive', 'status', 'sessions', 'threads', 'thread', 'wait']);
 
 /** The help that explains a usage error: the verb's own when it is a known agent verb. */
 function agentHelpCommand(verb) {
@@ -106,7 +109,7 @@ function resolveBodyInput(args) {
   return decoded;
 }
 
-const AGENT_ADDRESSES = 'session:<id>, agent:<runtime>:<cwd>, or new:<runtime>:<cwd>';
+const AGENT_ADDRESSES = 'session:<id>, agent:<runtime>:<cwd>, academy:<name>, or new:<runtime>:<cwd>';
 
 function recipient(value, { self = false } = {}) {
   if (value === 'self' && self) return { kind: 'self' };
@@ -208,9 +211,11 @@ function parseAgentArguments(argv, { actionId: suppliedActionId } = {}) {
     }
   } else if (command === 'delegate') {
     parsed.workId = required(args, 'work');
-    parsed.to = recipient(required(args, 'to'));
-    if (parsed.to.kind === 'user') usage(`--to must be ${AGENT_ADDRESSES}`);
+    parseDelegateTarget(args, parsed);
     parsed.body = resolveBodyInput(args);
+  } else if (command === 'transfer') {
+    Object.assign(parsed, { workId: required(args, 'work'), to: recipient(required(args, 'to')), body: takeFlag(args, 'body') });
+    if (parsed.to.kind !== 'session' || parsed.body === '') usage(parsed.to.kind === 'session' ? '--body must not be empty' : '--to must be session:<id> for transfer');
   } else if (command === 'accept' || command === 'decline') {
     parsed.workId = required(args, 'work');
     parsed.body = resolveBodyInput(args);
@@ -261,6 +266,23 @@ function parseAgentArguments(argv, { actionId: suppliedActionId } = {}) {
   }
   if (args.length > 0) usage(`unknown agent argument: ${args.join(' ')}`);
   return parsed;
+}
+
+function parseDelegateTarget(args, parsed) {
+  const at = takeFlag(args, 'at');
+  const hasTo = args.some((token) => token === '--to' || token.startsWith('--to='));
+  if (at === undefined) {
+    if (!hasTo) usage('delegate requires --to <address> to hand the work off, or --at <time> to park it');
+    parsed.to = recipient(required(args, 'to'));
+    if (parsed.to.kind === 'user') usage(`--to must be ${AGENT_ADDRESSES}`);
+    return;
+  }
+  if (hasTo) usage('--at and --to cannot be combined; --at parks the work with this session, --to hands it off');
+  try {
+    parsed.wakeAt = parseWakeAt(at);
+  } catch (error) {
+    usage(error.message, 'delegate');
+  }
 }
 
 // `send --thread`: the thread names the recipient, subject, and reply policy.
@@ -351,15 +373,15 @@ async function resolveAgent(client, session, target, { verb, command }) {
   return resolveAgentAddress(client, session, target, { verb, replay: target.kind === 'new' ? newAgentReplay(session, command) : null });
 }
 
-async function selectedOutboundChannels(client, channels) {
+export async function selectedOutboundChannels(client, channels) {
   validateChannelSelection(channels);
   // ACADEMY_AGENT_NAME is the name the session's hook registered.
   const name = process.env.ACADEMY_AGENT_NAME;
-  if (!routeOpenTo('slack', name) && channels.includes('slack')) {
-    throw new AgentCommandError('slack_named_agents_only', 'Slack is for Academy agents. This session has no agent name.');
-  }
+  if (channels.includes('slack')) requireSlackAdded(name);
   const catalog = await client.request('channel.route.list', { available_only: true, required_capability: 'send' });
-  const available = (catalog.routes ?? []).map((route) => route.selector).filter((selector) => typeof selector === 'string' && selector.length > 0 && routeOpenTo(selector, name));
+  const routes = (catalog.routes ?? []).map((route) => route.selector).filter((selector) => typeof selector === 'string' && selector.length > 0 && routeOpenTo(selector, name));
+  const slackAdded = routes.includes('slack') && slackChannelAdded(name);
+  const available = routes.filter((selector) => selector !== 'slack' || slackAdded);
   const requested = channels.length === 0 || channels.includes('all') ? available : [...new Set(channels)].sort();
   if (requested.length === 0) {
     throw new AgentCommandError('no_outbound_channels', 'no active send-capable channel routes are available');
@@ -472,7 +494,7 @@ function withResolvedRecipient(response, target, confirmationText, result) {
 
 // A delivery read after a durable commit never fails it: an unreadable status
 // is reported beside the committed ids, with a warning not to resend.
-async function readChannelDeliveries(client, messageId) {
+export async function readChannelDeliveries(client, messageId) {
   try {
     const deliveries = await client.request('message.delivery.list', { message_id: messageId });
     const channelDeliveries = deliveries.channel_deliveries ?? [];
@@ -487,12 +509,12 @@ async function readChannelDeliveries(client, messageId) {
   }
 }
 
-function withDeliveryWarning(response) {
+export function withDeliveryWarning(response) {
   if (!response.confirmation_warning || typeof response.confirmation !== 'string') return response;
   return { ...response, confirmation: `${response.confirmation}\nWarning: ${response.confirmation_warning}` };
 }
 
-function correspondenceResult(result, { subject, noReply, workId = null, verb = 'Sent' }) {
+export function correspondenceResult(result, { subject, noReply, workId = null, verb = 'Sent' }) {
   const replyPolicy = result.await_reply || (result.effect && result.effect.type !== 'none') || !noReply ? 'reply required' : 'no reply required';
   const response = {
     ...intentResult(result),
@@ -508,15 +530,10 @@ function correspondenceResult(result, { subject, noReply, workId = null, verb = 
 
 function deliveryOutcome(deliveries) {
   const states = new Set(deliveries.map((delivery) => delivery.state));
-  if (states.size === 0) return 'committed';
-  if (states.size === 1) return states.has('delivered') ? 'delivered' : [...states][0];
+  if (states.size < 2) return states.size === 0 ? 'committed' : states.has('delivered') ? 'delivered' : [...states][0];
+  // Partial needs a delivered channel beside an undelivered one; with none delivered it is failed or still pending.
+  if (!states.has('delivered')) return [...states].every((state) => ['failed', 'cancelled'].includes(state)) ? 'failed' : 'pending';
   return 'partial';
-}
-
-function staleGenerationConflict(error) {
-  if (error?.code !== 'obligation_conflict') return false;
-  if (error?.details?.reason === 'process_generation_stale') return true;
-  return /process generation|generation.*stale|stale.*generation/i.test(String(error?.message ?? ''));
 }
 
 function unreadAdmissionError(error) {
@@ -529,7 +546,7 @@ function unreadAdmissionError(error) {
 }
 
 function consumeInboundWarning(session, command) {
-  if (!['send', 'request', 'reply', 'ack', 'update', 'delegate', 'accept', 'decline', 'complete', 'cancel', 'inbox'].includes(command.command) || !session.agent_action_store_path) return null;
+  if (!['send', 'request', 'reply', 'ack', 'update', 'delegate', 'transfer', 'accept', 'decline', 'complete', 'cancel', 'inbox'].includes(command.command) || !session.agent_action_store_path) return null;
   const file = path.join(path.dirname(session.agent_action_store_path), 'unread-warning.json');
   try {
     fs.unlinkSync(file);
@@ -755,32 +772,27 @@ function workNotFound(message = 'no visible work matches that handle') {
   return new AgentCommandError('work_not_found', message, { next_action: `${tightbeamRecipeCommand()} agent threads --waiting-on me` });
 }
 
-async function workChain(client, workId) {
+export async function workChain(client, workId) {
+  // The daemon resolves any work id to its own chain; an app-wide fallback would exceed the frame limit (ac-jfv.28).
   const view = await client.request('lifecycle.view', { root_obligation_id: workId });
   if (Array.isArray(view.chains) && view.chains.length === 1) return view.chains[0];
-  const all = await client.request('lifecycle.view', {});
-  const chain = (all.chains ?? []).find((candidate) => candidate.root_obligation_id === workId || workNodes(candidate).some((node) => node.obligation_id === workId));
-  if (!chain) throw workNotFound();
-  return chain;
+  throw workNotFound();
 }
 
-async function runWorkCommand(client, session, command, chain, operation = command.command) {
+export async function runWorkCommand(client, session, command, chain, operation = command.command) {
   const node = operation === 'cancel' ? await authorizeRequesterOrHolderCancel(client, chain, session) : selectCustodiedWork(chain, session, command.workId);
-  const terminalOriginMessageId = (operation === 'complete' || operation === 'cancel') && typeof chain.user_origin_message_id === 'string'
+  const terminalOriginMessageId = (operation === 'complete' || operation === 'cancel' || command.command === 'reply' || command.wakeAt || node.role === 'attempt' /* a delegate's update keeps the participant path */) && typeof chain.user_origin_message_id === 'string'
     ? chain.user_origin_message_id
     : null;
-  const notificationChannels =
-    operation === 'complete' && chain.notification?.channel_selectors
-      ? chain.notification.channel_selectors
-      : terminalOriginMessageId
-        ? ['origin']
-        : null;
+  // The requester chose these selectors at open time; this completer's own Slack opt-in still decides.
+  const storedChannels = operation === 'complete' ? chain.notification?.channel_selectors?.filter((selector) => selector !== 'slack' || slackChannelAdded(process.env.ACADEMY_AGENT_NAME)) : null;
+  const notificationChannels = storedChannels?.length ? storedChannels : terminalOriginMessageId ? await allRoutesWithOrigin(client, session, terminalOriginMessageId) : null;
   if (operation === 'complete' && command.notify === 'user' && !chain.notification?.channel_selectors) {
     throw new AgentCommandError('notification_not_registered', 'this work was not opened with --notify user');
   }
   const effect =
     operation === 'update'
-      ? { type: 'update', obligation_id: node.obligation_id, generation: node.generation, sender_endpoint_id: session.endpoint_id, process_generation: session.process_generation }
+      ? { type: 'update', obligation_id: node.obligation_id, generation: node.generation, sender_endpoint_id: session.endpoint_id, process_generation: session.process_generation, ...(command.wakeAt ? { wake_at: command.wakeAt } : {}) }
       : operation === 'complete'
         ? { type: 'close.fulfilled', obligation_id: node.role === 'delegation' ? node.obligation_id : chain.root_obligation_id, generation: node.role === 'delegation' ? node.generation : chain.generation, sender_endpoint_id: session.endpoint_id, process_generation: session.process_generation, outcome: 'success' }
         : { type: 'close.cancelled', obligation_id: chain.root_obligation_id, generation: chain.generation, reason: command.reason, source: 'agent', sender_endpoint_id: session.endpoint_id, process_generation: session.process_generation };
@@ -798,9 +810,10 @@ async function runWorkCommand(client, session, command, chain, operation = comma
     if (command.waitDeliveryMs) {
       return withCancelNotice(operation, chain, result, correspondenceResult(result, { subject: chain.subject ?? null, noReply: false, workId: command.workId }));
     }
+    const deliveries = await readChannelDeliveries(client, result.message_id);
     return withDeliveryWarning({
       ...withCancelNotice(operation, chain, result, correspondenceResult(result, { subject: chain.subject ?? null, noReply: false, workId: command.workId, verb })),
-      ...(await readChannelDeliveries(client, result.message_id)),
+      ...deliveries, ...(deliveries.channel_deliveries?.length === 0 ? { confirmation_warning: `The message reached no channel; the user will not see it. Check it with ${tightbeamRecipeCommand()} agent status --message ${result.message_id}.` } : {}),
     });
   }
   return withCancelNotice(operation, chain, result, correspondenceResult(result, { subject: chain.subject ?? null, noReply: false, workId: command.workId, verb }));
@@ -832,7 +845,7 @@ function receiveRefusal(error) {
   if (error?.code !== 'permission_denied') return null;
   return new AgentCommandError('permission_denied', error.message, {
     ...(error.details ? { details: error.details } : {}),
-    next_action: `${tightbeamRecipeCommand()} agent inbox --unread`,
+    next_action: error.details?.reason === 'endpoint_dead' ? ENDPOINT_DEAD_NEXT : `${tightbeamRecipeCommand()} agent inbox --unread`,
   });
 }
 
@@ -911,17 +924,12 @@ async function runAgentCommandOnce(client, session, command) {
   }
   if (command.command === 'reply') {
     const message = await client.request('message.read', { message_id: command.messageId, principal_id: session.principal_id, endpoint_id: session.endpoint_id });
-    if (message.origin_channel_selector && message.root_obligation_id) {
-      const chain = await workChain(client, message.root_obligation_id);
-      if (chain.conversation_id !== message.conversation_id || chain.user_origin_message_id !== command.messageId) {
-        throw new AgentCommandError('reply_target_mismatch', 'this message is not the canonical user request for this work; reply to its original message or use agent complete --work with the notification work ID');
-      }
-      if (command.noReply || command.channels.some((selector) => selector !== 'origin')) {
-        throw new AgentCommandError('reply_policy_unavailable', `Reply to this user request without --no-reply or --channel. For a progress acknowledgement use agent ack --work ${chain.root_obligation_id} --body "<progress>"; for the final result use agent complete --work ${chain.root_obligation_id} --body "<result>".`);
-      }
-      return runWorkCommand(client, session, { ...command, workId: chain.root_obligation_id }, chain, 'complete');
-    }
-    const selectors = command.channels.length > 0 ? command.channels : message.origin_channel_selector ? ['origin'] : [];
+    const routed = await replyOnWork({ client, session, runOnce: runAgentCommandOnce }, command, message);
+    if (routed.result) return routed.result;
+    // A reply to a channel message goes to every available send route unless --channel narrows it.
+    // An explicit slack needs the agent's channel unless slack is where the message came from (a Slack thread reply).
+    if (command.channels.includes('slack') && message.origin_channel_selector !== 'slack') requireSlackAdded(process.env.ACADEMY_AGENT_NAME);
+    const selectors = command.channels.length > 0 ? command.channels : message.origin_channel_selector ? await allRoutesWithOrigin(client, session, command.messageId) : [];
     let effect;
     let awaitReply = false;
     let workId = null;
@@ -931,7 +939,7 @@ async function runAgentCommandOnce(client, session, command) {
       effect = baseNone(session);
       awaitReply = true;
     } else if (typeof message.root_obligation_id === 'string' && message.root_obligation_id.length > 0) {
-      const chain = await workChain(client, message.root_obligation_id);
+      const chain = routed.chain ?? await workChain(client, message.root_obligation_id);
       if (chain.conversation_id !== message.conversation_id) {
         throw workNotFound('the message work does not belong to its canonical conversation');
       }
@@ -982,7 +990,7 @@ async function runAgentCommandOnce(client, session, command) {
       outcome: 'committed',
       ...result,
       ...(offer ? { accept_command: offer.accept, decline_command: offer.decline } : {}),
-      ...(work ? { update_command: work.update, complete_command: work.complete, delegate_command: work.delegate } : {}),
+      ...(work ? { update_command: work.update, complete_command: work.complete, delegate_command: work.delegate, park_command: work.park } : {}),
       ...(work && result.ack_pending === true ? { ack_command: work.ack } : {}),
       acknowledge_command: `${session.recipe_prefix ?? tightbeamRecipeCommand()} ack ${result.message_id} --endpoint ${session.endpoint_id} --generation ${session.process_generation}`,
     };
@@ -1009,10 +1017,11 @@ async function runAgentCommandOnce(client, session, command) {
       in_reply_to_message_id: chain.ack_message_id,
       body: command.body,
       idempotency_key: commitKey('ack', command, 'message'),
-      channel_selectors: ['origin'],
+      channel_selectors: await allRoutesWithOrigin(client, session, chain.ack_message_id),
       obligation_effect: {
         type: 'update', obligation_id: attempt.obligation_id, generation: attempt.generation,
         sender_endpoint_id: session.endpoint_id, process_generation: session.process_generation, acknowledgement: true,
+        ...(command.wakeAt ? { wake_at: command.wakeAt } : {}),
       },
     });
     return withDeliveryWarning({
@@ -1022,6 +1031,7 @@ async function runAgentCommandOnce(client, session, command) {
       confirmation: 'Acknowledged · final response still required',
     });
   }
+  if (command.command === 'delegate' && command.wakeAt) return delegateAt({ client, session, runOnce: runAgentCommandOnce }, command);
   if (command.command === 'delegate') {
     const chain = await workChain(client, command.workId);
     const node = selectCustodiedWork(chain, session, command.workId);
@@ -1058,6 +1068,7 @@ async function runAgentCommandOnce(client, session, command) {
       }),
     };
   }
+  if (command.command === 'transfer') return runTransfer(client, session, { command, workChain, selectCustodiedWork, resolveAgent, commitKey, exactConfirmation });
   if (command.command === 'accept' || command.command === 'decline') {
     const chain = await workChain(client, command.workId);
     const delegation = selectOfferedDelegation(chain, session, command.workId);
@@ -1074,7 +1085,8 @@ async function runAgentCommandOnce(client, session, command) {
     return correspondenceResult(result, { subject: chain.subject ?? null, noReply: false, workId: chain.root_obligation_id, verb: command.command === 'accept' ? 'Accepted' : 'Declined' });
   }
   if (command.command === 'update' || command.command === 'complete' || command.command === 'cancel') {
-    return runWorkCommand(client, session, command, await workChain(client, command.workId));
+    const chain = await workChain(client, command.workId);
+    return command.command === 'update' && ackPending(chain) && selectCustodiedWork(chain, session, command.workId).role === 'attempt' ? runAgentCommandOnce(client, session, { ...command, command: 'ack' }) : runWorkCommand(client, session, command, chain);
   }
   if (command.command === 'inbox') {
     const result = await client.request('inbox.list', { principal_id: session.principal_id, endpoint_id: session.endpoint_id, unread_only: command.unread });
@@ -1132,9 +1144,9 @@ export async function runAgentCommand(client, session, command, { refreshSession
     if (error?.code === 'permission_denied' && command.command === 'status' && command.messageId) {
       throw new AgentCommandError(error.code, 'Delivery status is available for messages sent by this application. Use the outbound message_id returned by reply/complete, or agent status --work <work-id>; an inbound message ID is not a delivery receipt.');
     }
-    if (command.command === 'wait' || !refreshSession || !staleGenerationConflict(error)) throw error;
-    const refreshed = await refreshSession();
-    result = await runAgentCommandOnce(client, refreshed, boundCommand);
+    // A resumed child whose hooks never re-registered finds its endpoint dead; registering revives it.
+    if (command.command === 'wait' || !refreshSession || !refreshableRefusal(error)) throw error;
+    result = await refreshAndRetry({ error, session, command: command.command, refreshSession, retry: (refreshed) => runAgentCommandOnce(client, refreshed, boundCommand) });
   }
   // Waiting only reads the committed outbound message. A timeout or read error
   // must never re-enter the send/complete retry path.
@@ -1146,19 +1158,20 @@ export async function runAgentCommand(client, session, command, { refreshSession
 }
 
 const TERMINAL_WORK_STATUSES = new Set(['done', 'cancelled']);
+const channelStates = (deliveries) => deliveries?.map((delivery) => `${delivery.label ?? delivery.selector ?? 'channel'} ${delivery.state}`).join(', ');
 
-// Terminal work has nothing left to wait for: report how it ended, any
-// delivery verdict it did reach, and the thread to read, never the same wait.
-function terminalWorkConfirmation(result, { delivered, failed }) {
+// Terminal work has nothing left to wait for: report how it ended, any verdict, and what to read next (an open partial's message, else the thread).
+function terminalWorkConfirmation(result, { delivered, failed, partial, openRoute }) {
   const thread = result.thread_id ? shortThreadId(result.thread_id) : null;
-  const delivery = delivered ? 'Delivery confirmed' : failed ? 'Delivery failed' : null;
+  const [delivery, verdictGuidance = {}] = delivered ? ['Delivery confirmed'] : partial ? [`Delivery partial · ${channelStates(result.channel_deliveries)}`, { guidance: [result.guidance, 'Do not resend: the delivered channels already have this message.'].filter(Boolean).join(' ') }] : failed ? ['Delivery failed', { guidance: 'Report the delivery failure; do not resend automatically.' }] : [];
+  const next = openRoute ? `agent status --message ${result.message_id} --wait-delivery 30s` : thread && `agent thread --thread ${thread}`;
   return {
     ...result,
     // With no delivery verdict, the outcome of a closed work is how it ended, as plain `status --work` reports it, not the wait's `committed`.
     outcome: result.outcome === 'committed' ? result.work_status : result.outcome,
     confirmation: [`Work ${result.work_status}`, result.subject, thread, delivery].filter(Boolean).join(' · '),
-    ...(thread ? { next_action: `${tightbeamRecipeCommand()} agent thread --thread ${thread}` } : {}),
-    ...(failed ? { guidance: 'Report the delivery failure; do not resend automatically.' } : {}),
+    ...(next ? { next_action: `${tightbeamRecipeCommand()} ${next}` } : {}),
+    ...verdictGuidance,
   };
 }
 
@@ -1171,9 +1184,7 @@ function holderLabel(holder) {
 
 /** The `status --work` text view: one headline, then one plain line per known field. */
 function renderWorkStatus(result) {
-  const channels = Array.isArray(result.channel_deliveries) && result.channel_deliveries.length > 0
-    ? result.channel_deliveries.map((delivery) => `${delivery.label ?? delivery.selector ?? 'channel'} ${delivery.state}`).join(', ')
-    : null;
+  const channels = Array.isArray(result.channel_deliveries) && result.channel_deliveries.length > 0 ? channelStates(result.channel_deliveries) : null;
   const fields = [
     ['work_id', result.work_id],
     ['holder', holderLabel(result.holder)],
@@ -1196,31 +1207,34 @@ function renderWorkStatus(result) {
 }
 
 function deliveryConfirmation(result, command) {
-  if (['ack', 'update'].includes(command.command)) return result;
+  if (command.command === 'update') return result;
   // A plain send keeps its own receipt; only an explicit wait reports delivery.
   if (command.command === 'send' && !command.waitDeliveryMs) return result;
   if ((!Array.isArray(result.channel_deliveries) && !command.waitDeliveryMs) || (!result.confirmation && !command.waitDeliveryMs)) return result;
-  const delivered = result.outcome === 'delivered';
-  const failed = result.channel_deliveries?.some((delivery) => ['failed', 'cancelled'].includes(delivery.state));
-  if (command.command === 'status' && command.workId && TERMINAL_WORK_STATUSES.has(result.work_status)) return terminalWorkConfirmation(result, { delivered, failed });
-  const unavailable = result.delivery_check_error === 'permission_denied';
-  const noRoutes = result.channel_deliveries?.length === 0;
+  const delivered = result.outcome === 'delivered', hasBad = result.channel_deliveries?.some((delivery) => ['failed', 'cancelled'].includes(delivery.state));
+  const partial = hasBad && result.outcome === 'partial', unconfirmed = hasBad && !partial && result.outcome === 'pending', failed = hasBad && !partial && !unconfirmed, openRoute = result.outcome === 'partial' && result.channel_deliveries?.some((entry) => !['delivered', 'failed', 'cancelled'].includes(entry.state));
+  if (command.command === 'ack' && !partial) return result; // an ack keeps its own notice unless a channel failed beside a delivered one
+  if (command.command === 'status' && command.workId && TERMINAL_WORK_STATUSES.has(result.work_status)) return terminalWorkConfirmation(result, { delivered, failed, partial, openRoute });
+  const unavailable = result.delivery_check_error === 'permission_denied', noRoutes = result.channel_deliveries?.length === 0;
   const label = delivered ? 'Delivery confirmed'
     : failed ? 'Delivery failed'
+    : unconfirmed ? `Delivery unconfirmed · ${channelStates(result.channel_deliveries)}`
     : unavailable ? 'Delivery status unavailable'
     : noRoutes ? 'Message committed; no channel delivery to confirm'
     : command.command === 'status' ? 'Delivery not confirmed'
     : command.command === 'send' ? 'Message queued; delivery not yet confirmed'
+    : command.wakeAt ? `Request parked until ${command.wakeAt}; message queued to the requester; delivery not yet confirmed`
     : 'Reply queued; delivery not yet confirmed';
   const target = result.message_id ? `--message ${result.message_id}` : `--work ${result.work_id}`;
   // A cancel keeps its holder notice; the delivery label follows it.
-  const cancelNotice = command.command === 'cancel' && Number.isInteger(result.notified_holders) ? `${result.confirmation} · ` : '';
+  const cancelNotice = (command.command === 'cancel' && Number.isInteger(result.notified_holders)) || command.command === 'ack' ? `${result.confirmation} · ` : '';
+  if (partial) return { ...result, confirmation: `${cancelNotice}Delivery partial · ${channelStates(result.channel_deliveries)}`, ...(openRoute ? { next_action: `${tightbeamCommandHint()} agent status ${target} --wait-delivery 30s` } : {}), guidance: [result.guidance, 'Do not resend: the delivered channels already have this message.'].filter(Boolean).join(' ') };
   return {
     ...result,
     confirmation: `${cancelNotice}${label}`,
     ...(!delivered ? {
       ...(!failed && !unavailable && !noRoutes ? { next_action: `${tightbeamCommandHint()} agent status ${target} --wait-delivery 30s` } : {}),
-      guidance: result.guidance ?? (failed ? 'Report the delivery failure; do not resend automatically.' : `Check this existing ${['send', 'status'].includes(command.command) ? 'message' : 'reply'}; do not resend it.`),
+      guidance: [result.guidance, failed ? 'Report the delivery failure; do not resend automatically.' : `Check this existing ${['send', 'status'].includes(command.command) ? 'message' : 'reply'}; do not resend it.`].filter(Boolean).join(' '),
     } : {}),
   };
 }
@@ -1267,7 +1281,7 @@ async function waitForDelivery(client, session, initial, timeoutMs) {
         }
         return result;
       }
-      if (routes?.some((delivery) => ['failed', 'cancelled'].includes(delivery.state))) return { ...result, delivery_wait: 'failed' };
+      if (routes?.some((delivery) => ['failed', 'cancelled'].includes(delivery.state)) && routes.every((delivery) => ['delivered', 'failed', 'cancelled'].includes(delivery.state))) return { ...result, delivery_wait: result.outcome === 'partial' ? 'partial' : 'failed' };
       if (routes && routes.length === 0) return { ...result, delivery_wait: 'unavailable' };
       const remaining = deadline - performance.now();
       if (remaining <= 0) return { ...result, delivery_wait: 'timed_out' };

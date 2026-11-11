@@ -15,6 +15,12 @@
 //
 // Claude Code names are exact because CLAUDE_CODE_* also holds user
 // configuration; HELM_, GROVE_ and SUBSPACE_AGENT_ are per-launch only.
+import fs from 'node:fs';
+import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
+
+import { agentHome } from './state_root_location.mjs';
+
 const SESSION_ENV_NAMES = new Set([
   'CLAUDE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID', 'CODEX_THREAD_ID',
   'TIGHTBEAM_HOST', 'TIGHTBEAM_HOST_REF', 'TIGHTBEAM_LAUNCH_TOKEN', 'TIGHTBEAM_PLACEHOLDER_ENDPOINT_ID',
@@ -33,3 +39,27 @@ export function withoutSessionEnv(env) {
 // Slack is for Academy agents only (tldr, 2026-10-26): a session with no
 // Academy agent name neither sees nor selects the slack route.
 export const routeOpenTo = (selector, academyAgentName) => selector !== 'slack' || Boolean(academyAgentName);
+
+// The same slug as agentChannelKey in src/lib/slack_owner_channel.mjs, the source of truth.
+export const slackAgentKey = (name) => String(name ?? '').toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 80);
+
+// Slack is opt-in: only `tldr-agents slack channels add` gives an agent a channel row, and only that
+// agent gets a Slack copy or is offered the route. Read straight from the map (messaging imports nothing
+// from src/lib); no file, no table, or an unreadable map all mean "not added".
+export function slackChannelAdded(name) {
+  const key = slackAgentKey(name);
+  const file = path.join(agentHome(), 'slack-channel-map.sqlite');
+  if (!key || !fs.existsSync(file)) return false;
+  let db;
+  try {
+    db = new DatabaseSync(file, { readOnly: true, timeout: 5000 });
+    return Boolean(db.prepare('SELECT 1 FROM agent_channel WHERE agent_name = ?').get(key));
+  } catch (error) {
+    if (!/no such table/.test(String(error?.message))) {
+      process.stderr.write(`${JSON.stringify({ ts: new Date().toISOString(), event: 'slack_channel_lookup_failed', status: 'warn', params: { agent: name }, result: { message: String(error?.message ?? error) } })}\n`);
+    }
+    return false;
+  } finally {
+    db?.close();
+  }
+}

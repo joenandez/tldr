@@ -48,6 +48,7 @@ import { fileURLToPath } from 'node:url';
 import { admitHookContract, createRuntimeRegistry, DEFAULT_IDLE_WAKE, HOOK_ADMISSION_ERROR_CODES, IDLE_WAKE_MODES } from '../runtimes/registry.mjs';
 import { REPLY_BINDING_POLICY } from '../protocol/reply_listener_policy.mjs';
 import { unifiedPackageFrontDoorPath, unifiedPackageTightbeamPath } from './package_context.mjs';
+import { CLAUDE_ENV, assertEnvObject, planEnv } from './claude_env.mjs';
 import { hookInstallRuntimeIds, installCopilotHooks, planCopilotHookRollback } from './copilot_hooks_install.mjs';
 import { isCopilotPluginHooksPath } from '../runtimes/copilot_contract.mjs';
 import { atomicWriteHookSettings, readHookSettings, serializeHookSettings } from './hooks_install_io.mjs';
@@ -98,6 +99,7 @@ export const HOOK_EVENTS = ['SessionStart', 'UserPromptSubmit', 'Stop', 'PreTool
 // APPENDED, so the five entries users already trusted keep their positions.
 export const CODEX_HOOK_EVENTS = [...HOOK_EVENTS, 'SubagentStart', 'SubagentStop'];
 const STOP_GUARD_TIMEOUT_SECONDS = 30;
+const CLAUDE_RUNTIME_IDS = ['claude', 'claude-code'];
 const STOP_LISTENER_TIMEOUT_SECONDS = Math.ceil(REPLY_BINDING_POLICY.maxParkMs / 1000) + 60;
 // The background-hook gate only decides block/park/allow and hands off; it
 // is synchronous, so a long timeout would hold the host's input queue again.
@@ -386,7 +388,8 @@ export function planChanges(settings, action, options = {}) {
   }
 
   if (Object.keys(next.hooks).length === 0) delete next.hooks;
-  return { next, changes };
+  const envChanges = options.env ? planEnv(next, action, options.env) : undefined;
+  return { next, changes, envChanges };
 }
 
 /**
@@ -459,6 +462,8 @@ export function bootstrapHooks({ action, runtime = null, dryRun = false, home = 
     // Resolved here, before any write, so a mode the installer cannot shape
     // refuses the whole invocation like any other admission failure.
     targets.push({ id: record.id, record, file });
+    // A non-object env refuses the whole invocation, so no runtime is written.
+    if (action === 'install' && CLAUDE_RUNTIME_IDS.includes(record.id)) assertEnvObject(readHookSettings(file).value);
   }
 
   const report = [];
@@ -472,6 +477,7 @@ export function bootstrapHooks({ action, runtime = null, dryRun = false, home = 
       events: id === 'codex' ? CODEX_HOOK_EVENTS : HOOK_EVENTS,
       recognizedCommands,
       idleWake,
+      env: CLAUDE_RUNTIME_IDS.includes(id) ? CLAUDE_ENV : undefined,
     };
     const originalSettings = readHookSettings(file);
     const copilotRollback = settingsFile !== undefined
@@ -480,7 +486,7 @@ export function bootstrapHooks({ action, runtime = null, dryRun = false, home = 
     const settings = copilotRollback === null
       ? originalSettings
       : { ...originalSettings, value: copilotRollback.next };
-    const { next, changes } = planChanges(settings, action, options);
+    const { next, changes, envChanges } = planChanges(settings, action, options);
     const contents = serializeHookSettings(next);
     const entry = {
       runtime: id,
@@ -492,6 +498,7 @@ export function bootstrapHooks({ action, runtime = null, dryRun = false, home = 
       ],
     };
     if (idleWake !== undefined) entry.idle_wake = idleWake;
+    if (envChanges !== undefined) entry.env_changes = envChanges;
     if (action === 'uninstall' && id === 'codex') {
       // Codex trust records live in config.toml keyed by index; that
       // machinery is a special case BY ID and belongs to no other runtime,

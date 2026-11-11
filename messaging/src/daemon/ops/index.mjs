@@ -28,6 +28,7 @@ import { messageCommitOp } from './message_commit.mjs';
 import { messageDeliveryListOp } from './message_delivery_list.mjs';
 import { recoveryRetryOp } from './recovery_retry.mjs';
 import { recoverySwitchOp } from './recovery_switch.mjs';
+import { recoveryTransferOp } from './recovery_transfer.mjs';
 import { sessionStopOp } from './session_stop.mjs';
 import { lifecycleViewOp } from './lifecycle_view.mjs';
 import { recoveryContextOp } from './recovery_context.mjs';
@@ -149,6 +150,7 @@ export function buildOpTable() {
   // wrappers, agent scope gated on the existing manage_obligations grant.
   registerOp(table, recoveryRetryOp);
   registerOp(table, recoverySwitchOp);
+  registerOp(table, recoveryTransferOp);
   // The idempotent Stop decision (transitions.yaml STOP-REQUEST): engine-
   // owned block-or-allow behind a thin wrapper, agent scope gated on the
   // endpoint-administration grant the Stop actor's identity already rests on.

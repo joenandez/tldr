@@ -10,7 +10,7 @@
 
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
-import { acquireClaim, deliveryRetryDelayMs, issueReplyBindingToken, MAX_DELIVERY_CLAIM_ATTEMPTS, resolveLeaseMs } from './claims_shared.mjs';
+import { acquireClaim, deliveryRetryDelayMs, issueReplyBindingToken, MAX_DELIVERY_CLAIM_ATTEMPTS, resolveLeaseMs, isUnsentOutcome } from './claims_shared.mjs';
 import { advanceReplyWaitForDelivery, markStagedDeliveryFailedAttention } from '../lifecycle_transition.mjs';
 
 const DELIVERY_PROJECTION_SQL = `SELECT d.id AS id, d.message_id AS message_id, d.endpoint_id AS endpoint_id, e.created_by_app_id AS owner_app_id,
@@ -78,7 +78,7 @@ function failExhaustedDelivery(context, { deliveryId, latestClaim, now }) {
     .run(timestamp, deliveryId);
   if (failed.changes !== 1) return false;
   advanceReplyWaitForDelivery(context.db, { deliveryId, outcome: 'failed', now });
-  markStagedDeliveryFailedAttention(context.db, { deliveryId, now });
+  markStagedDeliveryFailedAttention(context.db, { deliveryId, now, logger: context.logger });
   context.logger?.warn({
     event: 'delivery_claim_attempts_exhausted',
     params: { delivery_id: deliveryId, attempts: latestClaim.attempt_count, max_attempts: MAX_DELIVERY_CLAIM_ATTEMPTS },
@@ -86,6 +86,19 @@ function failExhaustedDelivery(context, { deliveryId, latestClaim, now }) {
     status: 'ok',
   });
   return true;
+}
+
+/** Where a delivery's latest claim puts it in the auto-select offer order. */
+function offerKind(claim, now) {
+  const attempts = claim?.attempt_count ?? 0;
+  // First true entry wins, so the order is the precedence.
+  const holds = {
+    exhausted: attempts >= MAX_DELIVERY_CLAIM_ATTEMPTS,
+    unsent: isUnsentOutcome(claim?.outcome),
+    fresh: attempts === 0,
+    retry: Boolean(claim) && now.getTime() >= claimEndedAtMs(claim) + deliveryRetryDelayMs(attempts),
+  };
+  return Object.keys(holds).find((kind) => holds[kind]) ?? 'waiting';
 }
 
 function selectAutoClaimDelivery(context, { appId, endpointId, channelRouteId, now }) {
@@ -104,18 +117,20 @@ function selectAutoClaimDelivery(context, { appId, endpointId, channelRouteId, n
     )
     .all(now.toISOString(), appId, endpointId, endpointId, channelRouteId, channelRouteId);
   const latest = latestDeliveryClaims(context.db, candidates.map((candidate) => candidate.id));
+  // Offer order: never-claimed, then a retry whose backoff passed, then a delivery whose
+  // last claim was an unsent abort (least recently aborted first). An unsent abort costs no
+  // attempt and no wait, but a delivery that keeps aborting must not hold the queue.
   let retry = null;
+  let unsent = null;
   for (const { id } of candidates) {
     const claim = latest.get(id);
-    const attempts = claim?.attempt_count ?? 0;
-    if (attempts === 0) return id;
-    if (attempts >= MAX_DELIVERY_CLAIM_ATTEMPTS) {
-      failExhaustedDelivery(context, { deliveryId: id, latestClaim: claim, now });
-      continue;
-    }
-    if (retry === null && now.getTime() >= claimEndedAtMs(claim) + deliveryRetryDelayMs(attempts)) retry = id;
+    const kind = offerKind(claim, now);
+    if (kind === 'fresh') return id;
+    if (kind === 'exhausted') failExhaustedDelivery(context, { deliveryId: id, latestClaim: claim, now });
+    if (kind === 'retry' && retry === null) retry = id;
+    if (kind === 'unsent' && (unsent === null || claim.released_at < latest.get(unsent).released_at)) unsent = id;
   }
-  return retry;
+  return retry ?? unsent;
 }
 
 export const deliveryClaimOp = {
@@ -207,11 +222,15 @@ export const deliveryClaimOp = {
         const senderEndpointId = JSON.parse(delivery.effect_payload ?? '{}')?.declaration?.sender_endpoint_id;
         if (typeof senderEndpointId === 'string') {
           const endpoint = context.db
-            .prepare('SELECT provider_session_id, runtime FROM endpoints WHERE id = ?')
+            .prepare('SELECT provider_session_id, runtime, authority_reference FROM endpoints WHERE id = ?')
             .get(senderEndpointId);
           message.sender_endpoint_id = senderEndpointId;
           if (typeof endpoint?.provider_session_id === 'string') message.sender_session_id = endpoint.provider_session_id;
           if (typeof endpoint?.runtime === 'string') message.sender_runtime = endpoint.runtime;
+          // Top-level only: channel adapters read named fields, so it never reaches email or Slack.
+          if (typeof endpoint?.authority_reference === 'string' && endpoint.authority_reference.length > 0) {
+            message.sender_cwd = endpoint.authority_reference;
+          }
         }
       } catch {
         // An immutable historical effect row without a parseable declaration

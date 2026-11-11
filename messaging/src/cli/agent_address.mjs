@@ -8,11 +8,13 @@
 
 import { AgentCommandError } from './agent_commands.mjs';
 import { deriveSessionState, SESSION_LIST_LIMIT, sessionHandlesFor, sessionRow } from './agent_sessions.mjs';
-import { prepareNewAgent } from './new_agent.mjs';
+import { lookupAcademyAgent, prepareNewAgent } from './new_agent.mjs';
 import { tightbeamRecipeCommand } from './package_context.mjs';
 import { uniqueShortIds } from '../protocol/ids.mjs';
 
 const MIN_SESSION_PREFIX = 4;
+// Copied from Academy's agent-name rule (scripts/cli/core.mjs NAME_RE).
+const ACADEMY_NAME_RE = /^[a-z][a-z0-9-]{0,31}$/;
 const shortId = (id) => String(id ?? '').slice(0, 8);
 
 // parseAgentCommand narrows this to the verb's own help.
@@ -32,7 +34,7 @@ function runtimeAndCwd(rest, form) {
 }
 
 /**
- * Parses the `session:`, `agent:`, and `new:` forms; any other value is null.
+ * Parses the `session:`, `agent:`, `academy:`, and `new:` forms; any other value is null.
  * `agent:` keeps its stable principal ref (`<runtime>:<cwd>`) as the parsed
  * shape so invocation fingerprints of existing callers do not move.
  */
@@ -48,6 +50,11 @@ export function parseAgentAddress(value) {
     runtimeAndCwd(ref, 'agent');
     return { kind: 'agent', ref };
   }
+  if (value.startsWith('academy:')) {
+    const name = value.slice('academy:'.length);
+    if (!ACADEMY_NAME_RE.test(name)) usage('academy:<name> needs a lowercase Academy agent name (a-z, 0-9, -; starts with a letter; up to 32 characters)');
+    return { kind: 'academy', name };
+  }
   if (value.startsWith('new:')) return { kind: 'new', ...runtimeAndCwd(value.slice('new:'.length), 'new') };
   return null;
 }
@@ -55,6 +62,7 @@ export function parseAgentAddress(value) {
 export function formatAddress(target) {
   if (target.kind === 'session') return `session:${target.id}`;
   if (target.kind === 'agent') return `agent:${target.ref}`;
+  if (target.kind === 'academy') return `academy:${target.name}`;
   if (target.kind === 'new') return `new:${target.runtime}:${target.cwd}`;
   return target.kind;
 }
@@ -233,6 +241,7 @@ export async function resolveAgentAddress(client, session, target, { verb, log =
   const started = Date.now();
   const params = { form: target.kind, verb };
   try {
+    if (target.kind === 'academy') return await prepareNewAgent(client, session, lookupAcademyAgent(target.name, { log }), { log, replay, academyAgentName: target.name });
     if (target.kind === 'new') return await prepareNewAgent(client, session, target, { log, replay });
     const row = target.kind === 'session' ? await resolveSessionId(client, target, verb) : await resolveAgentRef(client, session, target, verb);
     const { state } = deriveSessionState(row);

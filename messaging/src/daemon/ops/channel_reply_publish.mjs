@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto';
 
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
-import { createDerivedInboundDelivery, insertMessage, newestLineageEndpointId, payloadHash, pushLiveDeliveryEvents, refreshSessionWatermark, validateBody } from './message_shared.mjs';
+import { createDeliveriesForChannelRoutes, createDerivedInboundDelivery, insertMessage, newestLineageEndpointId, payloadHash, pushLiveDeliveryEvents, refreshSessionWatermark, validateBody } from './message_shared.mjs';
 import { activeListenerForEndpoint, createPendingPresentation, pendingReplyWaitForBinding, publishPresentation } from './listener_operations.mjs';
 import { replyContinuityDiagnostic } from '../reply_continuity_diagnostics.mjs';
 import { applyOpen } from '../lifecycle_transition.mjs';
@@ -77,7 +77,7 @@ function resolveBinding(db, { tokenDigest, appId }) {
   const row = db.prepare(
     `SELECT b.id, b.app_id, b.channel_route_id, b.conversation_id, b.source_message_id, b.source_delivery_id,
             b.target_endpoint_id, b.expires_at, b.state AS binding_state,
-            r.principal_id AS route_principal_id, r.state AS route_state, r.app_id AS route_app_id,
+            r.principal_id AS route_principal_id, r.state AS route_state, r.app_id AS route_app_id, r.selector AS route_selector,
             a.status AS app_status,
             target.id AS target_id, target.principal_id AS target_principal_id, target.created_by_app_id AS target_app_id, target.state AS target_state,
             target.provider_session_id AS target_session_id, target.process_generation AS target_process_generation,
@@ -168,6 +168,44 @@ function requireNewEventBinding(db, binding, now) {
   }
 }
 
+// An open request absorbs further user replies: they go to the endpoint that
+// holds the open attempt and open no new root. Null means no open request.
+function openRequestHolder(db, conversationId) {
+  return db.prepare(
+    `SELECT e.id, e.principal_id, e.state, e.provider_session_id AS session_id, e.process_generation, e.launch_mode, e.authority_reference
+       FROM obligations root
+       JOIN obligations attempt ON attempt.parent_id = root.id AND attempt.role = 'attempt' AND attempt.status = 'open'
+       JOIN endpoints e ON e.id = attempt.custodian_endpoint_id
+      WHERE root.conversation_id = ? AND root.role = 'root' AND root.status = 'open' AND e.state != 'closed'
+      LIMIT 1`,
+  ).get(conversationId) ?? null;
+}
+
+// Mirror the user's reply into the Subspace inbox thread. No reply target and no
+// route reason: the mirror creates no reply binding, obligation, or ack.
+// shortcut: mirror target is the 'subspace' selector by name; upgrade to a route capability when another app needs user-message mirroring.
+function mirrorToSubspaceRoutes(db, { binding, messageId, conversationId }) {
+  const routes = db
+    .prepare(
+      `SELECT r.id, r.app_id, r.principal_id, r.endpoint_id, r.capabilities, e.state AS endpoint_state
+         FROM channel_routes r
+         JOIN applications a ON a.id = r.app_id
+         JOIN endpoints e ON e.id = r.endpoint_id
+        WHERE r.state = 'active' AND r.selector = 'subspace' AND r.id <> ?
+          AND a.status = 'active' AND e.state IN ('idle', 'busy')`,
+    )
+    .all(binding.channel_route_id)
+    .filter((route) => {
+      try {
+        return JSON.parse(route.capabilities).includes('send');
+      } catch {
+        return false;
+      }
+    });
+  if (routes.length > 0) createDeliveriesForChannelRoutes(db, { conversationId, messageId, routes });
+  return routes.length;
+}
+
 export const channelReplyPublishOp = {
   name: 'channel.reply.publish',
   allowedScopes: ['agent'],
@@ -210,42 +248,48 @@ export const channelReplyPublishOp = {
         inReplyToMessageId: binding.source_message_id,
       });
       const now = new Date().toISOString();
-      const opened = applyOpen(context.db, {
-        appId: binding.target_app_id,
-        conversationId: binding.conversation_id,
-        messageId,
-        effect: {
-          type: 'open',
-          target_principal_id: binding.target_principal_id,
-          target_endpoint_id: binding.target_id,
-          completion_mode: 'delivery_confirmed',
-        },
-        now,
-      });
+      const holder = openRequestHolder(context.db, binding.conversation_id);
+      const opened = holder
+        ? null
+        : applyOpen(context.db, {
+            appId: binding.target_app_id,
+            conversationId: binding.conversation_id,
+            messageId,
+            effect: {
+              type: 'open',
+              target_principal_id: binding.target_principal_id,
+              target_endpoint_id: binding.target_id,
+              completion_mode: 'delivery_confirmed',
+            },
+            now,
+          });
+      const endpoint = holder ?? {
+        id: binding.target_id,
+        principal_id: binding.target_principal_id,
+        state: binding.target_state,
+        session_id: binding.target_session_id,
+        process_generation: binding.target_process_generation,
+        launch_mode: binding.target_launch_mode,
+        authority_reference: binding.target_authority_reference,
+      };
       const listener = activeListenerForEndpoint(context.db, {
-        endpointId: binding.target_id,
-        processGeneration: binding.target_process_generation,
-        providerSessionId: binding.target_session_id,
+        endpointId: endpoint.id,
+        processGeneration: endpoint.process_generation,
+        providerSessionId: endpoint.session_id,
+        logger: context.logger,
+        messageId,
       });
       const delivery = createDerivedInboundDelivery(context.db, {
         conversationId: binding.conversation_id,
         messageId,
-        endpoint: {
-          id: binding.target_id,
-          principal_id: binding.target_principal_id,
-          state: binding.target_state,
-          session_id: binding.target_session_id,
-          process_generation: binding.target_process_generation,
-          launch_mode: binding.target_launch_mode,
-          authority_reference: binding.target_authority_reference,
-        },
+        endpoint,
         listener,
       });
       const replyWait = pendingReplyWaitForBinding(context.db, {
         bindingId: binding.id,
-        endpointId: binding.target_id,
-        processGeneration: binding.target_process_generation,
-        providerSessionId: binding.target_session_id,
+        endpointId: endpoint.id,
+        processGeneration: endpoint.process_generation,
+        providerSessionId: endpoint.session_id,
       });
       const presentation = listener
         ? createPendingPresentation(context.db, { listener, messageId, deliveryId: delivery.delivery_id, replyWaitId: replyWait?.id ?? null })
@@ -253,16 +297,19 @@ export const channelReplyPublishOp = {
       if (listener) {
         context.db.prepare("UPDATE listeners SET state = 'waking', updated_at = ? WHERE id = ? AND state IN ('parked', 'attached')").run(new Date().toISOString(), listener.id);
       }
-      context.db.prepare(
-        'UPDATE obligations SET ack_due_at = ?, ack_message_id = ?, ack_delivery_id = ? WHERE id = ?',
-      ).run(new Date(Date.parse(now) + 120_000).toISOString(), messageId, delivery.delivery_id, opened.created.root_id);
+      if (opened) {
+        context.db.prepare(
+          'UPDATE obligations SET ack_due_at = ?, ack_message_id = ?, ack_delivery_id = ? WHERE id = ?',
+        ).run(new Date(Date.parse(now) + 120_000).toISOString(), messageId, delivery.delivery_id, opened.created.root_id);
+      }
       // Every route that wrote a delivery refreshes the marker the PreToolUse fast path compares.
       refreshSessionWatermark({
         stateRoot: context.stateRoot,
-        sessionId: binding.target_session_id,
+        sessionId: endpoint.session_id,
         deliveryId: delivery.delivery_id,
         logger: context.logger,
       });
+      const mirrorCount = mirrorToSubspaceRoutes(context.db, { binding, messageId, conversationId: binding.conversation_id });
       const result = {
         message_id: messageId,
         conversation_id: binding.conversation_id,
@@ -279,10 +326,17 @@ export const channelReplyPublishOp = {
         result,
         presentation,
         live: Boolean(listener),
-        liveDeliveries: [{ principal_id: binding.target_principal_id, endpoint_id: binding.target_id, message_id: messageId, delivery_id: delivery.delivery_id }],
+        mirror: { origin_selector: binding.route_selector, mirror_count: mirrorCount },
+        liveDeliveries: [{ principal_id: endpoint.principal_id, endpoint_id: endpoint.id, message_id: messageId, delivery_id: delivery.delivery_id }],
       };
     });
     if (!outcome.result.idempotent_replay) {
+      context.logger?.info?.({
+        event: 'channel_reply_mirror',
+        params: { message_id: outcome.result.message_id, origin_selector: outcome.mirror.origin_selector },
+        result: { mirror_count: outcome.mirror.mirror_count },
+        status: 'ok',
+      });
       replyContinuityDiagnostic(context.logger, 'reply_delivered', { latency_ms: Date.now() - startedAt, live: outcome.live });
       replyContinuityDiagnostic(context.logger, outcome.live ? 'reply_presented' : 'fallback');
     }

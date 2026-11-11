@@ -110,13 +110,19 @@ function runTightbeam(command, args, { env, timeoutMs }) {
     execFile(
       command,
       args,
-      { env, timeout: timeoutMs, maxBuffer: MAX_OUTPUT_BYTES, encoding: "utf8" },
+      {
+        env,
+        timeout: timeoutMs,
+        maxBuffer: MAX_OUTPUT_BYTES,
+        encoding: "utf8",
+      },
       (error, stdout, stderr) => {
         resolvePromise({
           code: error ? (typeof error.code === "number" ? error.code : 1) : 0,
           signal: error?.signal || null,
           timedOut: Boolean(error?.killed),
-          spawnError: error && typeof error.code === "string" ? error.code : null,
+          spawnError:
+            error && typeof error.code === "string" ? error.code : null,
           stdout: stdout || "",
           stderr: stderr || "",
         });
@@ -129,7 +135,10 @@ function failureCode(outcome) {
   if (outcome.spawnError) return "tightbeam_cli_unavailable";
   if (outcome.timedOut) return "tightbeam_cli_timeout";
   const named = /^error ([a-z_]+):/m.exec(outcome.stderr);
-  if (named?.[1] === "malformed_request" && /unknown operation/.test(outcome.stderr)) {
+  if (
+    named?.[1] === "malformed_request" &&
+    /unknown operation/.test(outcome.stderr)
+  ) {
     // A daemon older than endpoint.list: Helm's sessions stay readable
     // from the legacy files until the daemon restarts on this release.
     return "tightbeam_endpoint_list_unsupported";
@@ -138,9 +147,19 @@ function failureCode(outcome) {
   return "tightbeam_cli_failed";
 }
 
+// The CLI prefers TIGHTBEAM_APP_ID/SECRET over the hook credential file, and
+// endpoint.list shows only the asking app's endpoints. A caller that reads the
+// endpoints session hooks registered asks as the hook app: no override.
+function withoutAppOverride(env) {
+  const rest = { ...env };
+  delete rest.TIGHTBEAM_APP_ID;
+  delete rest.TIGHTBEAM_APP_SECRET;
+  return rest;
+}
+
 /**
  * Lists agent sessions Tightbeam knows about. Resolves to
- * `{ ok: true, sessions, truncated }` or `{ ok: false, error, message }`;
+ * `{ ok: true, sessions, placeholders, truncated }` or `{ ok: false, error, message }`;
  * it never throws, because every caller has a fallback.
  */
 export async function listTightbeamSessions(
@@ -149,6 +168,7 @@ export async function listTightbeamSessions(
     env = process.env,
     run = runTightbeam,
     timeoutMs = TIGHTBEAM_SESSION_LOOKUP_TIMEOUT_MS,
+    hookApp = false,
   } = {},
 ) {
   const started = Date.now();
@@ -174,7 +194,7 @@ export async function listTightbeamSessions(
   }
   const command = tightbeamCommand(env);
   const outcome = await run(command, endpointListArgs(filters), {
-    env,
+    env: hookApp ? withoutAppOverride(env) : env,
     timeoutMs,
   });
   const latencyMs = Date.now() - started;
@@ -226,13 +246,22 @@ export async function listTightbeamSessions(
   log("debug", {
     event: "tightbeam_session_lookup",
     status: "ok",
-    result: { sessions: sessions.length, truncated: Boolean(parsed.result.truncated) },
+    result: {
+      sessions: sessions.length,
+      truncated: Boolean(parsed.result.truncated),
+    },
     latency_ms: latencyMs,
     params,
   });
+  // Registered endpoints no session adopted yet: not sessions, but a consumer
+  // can tell "starting" from "gone" by them.
+  const placeholders = rows
+    .filter((row) => !row?.provider_session_id && row?.endpoint_id)
+    .map((row) => ({ endpoint_id: row.endpoint_id, state: row.state || null }));
   return {
     ok: true,
     sessions,
+    placeholders,
     truncated: Boolean(parsed.result.truncated),
   };
 }
@@ -292,7 +321,12 @@ export async function resolveRunSessionFromTightbeam(
     options,
   );
   if (!lookup.ok) {
-    return { ok: false, error: lookup.error, candidates: [], unavailable: true };
+    return {
+      ok: false,
+      error: lookup.error,
+      candidates: [],
+      unavailable: true,
+    };
   }
   const candidates = lookup.sessions.filter(
     (session) =>

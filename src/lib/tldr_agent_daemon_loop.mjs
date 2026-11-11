@@ -5,10 +5,13 @@ import {
   appendActivityEvent,
   maintainTldrAgentDiagnostics,
 } from "./tldr_agent_diagnostics.mjs";
+import { trimDaemonStderrAtStart } from "./tldr_agent_stderr_trim.mjs";
 import {
   DEFAULT_TLDR_AGENT_CHILD_GRACE_MS,
   DEFAULT_TLDR_AGENT_OUTBOUND_TIMEOUT_MS,
   DEFAULT_TLDR_AGENT_PHASE_TIMEOUT_MS,
+  tldrAgentSlackOutboundPhaseTimeout,
+  tldrAgentSlackPostTimeout,
 } from "./tldr_agent_daemon_phase_timeouts.mjs";
 import { resolveDaemonCommandScope } from "./tldr_agent_daemon_scope.mjs";
 import {
@@ -20,7 +23,9 @@ import { helmHome } from "./store.mjs";
 import {
   createSlackLane,
   createSlackListenerSupervisor,
-  runSlackLanesOnce,
+  runSlackInboundOnce,
+  runSlackOutboundOnce,
+  runSlackWorkingOnce,
 } from "./daemon_slack_lane.mjs";
 
 function defaultEmailConfigPath() {
@@ -159,7 +164,9 @@ export async function runTldrAgentDaemonLoop({
   runMailSequence = runDaemonMailSequence,
   runOutboundSequence = runDaemonOutboundSequence,
   maintainDiagnostics = maintainTldrAgentDiagnostics,
-  runSlackTick = runSlackLanesOnce,
+  runSlackTick = runSlackOutboundOnce, // the Slack outbound tick
+  runSlackInbound = runSlackInboundOnce,
+  runSlackSweep = runSlackWorkingOnce,
   slackListener = createSlackListenerSupervisor({ home }),
   waitFn = wait,
   outboundTimeoutMs = Number(
@@ -170,8 +177,17 @@ export async function runTldrAgentDaemonLoop({
     process.env.HELM_DAEMON_PHASE_TIMEOUT_MS ||
       DEFAULT_TLDR_AGENT_PHASE_TIMEOUT_MS,
   ),
+  slackPostTimeoutMs: slackPostTimeoutOption,
+  slackOutboundPhaseTimeoutMs: slackPhaseTimeoutOption,
 } = {}) {
   if (!homeExists(home)) return [];
+  trimDaemonStderrAtStart(home);
+  const slackPostTimeoutMs = tldrAgentSlackPostTimeout({
+    postTimeoutMs: slackPostTimeoutOption,
+  });
+  const slackOutboundPhaseTimeoutMs =
+    slackPhaseTimeoutOption ??
+    tldrAgentSlackOutboundPhaseTimeout(slackPostTimeoutMs);
   const daemonInstanceId = `tldr_agent_daemon_${process.pid}_${Date.now()}`;
   const inboxPollScheduler = createInboxPollScheduler();
   let stopped = false;
@@ -275,25 +291,69 @@ export async function runTldrAgentDaemonLoop({
     slackListener,
     runSlackTick,
     runPhase,
+    // Not the shared limit: it would cut off a post Slack already holds (ac-jfv.59).
+    phaseTimeoutMs: slackOutboundPhaseTimeoutMs,
+    postTimeoutMs: slackPostTimeoutMs,
+    sleepInterval,
+    homeExists,
+    isStopped: () => stopped,
+    phaseName: "slack_outbound",
+  });
+  // Inbound is its own lane and phase so a slow or aborted send cannot starve it (ac-jfv.74).
+  const slackInboundLane = createSlackLane({
+    home,
+    once,
+    daemonInstanceId,
+    slackListener,
+    runSlackTick: runSlackInbound,
+    runPhase,
     phaseTimeoutMs,
     sleepInterval,
     homeExists,
     isStopped: () => stopped,
+    phaseName: "slack_inbound",
+    superviseListener: true,
+  });
+  // The sweep is its own lane and phase so slow slack sends or drains cannot use up its budget.
+  const workingLane = createSlackLane({
+    home,
+    once,
+    daemonInstanceId,
+    slackListener,
+    runSlackTick: runSlackSweep,
+    runPhase,
+    phaseTimeoutMs,
+    sleepInterval,
+    homeExists,
+    isStopped: () => stopped,
+    phaseName: "slack_working",
   });
   try {
     if (once) {
-      // Both lanes write one shared admin nonce file, so a --once run keeps them apart.
-      try {
-        await inboundLane();
-      } finally {
+      // Kept apart: each admin client writes its own nonce-<hash> file (ac-jfv.4), so
+      // this is caution for a short-lived run, not a hard need.
+      const runInOrder = async ([lane, ...rest]) => {
         try {
-          await outboundLane();
+          await lane();
         } finally {
-          await slackLane();
+          if (rest.length) await runInOrder(rest);
         }
-      }
+      };
+      await runInOrder([
+        inboundLane,
+        outboundLane,
+        slackLane,
+        slackInboundLane,
+        workingLane,
+      ]);
     } else {
-      await Promise.all([inboundLane(), outboundLane(), slackLane()]);
+      await Promise.all([
+        inboundLane(),
+        outboundLane(),
+        slackLane(),
+        slackInboundLane(),
+        workingLane(),
+      ]);
     }
   } finally {
     slackListener.stop();

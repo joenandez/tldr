@@ -1,9 +1,10 @@
 // runtime_options — per-provider agent runtime options for scheduled work.
 //
 // A job's provider decides which runtime knobs exist: Claude takes a permission
-// mode but has no reasoning-effort flag, Codex takes a reasoning effort and a
-// sandbox mode, and Academy delegates to whichever runtime it wraps. Callers
-// cannot know that mapping, so Helm owns it here: one table drives validation,
+// mode and an --effort level, Codex takes a reasoning effort and a sandbox
+// mode, and Academy delegates to whichever runtime it wraps. Callers
+// cannot know that mapping, so Helm owns it here: one table
+// (runtime_option_catalog.mjs) drives validation,
 // the published capability surface (`runtime-options`), and the argv rendered
 // into the launch. A value that survives validation always reaches the process;
 // an option the provider does not accept is rejected, never dropped.
@@ -18,6 +19,12 @@
 // it because that is Helm's canonical model field.
 
 import { ASSIGNMENTS_COMMAND } from "./helm_context.mjs";
+import {
+  ACADEMY_RUNTIME_SPECS,
+  COPILOT_PERMISSION_MODES,
+  DELEGATING_PROVIDERS,
+  PROVIDER_SPECS,
+} from "./runtime_option_catalog.mjs";
 
 export const RUNTIME_OPTION_FIELDS = Object.freeze([
   "model",
@@ -25,7 +32,7 @@ export const RUNTIME_OPTION_FIELDS = Object.freeze([
   "permission_mode",
 ]);
 
-export const ASSIGNMENTS_CONTRACT_VERSION = "1.3";
+export const ASSIGNMENTS_CONTRACT_VERSION = "1.5";
 export const ASSIGNMENTS_CAPABILITIES = Object.freeze([
   "assignments.list.all-scopes",
   "assignments.runs.all-scopes",
@@ -36,88 +43,17 @@ export const ASSIGNMENTS_CAPABILITIES = Object.freeze([
   "assignments.logs.json",
   "tasks.events.daemon",
   "assignments.academy-copilot-start.v1",
+  "assignments.update.skill-path",
+  "assignments.list.include-tasks",
+  "assignments.runtime-catalog.v2",
+  "sessions.origin.read",
+  "messaging.sender-cwd",
 ]);
 
 export const RUNTIME_OPTION_FLAGS = Object.freeze({
   model: "model",
   reasoning_effort: "reasoning-effort",
   permission_mode: "permission-mode",
-});
-
-const enumerated = (values, render, defaultValue = null) => ({
-  values: Object.freeze(values),
-  free_form: false,
-  default: defaultValue,
-  render,
-});
-
-const CLAUDE_MODELS = Object.freeze(["claude-opus-4-1", "claude-sonnet-4-5"]);
-const CODEX_MODELS = Object.freeze(["gpt-5-codex", "gpt-5.1-codex"]);
-const COPILOT_PERMISSION_MODES = Object.freeze([
-  "approve-all",
-  "approve-reads",
-  "deny-all",
-]);
-const MODEL_FLAG = (values, defaultValue) =>
-  enumerated(values, (value) => ["--model", value], defaultValue);
-
-// Direct providers. A provider absent from a spec accepts that option nowhere.
-const PROVIDER_SPECS = Object.freeze({
-  claude: {
-    model: MODEL_FLAG(CLAUDE_MODELS, "claude-sonnet-4-5"),
-    permission_mode: enumerated(
-      [
-        "acceptEdits",
-        "auto",
-        "bypassPermissions",
-        "manual",
-        "dontAsk",
-        "plan",
-        "yolo",
-      ],
-      (value) => [
-        "--permission-mode",
-        value === "yolo" ? "bypassPermissions" : value,
-      ],
-    ),
-  },
-  codex: {
-    model: MODEL_FLAG(CODEX_MODELS, "gpt-5.1-codex"),
-    reasoning_effort: enumerated(
-      ["minimal", "low", "medium", "high"],
-      (value) => ["-c", `model_reasoning_effort=${value}`],
-    ),
-    permission_mode: enumerated(
-      ["read-only", "workspace-write", "danger-full-access", "yolo"],
-      (value) =>
-        value === "yolo"
-          ? ["--dangerously-bypass-approvals-and-sandbox"]
-          : ["--sandbox", value],
-    ),
-  },
-  cursor: {},
-  droid: {},
-  gemini: {},
-  hermes: {},
-});
-
-const ACADEMY_RUNTIME_SPECS = Object.freeze({
-  copilot: {
-    permission_mode: enumerated(
-      COPILOT_PERMISSION_MODES,
-      (value) => ["--permission-mode", value],
-    ),
-  },
-});
-
-// Academy wraps a runtime, so its applicable options are that runtime's. The
-// runtime list mirrors the runtimes the academy adapter can actually launch.
-const DELEGATING_PROVIDERS = Object.freeze({
-  academy: {
-    config_key: "academy_runtime",
-    default: "claude",
-    runtimes: ["claude", "codex", "copilot"],
-  },
 });
 
 export function resolveOptionTarget(provider, providerConfig = null) {
@@ -220,6 +156,10 @@ export function readRuntimeOptionFlags(flags = {}, permissionRequired = false) {
   return { patch, present: Object.keys(patch).length > 0 };
 }
 
+// A free-form value becomes one argv element, so it only has to be a single
+// token that no CLI could read as a flag: no leading dash, no whitespace.
+const WELL_FORMED_ID = /^[^\s-][^\s]*$/;
+
 function unsupportedError(field, target) {
   const supported = supportedOptionsFor(target.spec);
   const label = target.runtime
@@ -265,7 +205,16 @@ export function validateRuntimeOptions({
     if (value === null) continue;
     const option = target.spec?.[field];
     if (!option) return { error: unsupportedError(field, target) };
-    if (option.values && !option.values.includes(value)) {
+    if (option.free_form && !WELL_FORMED_ID.test(value)) {
+      return {
+        error: {
+          code: "runtime_option_invalid_value",
+          message: `--${RUNTIME_OPTION_FLAGS[field]}=${value} is not a well-formed id; suggested values: ${option.values.join(", ")}`,
+          details: { option: field, value, provider: target.provider, runtime: target.runtime },
+        },
+      };
+    }
+    if (!option.free_form && option.values && !option.values.includes(value)) {
       return {
         error: {
           code: "runtime_option_invalid_value",

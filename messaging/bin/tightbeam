@@ -19,6 +19,7 @@ import { createRuntimeSnapshot, loadPersistedRuntimeEntries } from '../src/daemo
 // anything in schema.mjs that opens or migrates.
 import { SCHEMA_VERSION } from '../src/daemon/schema.mjs';
 import { runDoctorChecks } from '../src/cli/doctor_checks.mjs';
+import { refreshRuntime } from '../src/cli/agent_sessions.mjs';
 import { AgentCommandError, loadAgentSession, parseAgentCommand, resolveAgentSessionIdentity, runAgentCommand } from '../src/cli/agent_commands.mjs';
 import { agentWaitHandshakeError, cacheAgentWaitStartup, prepareAgentWaitStartup } from '../src/cli/agent_wait_startup.mjs';
 // Recipe text uses the supported `tldr-agents messaging` front door.
@@ -316,7 +317,7 @@ function printResult(json, result) {
 // and printed recipes carry the validated session binding.
 function agentSessionPolicy({ registry, identity, refreshSession, log }) {
   if (registry.get(identity.runtime)?.hooksInstall?.format !== 'copilot-json') {
-    return { recover: refreshSession, bind: (session) => session, refreshSession };
+    return { recover: () => refreshSession({}), bind: (session) => session, refreshSession };
   }
   const binding = `HELM_AGENT_SESSION_ID=<session> TIGHTBEAM_RUNTIME=${identity.runtime}`;
   return {
@@ -365,7 +366,7 @@ const COMMANDS = {
         entries: loadPersistedRuntimeEntries({ runtimesDir: paths.runtimesDir }),
       });
       const identity = resolveAgentSessionIdentity({ registry, log: identityLog });
-      const refreshSession = async () => {
+      const refreshSession = async ({ reviveDeadGeneration }) => {
         await runHookVerb('session-start', {
           stateRoot: globalFlags.stateRoot,
           // An agent command is not a hook: nothing writes a payload to its
@@ -379,12 +380,15 @@ const COMMANDS = {
           flags: {
             appId: globalFlags.appId,
             appSecret: globalFlags.secretFile ? readAppSecret(globalFlags.secretFile) : undefined,
-            ...(identity.source === 'ancestry' ? { runtime: identity.runtime } : {}),
+            // Force a runtime only on runtime-specific evidence (see refreshRuntime).
+            runtime: refreshRuntime(identity, { registry }),
+            // Recovery of a dead endpoint revives only the dead custody it observed.
+            reviveDeadGeneration,
           },
           registry,
           socketPath: paths.socket,
         });
-        return loadAgentSession(globalFlags.stateRoot, { identity });
+        return { ...loadAgentSession(globalFlags.stateRoot, { identity }), runtime_registry: registry };
       };
       const policy = agentSessionPolicy({ registry, identity, refreshSession, log: identityLog });
       let session;
@@ -394,7 +398,7 @@ const COMMANDS = {
         if (!(error instanceof AgentCommandError) || error.code !== 'session_unavailable' || command.command === 'wait') throw error;
         session = await policy.recover();
       }
-      session = policy.bind(session);
+      session = { ...policy.bind(session), runtime_registry: registry };
       const startup = prepareAgentWaitStartup(session, command);
       const client = await buildClient({ ...globalFlags, agentWaitContext: startup.agentWaitContext });
       try {
@@ -966,8 +970,10 @@ const COMMANDS = {
     build(args) {
       const deliveryId = requirePositional(args, 'delivery_id');
       const token = extractFlag(args, 'token');
+      const outcome = extractFlag(args, 'outcome');
       if (!token) throw new UsageError('--token is required');
-      return { delivery_id: deliveryId, token };
+      if (outcome !== undefined && outcome !== 'aborted_unsent') throw new UsageError('--outcome must be "aborted_unsent"');
+      return outcome === undefined ? { delivery_id: deliveryId, token } : { delivery_id: deliveryId, token, outcome };
     },
   },
 
@@ -1552,6 +1558,8 @@ function agentUsage(command) {
     '  agent ack --work <work_id> (--body <text> | --body-file <path>)',
     '  agent update --work <work_id> (--body <text> | --body-file <path>)',
     '  agent delegate --work <work_id> --to session:<id>|agent:<runtime>:<cwd>|new:<runtime>:<cwd> (--body <text> | --body-file <path>)',
+    '  agent delegate --work <work_id> --at <2m|+1h|ISO-8601 time> (--body <text> | --body-file <path>)',
+    '  agent transfer --work <work_id> --to session:<id> [--body <text>]',
     '  agent accept --work <delegation_id> (--body <text> | --body-file <path>)',
     '  agent decline --work <delegation_id> (--body <text> | --body-file <path>)',
     '  agent complete --work <work_id> (--body <text> | --body-file <path>) [--notify user] [--wait-delivery <duration>]',
@@ -1586,7 +1594,7 @@ function agentUsage(command) {
     '',
     ...(['reply', 'complete'].includes(command) ? ['reply sends the final user response.'] : []),
     ...(command === 'ack' ? ['ack acknowledges a user (email) message you are working on, so the user knows it arrived and the final response is still coming; it applies only to work that arrived as a user message, not work another agent asked of you; report that with update and finish it with complete.'] : []),
-    ...(['update', 'complete', 'delegate'].includes(command) ? ['--work is the work id of the request you hold: it is in the request notification, the resume or start brief, the receive output (work_id), agent threads, and agent thread; it is not the thread handle. work_not_found means the value is not work you can see; agent threads --waiting-on me lists the work waiting on you.'] : []),
+    ...(['update', 'complete', 'delegate', 'transfer'].includes(command) ? ['--work is the work id of the request you hold: it is in the request notification (also the first input of a resumed or new session), the receive output (work_id), agent threads, and agent thread; it is not the thread handle. work_not_found means the value is not work you can see; agent threads --waiting-on me lists the work waiting on you.'] : []),
     ...(['accept', 'decline'].includes(command) ? [`${command} answers a delegation offer made to you. --work is the delegation id the offer names: it is in the offer notification, the receive output, agent threads, agent thread, and agent status. handoff_unavailable means no offer awaits your answer; agent threads --waiting-on me lists any that do.`] : []),
     ...(command === 'status' ? ['status --message uses the outbound message_id returned by reply/complete.', 'status --work shows the work state (cancelled is never shown as done), its holder, who it is waiting on, and the delivery step.'] : []),
     ...(command === 'send' ? ['send --thread follows up with the agent that owes you in that thread (still the delegator after a delegation; the replacement if it was replaced). It creates no new work; closed work gives work_closed.'] : []),
@@ -1594,6 +1602,7 @@ function agentUsage(command) {
     ...(command === 'sessions' ? ['sessions lists sessions that are live or were active in the last 24 hours, this folder first; --all lists the 200 most recently active, ended ones included. A cut-off list says more exist. Address one with --to session:<id>.'] : []),
     ...(command === 'threads' ? ['threads lists the threads you started or take part in: open ones plus anything waiting on you; --all adds closed ones. Read one with agent thread --thread <handle>.'] : []),
     ...(command === 'thread' ? ['thread shows one thread\'s messages and work events, oldest first. The handle is the thread id or at least 8 characters of it. Reading never marks anything read.'] : []),
+    ...(command === 'transfer' ? ['transfer moves work you hold, and its reply debt, to another session. Only the session that holds the work can transfer it, and not while a delegation under it is open.'] : []),
     ...(command === 'cancel' ? ['cancel works for the session that requested the work (even after it was delegated) or the session holding it; every downstream holder is told. Any other session gets not_requester.'] : []),
     ...(['send', 'reply', 'complete', 'status'].includes(command) ? ['--wait-delivery 30s waits up to the duration (1ms–60s); timeout never resends.'] : []),
     ...(['reply', 'inbox'].includes(command) ? ['Runtime notifications already contain the reply target; inbox is for recovery.'] : []),
@@ -1654,7 +1663,7 @@ const FULL_USAGE_AFTER_COMMIT = [
       '  obligation resolve <obligation_id> --cancel --reason <text> --source-ref <ref>',
       '  delivery claim [--endpoint <id>] [--delivery <id>] [--lease-ms <n>] [--accept-reply-binding]',
       '  delivery complete <delivery_id> --token <token> --outcome <delivered|failed>',
-      '  delivery release <delivery_id> --token <token>',
+      '  delivery release <delivery_id> --token <token> [--outcome aborted_unsent]',
       '  resume list [--runtime-type <type>] [--state <state>]',
       '  resume claim [--id <resume_request_id>] [--runtime-type <type>] [--lease-ms <n>]',
       '  resume assert-active --stdin --json',

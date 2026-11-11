@@ -329,6 +329,8 @@ function projectionForRoot(db, root) {
     ack_message_id: root.ack_message_id,
     ack_delivery_id: root.ack_delivery_id,
     ack_accepted_at: root.ack_accepted_at,
+    // An ack is on its way to the user: the next update is not a second ack.
+    ack_in_flight: Boolean(db.prepare("SELECT 1 FROM deliveries WHERE route_reason = 'ack.provider_confirmed' AND source_obligation_id = ? AND state IN ('pending', 'claimed') LIMIT 1").get(root.id)),
     created_at: root.created_at,
     updated_at: root.updated_at,
     resolution:
@@ -360,17 +362,19 @@ function projectionForRoot(db, root) {
  * Builds the derived projection over every chain visible to this
  * application (isolation rides the root's accountable principal, the same
  * rule close.cancelled and recovery admit under). Pure reads: byte-stable
- * ordering everywhere, zero writes, zero inferred effects.
+ * ordering everywhere, zero writes, zero inferred effects. root_obligation_id
+ * may be any work id; it resolves up parent_id to its root (ac-jfv.28).
  */
 export function buildLifecycleView(db, appId, payload) {
   const request = validateViewRequest(payload);
   const roots = db
     .prepare(
-      `SELECT o.* FROM obligations o
-        JOIN principals p ON p.id = o.accountable_principal_id
+      `SELECT o.* FROM obligations o JOIN principals p ON p.id = o.accountable_principal_id
        WHERE o.role = 'root' AND p.created_by_app_id = ?
          AND (? IS NULL OR o.conversation_id = ?)
-         AND (? IS NULL OR o.id = ?)
+         AND (? IS NULL OR o.id = (WITH RECURSIVE up(id, parent_id) AS (SELECT id, parent_id FROM obligations WHERE id = ?
+             UNION SELECT o2.id, o2.parent_id FROM obligations o2 JOIN up ON o2.id = up.parent_id)
+           SELECT id FROM up WHERE parent_id IS NULL))
        ORDER BY o.created_at ASC, o.id ASC`,
     )
     .all(

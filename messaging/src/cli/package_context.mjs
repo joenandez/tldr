@@ -1,6 +1,7 @@
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { REPLY_BINDING_POLICY, REPLY_WAIT_HOST_WINDOW_MS } from '../protocol/reply_listener_policy.mjs';
 
 const messagingRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const defaultPackageRoot = path.resolve(messagingRoot, '..');
@@ -76,12 +77,22 @@ export function tightbeamRecipeCommand(packageRoot = defaultPackageRoot) {
   return unifiedMessagingRecipe(packageRoot);
 }
 
+// The CLI duration the Stop instructions ask for: the sixteen-hour maximum.
+const REPLY_WAIT_TIMEOUT = `${REPLY_BINDING_POLICY.maxReplyWaitMs / 3_600_000}h`;
+
+// The Claude Stop instruction: a foreground Bash call whose own timeout covers the whole wait.
+function tightbeamClaudeWaitInstruction() {
+  return `Run ${tightbeamRecipeCommand()} agent wait --timeout ${REPLY_WAIT_TIMEOUT} --json in the foreground ` +
+    `(not run_in_background) with the Bash tool timeout set to ${REPLY_WAIT_HOST_WINDOW_MS} ms, ` +
+    `then stop again after it returns.`;
+}
+
 export function tightbeamCodexWaitRecipe() {
   const command = JSON.stringify(
-    `${tightbeamRecipeCommand()} agent wait --timeout 350s --json`,
+    `${tightbeamRecipeCommand()} agent wait --timeout ${REPLY_WAIT_TIMEOUT} --json`,
   );
   return `Run this wait command, then stop again after it returns:\n` +
-    `// @exec: {"yield_time_ms": 360000}\n` +
+    `// @exec: {"yield_time_ms": ${REPLY_WAIT_HOST_WINDOW_MS}}\n` +
     `let result = await tools.exec_command({ cmd: ${command}, yield_time_ms: 30000 });\n` +
     `let session_id = result.session_id;\n` +
     `while (session_id) {\n` +
@@ -89,6 +100,15 @@ export function tightbeamCodexWaitRecipe() {
     `  session_id = result.session_id;\n` +
     `}\n` +
     `text(result.output);`;
+}
+
+// The Stop block names the wait the runtime can actually run: Codex gets the
+// CodeMode recipe, Claude the foreground Bash instruction; others the bare command.
+export function tightbeamStopWaitReason(reason, runtime) {
+  const sentence = /Run .* agent wait and stop again after it returns\./u;
+  if (runtime === 'codex') return reason.replace(sentence, tightbeamCodexWaitRecipe());
+  if (['claude', 'claude-code'].includes(runtime)) return reason.replace(sentence, tightbeamClaudeWaitInstruction());
+  return reason.replace(`${tightbeamCommandName()} agent wait`, `${tightbeamRecipeCommand()} agent wait`);
 }
 
 // The exact commands that answer a pending delegation offer. Every surface
@@ -113,11 +133,12 @@ export function workActionCommands(workId, prefix = tightbeamRecipeCommand()) {
     update: `${prefix} agent update --work ${workId} --body "<progress>"`,
     complete: `${prefix} agent complete --work ${workId} --body "<result>"`,
     delegate: `${prefix} agent delegate --work ${workId} --to session:<session-id> --body "<instructions>"`,
+    park: `${prefix} agent delegate --work ${workId} --at <when you expect the answer> --body "<what you are doing and when you will report back>"`,
   };
 }
 
 // The text lines for held work, in one fixed order: the work id, then update,
-// complete, delegate, and (only when owed) ack. `commandSuffix` turns `Update`
+// complete, delegate, park (delegate --at), and (only when owed) ack. `commandSuffix` turns `Update`
 // into `Update command`, as the notification block words its other commands.
 export function workActionLines(work, { prefix = tightbeamRecipeCommand(), indent = '', workLabel = 'Work', commandSuffix = '' } = {}) {
   const commands = workActionCommands(work.work_id, prefix);
@@ -126,6 +147,7 @@ export function workActionLines(work, { prefix = tightbeamRecipeCommand(), inden
     `${indent}Update${commandSuffix}: ${commands.update}`,
     `${indent}Complete${commandSuffix}: ${commands.complete}`,
     `${indent}Delegate${commandSuffix}: ${commands.delegate}`,
+    `${indent}Park${commandSuffix}: ${commands.park}`,
     ...(work.ack_pending ? [`${indent}Ack${commandSuffix}: ${commands.ack}`] : []),
   ];
 }

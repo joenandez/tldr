@@ -275,6 +275,14 @@ class TightbeamClient {
   }
 
   /**
+   * `recovery.transfer` — the holder hands its open work to another session
+   * through the recovery.switch transition. Same result shape as recovery.switch.
+   */
+  recoveryTransfer(payload) {
+    return this.request('recovery.transfer', payload);
+  }
+
+  /**
    * `lifecycle.view` — the forward derived projection over canonical
    * obligation/watch/delivery/endpoint/attention records. Resolves with
    * `{ chains: [...] }` whose `status` labels (working, awaiting_acceptance,

@@ -5,6 +5,7 @@
 // resume request; the daemon's resumer spawns the runtime in the cwd and its
 // SessionStart adopts the placeholder.
 
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,6 +15,7 @@ import { SESSION_LIST_LIMIT } from './agent_sessions.mjs';
 import { resolveCommandOnPath } from './doctor_checks.mjs';
 import { tightbeamRecipeCommand } from './package_context.mjs';
 import { BUILTIN_RUNTIMES, LEGACY_RUNTIME_ALIASES } from '../runtimes/builtins.mjs';
+import { packageBoundCopilotRuntimeIds } from '../runtimes/copilot_wake_contract.mjs';
 
 function debugLog(fields) {
   if (!process.env.TIGHTBEAM_HOOK_DEBUG) return;
@@ -46,10 +48,13 @@ function existingFolder(cwd) {
 
 // The resumer launches BUILTIN_RUNTIMES[id].command by name through PATH, so
 // that is the lookup that decides whether a launch could start at all.
-function availableRuntime(runtime) {
+const onPath = (command) => resolveCommandOnPath(command, process.env.PATH);
+// The Slack lane's named Academy launch passes () => true: `academy run` resolves the
+// runtime binary itself, and the launchd daemon that prepares Slack launches has a minimal PATH.
+function availableRuntime(runtime, installed = onPath) {
   const id = LEGACY_RUNTIME_ALIASES[runtime] ?? runtime;
   const record = Object.hasOwn(BUILTIN_RUNTIMES, id) ? BUILTIN_RUNTIMES[id] : null;
-  if (!record || !resolveCommandOnPath(record.command, process.env.PATH)) return null;
+  if (!record || !installed(record.command)) return null;
   return id;
 }
 
@@ -59,7 +64,7 @@ function otherRuntime(runtime) {
 }
 
 /** Validates a `new:` target before any write. @returns {{runtime: string, cwd: string}} */
-export function validateNewAgent(target, { log = debugLog } = {}) {
+export function validateNewAgent(target, { log = debugLog, namedCopilot = false, installed = onPath } = {}) {
   const cwd = existingFolder(target.cwd);
   if (cwd === null) {
     log({ event: 'agent_new.validate', params: { runtime: target.runtime }, result: { code: 'cwd_not_found' }, status: 'refused' });
@@ -68,7 +73,7 @@ export function validateNewAgent(target, { log = debugLog } = {}) {
       next_action: `Create the folder, or choose an existing one: ${tightbeamRecipeCommand()} agent sessions --all`,
     });
   }
-  const runtime = availableRuntime(target.runtime);
+  const runtime = namedCopilot ? 'copilot' : availableRuntime(target.runtime, installed);
   if (runtime === null) {
     log({ event: 'agent_new.validate', params: { runtime: target.runtime }, result: { code: 'runtime_unavailable' }, status: 'refused' });
     throw new AgentCommandError('runtime_unavailable', `${target.runtime} is not available on this machine.`, {
@@ -76,7 +81,7 @@ export function validateNewAgent(target, { log = debugLog } = {}) {
       next_action: `${tightbeamRecipeCommand()} agent sessions --runtime ${otherRuntime(target.runtime)}`,
     });
   }
-  log({ event: 'agent_new.validate', params: { runtime }, result: { cwd }, status: 'ok' });
+  log({ event: 'agent_new.validate', params: { runtime }, result: { cwd, ...(namedCopilot ? { path: 'named_copilot_bound' } : {}) }, status: 'ok' });
   return { runtime, cwd };
 }
 
@@ -97,8 +102,10 @@ function newAgentTarget({ principal_id, endpoint_id, runtime, cwd, registered_af
  * registered, so its commit replays byte-identically and no second
  * placeholder is ever left unlaunched.
  */
-export async function prepareNewAgent(client, session, target, { log = debugLog, replay = null } = {}) {
-  const { runtime, cwd } = validateNewAgent(target, { log });
+export async function prepareNewAgent(client, session, target, { log = debugLog, replay = null, academyAgentName = null, installed = onPath } = {}) {
+  // Copilot is not on PATH: only a named row whose registry has a package-bound copilot record may launch it.
+  const namedCopilot = academyAgentName !== null && target.runtime === 'copilot' && Boolean(session?.runtime_registry) && packageBoundCopilotRuntimeIds(session.runtime_registry).includes('copilot');
+  const { runtime, cwd } = validateNewAgent(target, { log, namedCopilot, installed });
   const remembered = replay?.recall() ?? null;
   if (remembered?.runtime === runtime && remembered.cwd === cwd) {
     log({ event: 'agent_new.register', params: { runtime }, result: { principal_id: remembered.principal_id, endpoint_id: remembered.endpoint_id }, status: 'replayed' });
@@ -113,11 +120,46 @@ export async function prepareNewAgent(client, session, target, { log = debugLog,
     runtime,
     launch_mode: 'non_interactive',
     authority_reference: cwd,
+    ...(academyAgentName ? { academy_agent_name: academyAgentName } : {}),
   });
   log({ event: 'agent_new.register', params: { runtime }, result: { principal_id: principal.principal_id, endpoint_id: endpoint.endpoint_id }, status: 'ok', latency_ms: Date.now() - started });
   const prepared = { principal_id: principal.principal_id, endpoint_id: endpoint.endpoint_id, runtime, cwd, registered_after: registeredAfter };
   replay?.remember(prepared);
   return newAgentTarget(prepared);
+}
+
+function usableAcademyRow(row, name) {
+  if (row?.name !== name) return false;
+  if (typeof row.cwd !== 'string' || !path.isAbsolute(row.cwd)) return false;
+  return typeof row.runtime === 'string' && typeof row.draft === 'boolean';
+}
+
+function academyRefusal(message) {
+  return new AgentCommandError('usage_error', message, { next_action: `${tightbeamRecipeCommand()} agent --help` });
+}
+
+/**
+ * Looks up `academy:<name>` with `academy list --agent-row <name>` on the
+ * caller's PATH, before any write. The row is untrusted input: it is checked
+ * before its cwd or runtime reach a registration.
+ * @returns {{cwd: string, runtime: string}}
+ */
+export function lookupAcademyAgent(name, { log = debugLog } = {}) {
+  const ran = spawnSync('academy', ['list', '--agent-row', name], { encoding: 'utf8', env: process.env, timeout: 15_000 });
+  log({ event: 'agent_academy.lookup', params: { name }, result: { status: ran.status, error: ran.error?.code ?? null }, status: ran.status === 0 ? 'ok' : 'refused' });
+  if (ran.error?.code === 'ENOENT') throw academyRefusal(`academy:${name} needs the academy command on PATH; it was not found`);
+  if (ran.error) throw academyRefusal(`academy list --agent-row ${name} failed: ${ran.error.message}`);
+  if (ran.status === 1) throw academyRefusal(`unknown Academy agent ${name}`);
+  let row = null;
+  try {
+    row = ran.status === 0 ? JSON.parse(ran.stdout.trim()) : null;
+  } catch {
+    // Falls through to the malformed-row refusal.
+  }
+  if (!usableAcademyRow(row, name)) throw academyRefusal(`academy list --agent-row ${name} returned an unusable answer (exit ${ran.status})`);
+  // academy run refuses a draft Owner, so no session could ever take the message.
+  if (row.draft) throw academyRefusal(`Academy agent ${name} has no signed mandate; run academy start ${name}`);
+  return { cwd: row.cwd, runtime: row.runtime };
 }
 
 // Measured commit -> adoption: Claude Code 2.1.293 7.0 s, Codex 0.160.1 9.1 s.

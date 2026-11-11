@@ -37,7 +37,7 @@ export function draftSendCommand(draft) {
 }
 
 // The same app handshake the Tightbeam CLI performs with the hook credentials.
-async function openHookClient(stateRoot) {
+export async function openHookClient(stateRoot) {
   const credentials = readHookCredentials(stateRoot);
   if (!credentials?.app_id || !credentials?.app_secret) {
     throw Object.assign(

@@ -119,7 +119,7 @@ async function senderKey(ctx, message) {
 }
 
 // Creates the named agent's channel and maps it by sender and by name.
-export async function createChannel(ctx, message, key) {
+async function createChannel(ctx, message, key) {
   const principal = message.sender_principal_id;
   const tag = principal.replace(/^prn_/, "").slice(0, 6);
   // A lost (archived) channel keeps its name, so a second re-create needs a third name.
@@ -149,12 +149,15 @@ export async function createChannel(ctx, message, key) {
   return created.id;
 }
 
-// Reuse-by-name repeats per send for sessions without a sender row: debug only.
-function logResolved(ctx, message, { path, channel }) {
+// Reuse-by-name repeats per send: debug only.
+function logResolved(ctx, message, channel) {
   ctx.logger({
     event: "slack_channel_resolved",
-    status: path === "reuse_by_name" ? "debug" : "info",
-    params: { path, sender_principal: message.sender_principal_id },
+    status: "debug",
+    params: {
+      path: "reuse_by_name",
+      sender_principal: message.sender_principal_id,
+    },
     result: { channel },
   });
 }
@@ -164,30 +167,15 @@ async function useExisting(ctx, channelId) {
   return channelId;
 }
 
-// A named agent without an agent_channel row adopts its principal's old channel
-// (made before channels were keyed by name) instead of creating a second one.
-// The map is re-read under the name lock: channels add may have just made it.
-async function reuseOrCreateNamed(ctx, message, { key, known }) {
-  const again = lookupAgentChannel(ctx.home, key);
-  if (again) return { path: "reuse_by_name", channel: again.channelId };
-  if (known) {
-    recordAgentChannel(ctx.home, { agentName: key, ...known });
-    return { path: "adopt", channel: known.channelId };
-  }
-  const channel = await createChannel(ctx, message, key);
-  return { path: "new_named", channel };
-}
-
-async function resolveNamed(ctx, message, args) {
-  const found = lookupAgentChannel(ctx.home, args.key);
-  const { path, channel } = found
-    ? { path: "reuse_by_name", channel: found.channelId }
-    : await withNameLock(ctx, args.key, () =>
-        reuseOrCreateNamed(ctx, message, args),
-      );
-  logResolved(ctx, message, { path, channel });
-  return path === "new_named" ? channel : useExisting(ctx, channel);
-}
+// Slack is opt-in: only `slack channels add` makes an agent's channel. Permanent: the delivery completes failed.
+const channelNotAdded = (key) => {
+  const error = new SlackApiError({
+    method: "resolve_channel",
+    slackError: "slack_channel_not_added",
+  });
+  error.message = `slack channel for ${key} was never added: run tldr-agents slack channels add ${key}`;
+  return error;
+};
 
 export async function resolveSenderChannel(ctx, message) {
   const known = lookupSenderChannel(ctx.home, message.sender_principal_id);
@@ -197,7 +185,10 @@ export async function resolveSenderChannel(ctx, message) {
   }
   const key = await senderKey(ctx, message);
   if (!key) throw namedAgentsOnly();
-  return resolveNamed(ctx, message, { key, known });
+  const found = lookupAgentChannel(ctx.home, key);
+  if (!found) throw channelNotAdded(key);
+  logResolved(ctx, message, found.channelId);
+  return useExisting(ctx, found.channelId);
 }
 
 // Another session's re-create may already have swapped the mapping: reuse it.
@@ -206,10 +197,9 @@ export async function recreateSenderChannel(ctx, message, lost) {
   const key = await senderKey(ctx, message);
   if (!key) throw namedAgentsOnly();
   return withNameLock(ctx, key, async () => {
-    const known =
-      lookupAgentChannel(ctx.home, key) ||
-      lookupSenderChannel(ctx.home, message.sender_principal_id);
-    if (known && known.channelId !== lost) return known.channelId;
+    const known = lookupAgentChannel(ctx.home, key);
+    if (!known) throw channelNotAdded(key);
+    if (known.channelId !== lost) return known.channelId;
     return createChannel(ctx, message, key);
   });
 }

@@ -39,24 +39,9 @@ const isDirectory = (path) => {
   }
 };
 
-// One shell word: bare runs, '...', "..." (backslash escapes), or \x.
-const WORD_RE = /(?:[^\s'"\\]+|'[^']*'|"(?:[^"\\]|\\.)*"|\\.)+/gsu;
-const PART_RE = /'([^']*)'|"((?:[^"\\]|\\.)*)"|\\(.)/gsu;
-
-// Shell-style words, so a quoted path may hold spaces; nothing is expanded.
-// null when a quote is left open.
-export function splitLaunchCommand(text) {
-  if (text.replace(WORD_RE, "").trim()) return null;
-  return (text.match(WORD_RE) ?? []).map((word) =>
-    word.replace(PART_RE, (_, single, double, escaped) =>
-      double === undefined
-        ? (single ?? escaped)
-        : double.replace(/\\(.)/gsu, "$1"),
-    ),
-  );
-}
-
-// Launch info is opaque to tldr: the command is split into words, never run here.
+// The command is optional and unused (the shared path runs the runtime's own
+// template). Academy still passes one, so it is accepted whatever it holds and
+// only noted (commandIgnored), never tokenized or stored.
 export function parseLaunchSpec({ cwd, runtime, command }) {
   const invalid = (message) =>
     new SlackChannelsError("SLACK_LAUNCH_INVALID", message);
@@ -70,10 +55,8 @@ export function parseLaunchSpec({ cwd, runtime, command }) {
       `launch runtime must be one of: ${LAUNCH_RUNTIMES.join(", ")}.`,
     );
   }
-  const argv = typeof command === "string" ? splitLaunchCommand(command) : [];
-  if (!argv) throw invalid("launch command has an unclosed quote.");
-  if (!argv.length) throw invalid("launch command must not be empty.");
-  return { cwd, runtime, command: argv };
+  const commandIgnored = typeof command === "string" && command.trim() !== "";
+  return { cwd, runtime, command: [], commandIgnored };
 }
 
 // Setup rows: [{ name, cwd, runtime, command }] -> names plus launch info per name.
@@ -157,9 +140,8 @@ const addOneLocked = (args) =>
     busy: NAME_BUSY,
   });
 
-// Runtime and argv[0] only: keeps the payload small.
-const launchLogParams = (launch) =>
-  launch ? { runtime: launch.runtime, command0: launch.command[0] } : {};
+// Runtime only: the stored command is not applied, so it is not logged as config.
+const launchLogParams = (launch) => (launch ? { runtime: launch.runtime } : {});
 
 function plan(names) {
   const seen = new Map();

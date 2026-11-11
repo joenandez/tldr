@@ -70,6 +70,7 @@ import { launchDispatchOnceForAirlock } from "./daemon_dispatch_once.mjs";
 import { loadActiveRunsReadOnly, loadDispatchJobsReadOnly } from "./store.mjs";
 import { createDispatchExecutor } from "./daemon_dispatch_executor.mjs";
 import { runDaemonMaintenanceChild } from "./daemon_child_commands.mjs";
+import { runHeldReleasePhase } from "./held_release.mjs";
 import {
   isGlobalDueAdmissionEnabledForDaemon,
   loadDispatchDueQueryModule,
@@ -1382,8 +1383,7 @@ export async function runDaemonLoop(opts) {
         }
       });
 
-      // Phase 1A: reconcile due-projection against jobs.json truth every
-      // ALARM_CHECK_TICKS ticks (~200 s). Reuses existing cadence constant.
+      // Phase 1A: reconcile due-projection against jobs.json every ALARM_CHECK_TICKS ticks.
       await runTickPhase("due_projection_reconcile", async ({ signal }) => {
         if (tickCounter % ALARM_CHECK_TICKS !== 0) return;
         const child = await runDaemonMaintenanceChild({
@@ -1400,7 +1400,7 @@ export async function runDaemonLoop(opts) {
           throw new Error(child.error || "due reconcile child failed");
         }
       });
-
+      await runHeldReleasePhase(runTickPhase);
       tickCounter += 1;
       await runTickPhase("tick_freshness", async () => writeDaemonLastTick());
 
