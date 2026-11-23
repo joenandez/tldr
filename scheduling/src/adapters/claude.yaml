@@ -2,7 +2,19 @@ name: claude
 version: 1
 
 command:
-  argv: [claude, -p, --verbose, --output-format, stream-json, --session-id, "{{session_id}}", "{{prompt}}"]
+  # The prompt goes on stdin: Helm runs this under the run host (run_session_outcome.mjs hostedLaunch).
+  argv:
+    [
+      claude,
+      -p,
+      --verbose,
+      --output-format,
+      stream-json,
+      --input-format,
+      stream-json,
+      --session-id,
+      "{{session_id}}",
+    ]
   env:
     CLAUDE_NONINTERACTIVE: "1"
 

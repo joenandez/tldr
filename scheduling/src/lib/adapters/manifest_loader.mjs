@@ -1,4 +1,5 @@
 import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { parse as parseYaml } from "yaml";
 import { expandArgv, expandTemplate } from "./template.mjs";
 import {
@@ -10,6 +11,11 @@ import {
   academyCopilotOptionErrors,
   insertRuntimeOptionArgv,
 } from "../runtime_options.mjs";
+
+// never-wait 5.2: a hosted adapter launches the run host by path; scheduling never imports it.
+const RUN_HOST = fileURLToPath(
+  new URL("../../../../messaging/src/cli/run_host.mjs", import.meta.url),
+);
 
 const VALID_CAPTURE_STRATEGIES = new Set(["stdout_parse", "sidecar_diff"]);
 const VALID_PARSE_FORMATS = new Set(["json", "jsonl", "regex"]);
@@ -207,6 +213,8 @@ function buildExpansionCtx({ job, run, prompt, model, sessionId }) {
     prompt: prompt ?? "",
     session_id: sessionId ?? "",
     model: model ?? null,
+    node: process.execPath,
+    run_host: RUN_HOST,
     env: process.env,
     provider_config: resolveProviderConfig(job),
     job: { cwd: resolveJobCwd(job), id: job?.id ?? "" },
@@ -255,7 +263,10 @@ function compilePrepare(doc) {
     return {
       argv,
       env,
-      stdin: null,
+      stdin:
+        command.stdin === undefined
+          ? null
+          : expandTemplate(String(command.stdin), ctx),
       injected_via: "user_prompt_prefix",
       session_id: sessionId,
       run_id: run?.run_id || null,

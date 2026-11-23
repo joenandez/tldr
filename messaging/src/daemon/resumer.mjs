@@ -32,9 +32,10 @@
 // never rewritten.
 
 import { spawn } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { withTransaction } from './db.mjs';
 import { runWatchReconciliation } from './watch_reconciler.mjs';
@@ -42,7 +43,7 @@ import { reconcileCustodyLoss } from './custody_reconciler.mjs';
 import { acquireClaim, reapExpired, releaseClaim, resolveLeaseMs, DEFAULT_LEASE_MS } from './ops/claims_shared.mjs';
 import { MAX_RESUME_ATTEMPTS, EXACT_SESSION_UNAVAILABLE, CODEX_HOST_UNKNOWN, CODEX_QUEUE_REFUSED, CODEX_QUEUE_FAILED, hostedAttentionSource } from './ops/resume_fail.mjs';
 import { expandStoredRuntimeIds } from './ops/resume_shared.mjs';
-import { prepareResumeDebugLog } from './resume_debug_log.mjs';
+import { prepareResumeDebugLog, stderrTail } from './resume_debug_log.mjs';
 export { RESUME_DEBUG_RETAINED_BYTES, RESUME_DEBUG_RETAINED_LOGS } from './resume_debug_log.mjs';
 import { COPILOT_SESSION_UNAVAILABLE, copilotLoadFailed, copilotWakeScopeSql, planCopilotWake, refuseCopilotWake, wakeStdin } from './copilot_wake.mjs';
 import { isPackageBoundCopilotRecord, WAKE_MESSAGE_ID } from '../runtimes/copilot_wake_contract.mjs';
@@ -52,19 +53,26 @@ import { validateRecoveryContextState } from './ops/recovery_context.mjs';
 import { runScheduledWakes } from './scheduled_wake_pass.mjs';
 import { hasUnreadScheduledWake } from './scheduled_wakes.mjs';
 import { endpointHasWakingUnreadSql, RECOVERY_REPLACEMENT_ROUTE_REASON, stageTerminalResumeFailureNotice } from './lifecycle_transition.mjs';
-import { DEFAULT_RESUME_STALE_AFTER_MS, pushLiveDeliveryEvents } from './ops/message_shared.mjs';
+import { stageCwdGoneSenderNotice } from './cwd_gone_notice.mjs';
+import { DEAD_HEADLESS_EXIT_SQL, successorBranchFor } from './listener_owner_loss.mjs';
+import { DEFAULT_RESUME_STALE_AFTER_MS, ELIGIBLE_SUCCESSOR_DELIVERY_SQL, pushLiveDeliveryEvents } from './ops/message_shared.mjs';
+import { publishPresentation } from './ops/listener_operations.mjs';
 import { maybeRequestHostWake } from './session_host.mjs';
+import { runBusyLineSweep } from './busy_line.mjs';
 import { renderNotification } from '../cli/arrival_notification.mjs';
 import { withoutSessionEnv } from '../protocol/session_env.mjs';
 import { notificationContext } from './ops/notification_context.mjs';
 import { observeRetirementProcess } from './retirement_executor.mjs';
 import { observeOwnerLiveness, readOwnerFence, sameOwnerFence } from './owner_liveness.mjs';
 import { classifyQueueRefusal, isThreadWriterConflict, threadHostObserverFor } from './codex_thread_host.mjs';
+import { liveRunHost, pushToLiveRuns } from './run_input.mjs';
+import { isSafeSessionId } from '../protocol/session_paths.mjs';
 
 // One indexed query per second against the pending queue. Not a schedule:
 // nothing is planned for a future time, the tick only asks whether the
 // durable queue has anything in it right now.
 export const RESUME_TICK_MS = 1000;
+const BUSY_LINE_SWEEP_MS = 1000; // a 2-minute user wait gets its notice within ~1 s of the deadline
 
 // The only endpoint custody the daemon may resume while provider-owned
 // message admission remains unproved. Interactive and unknown modes keep a
@@ -345,7 +353,8 @@ function endpointHasWakingUnread(db, endpointId) {
 // Item 42 B/C adds two sources beside the terminated retirement: a dead
 // interactive/unknown endpoint whose owner exit was observed, and a
 // non_interactive endpoint that went idle because its owner exited mid-turn
-// (a `codex exec` whose Stop never reached the daemon).
+// (a `codex exec` whose Stop never reached the daemon). ac-jfv.155 adds a fourth
+// (dead_headless_exit): see listener_owner_loss.mjs.
 //
 // Item 44's guarantees hold here as they do at routing time:
 //   - a message that already has a resume request on ANY endpoint, or that
@@ -365,11 +374,12 @@ function successorEligiblePredicate() {
         AND e.provider_session_id IS NOT NULL AND length(e.provider_session_id) > 0
         AND e.owner_process_exited_at IS NOT NULL
         AND e.owner_process_pid IS NOT NULL
-        AND e.owner_process_generation = e.process_generation)`;
+        AND e.owner_process_generation = e.process_generation)
+    OR (${DEAD_HEADLESS_EXIT_SQL})`;
 }
 
 function successorEligibleParams() {
-  return [RESUMER_LAUNCH_MODE, RESUMER_LAUNCH_MODE, RESUMER_LAUNCH_MODE];
+  return Array(4).fill(RESUMER_LAUNCH_MODE);
 }
 
 function materializeSuccessorRequests(db, now, { staleAfterMs = DEFAULT_RESUME_STALE_AFTER_MS, logger = null } = {}) {
@@ -385,10 +395,12 @@ function materializeSuccessorRequests(db, now, { staleAfterMs = DEFAULT_RESUME_S
           AND NOT EXISTS (
             SELECT 1 FROM resume_requests active
              WHERE active.endpoint_id = e.id AND active.state IN ('pending', 'claimed')
-          )`,
-    )
-    .all(...successorEligibleParams())
-    .map((row) => row.id);
+          )
+          AND (max(coalesce(julianday(e.updated_at), 0), coalesce(julianday(e.created_at), 0)) >= julianday(?) - 1.0 / 1440
+               OR EXISTS (SELECT 1 FROM deliveries sw WHERE sw.endpoint_id = e.id AND sw.route_reason = 'scheduled.wake' AND sw.read_at IS NULL AND sw.state != 'failed'))
+          AND EXISTS (SELECT 1 FROM deliveries d WHERE d.endpoint_id = e.id AND ${ELIGIBLE_SUCCESSOR_DELIVERY_SQL})`,
+    ) // stale test: a minute wider than the exact JS check below (the authority); assumes Z-suffixed ISO times, as the daemon writes
+    .all(...successorEligibleParams(), staleBefore, staleBefore).map((row) => row.id);
   for (const endpointId of endpointIds) {
     const outcome = withTransaction(db, () => {
       const endpoint = db
@@ -406,32 +418,27 @@ function materializeSuccessorRequests(db, now, { staleAfterMs = DEFAULT_RESUME_S
       if (nowMs - lastActivityMs > staleAfterMs && !hasUnreadScheduledWake(db, endpointId)) return { endpoint, decision: 'stale' };
       const delivery = db
         .prepare(
-          `SELECT d.message_id, m.conversation_id
+          `SELECT d.id AS delivery_id, d.message_id, m.conversation_id
              FROM deliveries d
              JOIN messages m ON m.id = d.message_id
-            WHERE d.endpoint_id = ? AND d.state != 'failed' AND d.read_at IS NULL
-              AND d.created_at >= ?
-              AND NOT EXISTS (SELECT 1 FROM resume_requests prior WHERE prior.message_id = d.message_id)
-              AND NOT EXISTS (
-                SELECT 1 FROM deliveries handled
-                 WHERE handled.message_id = d.message_id AND handled.id != d.id AND handled.read_at IS NOT NULL
-              )
+            WHERE d.endpoint_id = ? AND ${ELIGIBLE_SUCCESSOR_DELIVERY_SQL}
             ORDER BY d.created_at ASC, d.id ASC
             LIMIT 1`,
         )
         .get(endpointId, staleBefore);
       if (!delivery) return { endpoint, decision: 'no_eligible_delivery' };
       const requestId = generateId('resume_request');
+      const reason = endpoint.state === 'idle' ? 'endpoint_idle' : 'endpoint_dead';
       db.prepare(
         `INSERT INTO resume_requests
           (id, endpoint_id, principal_id, session_id, conversation_id, message_id, reason, authority_reference, state, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
       ).run(
         requestId, endpoint.id, endpoint.principal_id, endpoint.provider_session_id,
-        delivery.conversation_id, delivery.message_id, endpoint.state === 'idle' ? 'endpoint_idle' : 'endpoint_dead',
+        delivery.conversation_id, delivery.message_id, reason,
         endpoint.authority_reference, now, now,
       );
-      return { endpoint, decision: 'materialized', requestId, messageId: delivery.message_id };
+      return { endpoint, decision: 'materialized', requestId, messageId: delivery.message_id, deliveryId: delivery.delivery_id, reason };
     });
     if (!outcome) continue;
     // Decisions that change nothing repeat every tick while the unread row
@@ -444,8 +451,10 @@ function materializeSuccessorRequests(db, now, { staleAfterMs = DEFAULT_RESUME_S
           launch_mode: outcome.endpoint.launch_mode,
           endpoint_state: outcome.endpoint.state,
           message_id: outcome.messageId,
+          delivery_id: outcome.deliveryId,
+          reason: outcome.reason,
         },
-        result: { resume_request_id: outcome.requestId, path: resumePathFor(outcome.endpoint) },
+        result: { resume_request_id: outcome.requestId, path: resumePathFor(outcome.endpoint), predicate_branch: successorBranchFor(outcome.endpoint, RESUMER_LAUNCH_MODE), owner_process_exited_at: outcome.endpoint.owner_process_exited_at },
         status: 'ok',
       });
     }
@@ -994,25 +1003,56 @@ export function resumeBrief({ messageId, messageIds = [messageId], externalMessa
  */
 export function buildChildInvocation({ record, sessionId, messageId, messageIds = [messageId], academyAgentName = null, externalMessageIds = new Set(), pendingContext = new Map(), debugFile = null }) {
   if (!record || record.resumeStrategy !== 'daemon') return null;
+  const brief = resumeBrief({ messageId, messageIds, externalMessageIds, pendingContext });
   if (typeof sessionId === 'string' && sessionId.length > 0) {
     // Only Claude takes --debug-file; under academy it follows `--` to claude.
     const debug = record.id === 'claude-code' && debugFile ? ['--debug-file', debugFile] : [];
     const runtimeArgs = [...record.resumeArgsTemplate.map((element) => (element === '{sessionId}' ? sessionId : element)), ...debug];
-    return {
+    return hostedForRunHost(record, { sessionId, resume: true }, {
       form: 'resume',
-      command: academyAgentName ? 'academy' : record.command,
-      args: academyAgentName ? ['run', academyAgentName, '--runtime-once', record.id, '--', ...runtimeArgs] : runtimeArgs, // --runtime-once pins the session's own provider without persisting it; --agent would rewrite agent.yaml and re-register Helm jobs
-      prompt: resumeBrief({ messageId, messageIds, externalMessageIds, pendingContext }),
+      ...withAcademyWrapper(record, academyAgentName, runtimeArgs),
+      prompt: brief,
       debugFile: debug.length > 0 ? debugFile : null,
-    };
+    });
   }
-  const spawnArgs = record.spawnArgsTemplate.map((element) => (element === '{prompt}' ? resumeBrief({ messageId, messageIds, externalMessageIds, pendingContext }) : element));
-  return {
+  // A hosted spawn names its session up front, so the run host's socket path is known before the run registers.
+  const mintedSessionId = record.id === 'claude-code' ? randomUUID() : null;
+  const spawnArgs = record.spawnArgsTemplate.map((element) => (element === '{prompt}' ? brief : element === '{sessionId}' ? mintedSessionId : element));
+  return hostedForRunHost(record, { sessionId: mintedSessionId, resume: false }, {
     form: 'spawn',
-    command: academyAgentName ? 'academy' : record.command,
-    args: academyAgentName ? ['run', academyAgentName, '--runtime-once', record.id, '--', ...spawnArgs] : spawnArgs,
-    prompt: null,
+    ...withAcademyWrapper(record, academyAgentName, spawnArgs),
+    prompt: record.spawnArgsTemplate.includes('{prompt}') ? null : brief,
     debugFile: null,
+  });
+}
+
+function withAcademyWrapper(record, academyAgentName, runtimeArgs) {
+  return {
+    command: academyAgentName ? 'academy' : record.command,
+    args: academyAgentName ? ['run', academyAgentName, '--runtime-once', record.id, '--', ...runtimeArgs] : runtimeArgs, // --runtime-once pins the session's own provider without persisting it; --agent would rewrite agent.yaml and re-register Helm jobs
+  };
+}
+
+const RUN_HOST = fileURLToPath(new URL('../cli/run_host.mjs', import.meta.url));
+
+// The run host flags per hosted runtime. A Codex thread takes its policy from
+// the launch: resumer runs keep the bypass `codex exec
+// --dangerously-bypass-approvals-and-sandbox` gave them (never-wait 5.2).
+const RUN_HOST_RUNTIME_ARGS = {
+  'claude-code': ['--runtime', 'claude'],
+  codex: ['--runtime', 'codex', '--approval-policy', 'never', '--sandbox', 'danger-full-access'],
+};
+
+// never-wait 2.3.1: the run host owns the agent's stdin and is outermost, so
+// the original command (academy wrapper included) follows `--`. A Codex spawn
+// has no session yet: the run host learns the thread id from the app-server.
+function hostedForRunHost(record, { sessionId, resume }, invocation) {
+  const runtimeArgs = RUN_HOST_RUNTIME_ARGS[record.id];
+  if (!runtimeArgs) return invocation;
+  return {
+    ...invocation,
+    command: process.execPath,
+    args: [RUN_HOST, ...runtimeArgs, ...(sessionId ? ['--session', sessionId] : []), ...(resume ? ['--resume', sessionId] : []), '--', invocation.command, ...invocation.args],
   };
 }
 
@@ -1329,8 +1369,12 @@ function trackedRootFor(db, messageId) {
 // existing session another app holds (F34): the session is fine and the
 // message is unread, so the delivery is never failed (it is read at the
 // session's next natural run) and an untracked message is surfaced by the
-// projection alone.
-function surfaceLaunchFailure(context, { requestId, reason, attentionSource = LAUNCH_FAILED_ATTENTION, sessionBound = false }) {
+// projection alone. `cwdGone` (the target's folder no longer exists) is
+// terminal for the message whatever it tracks and whether or not the endpoint
+// ever had a session: tracked work still gets its attention, and the delivery
+// fails either way (retrying can never succeed, and the dead endpoint would
+// keep waking on it).
+function surfaceLaunchFailure(context, { requestId, reason, attentionSource = LAUNCH_FAILED_ATTENTION, sessionBound = false, cwdGone = false }) {
   const { db } = context;
   const now = new Date().toISOString();
   const surfaced = withTransaction(db, () => {
@@ -1338,7 +1382,7 @@ function surfaceLaunchFailure(context, { requestId, reason, attentionSource = LA
       `SELECT r.id, r.endpoint_id, r.message_id, r.state, e.provider_session_id
          FROM resume_requests r JOIN endpoints e ON e.id = r.endpoint_id WHERE r.id = ?`,
     ).get(requestId);
-    if (request?.state !== 'failed' || (!sessionBound && request.provider_session_id !== null)) return null;
+    if (request?.state !== 'failed' || (!sessionBound && !cwdGone && request.provider_session_id !== null)) return null;
     db.prepare('UPDATE resume_requests SET replacement_failure_reason = COALESCE(replacement_failure_reason, ?) WHERE id = ?').run(reason, requestId);
     const rootId = trackedRootFor(db, request.message_id);
     if (rootId) {
@@ -1347,22 +1391,23 @@ function surfaceLaunchFailure(context, { requestId, reason, attentionSource = LA
          VALUES (?, 1, ?, ?, ?, ?)
          ON CONFLICT(root_obligation_id) DO UPDATE SET attention_source = excluded.attention_source, last_block_at = excluded.last_block_at, updated_at = excluded.updated_at`,
       ).run(rootId, attentionSource, now, now, now);
-      return { request, rootId, deliveryFailed: false };
+      if (!cwdGone) return { request, rootId, deliveryFailed: false };
     }
     if (sessionBound) return { request, rootId: null, deliveryFailed: false };
     const failed = db.prepare(
       `UPDATE deliveries SET state = 'failed', updated_at = ?
         WHERE message_id = ? AND endpoint_id = ? AND read_at IS NULL AND state != 'failed'`,
     ).run(now, request.message_id, request.endpoint_id);
-    return { request, rootId: null, deliveryFailed: failed.changes > 0 };
+    return { request, rootId, deliveryFailed: failed.changes > 0 };
   });
-  if (!surfaced) return;
+  if (!surfaced) return false;
   context.logger?.warn({
     event: 'resume.launch_failed',
     params: { resume_request_id: requestId, endpoint_id: surfaced.request.endpoint_id, message_id: surfaced.request.message_id },
     result: { tracked: surfaced.rootId !== null, root_obligation_id: surfaced.rootId, delivery_failed: surfaced.deliveryFailed, reason },
     status: 'surfaced',
   });
+  return surfaced.deliveryFailed;
 }
 
 /**
@@ -1544,6 +1589,60 @@ function stageTerminalFailureNotice(context, { requestId }) {
   }
 }
 
+// A wake refused because the target's folder is gone: the delivery fails (even
+// under a tracked root) and, only when this call is what failed it, the
+// sending agent, who is otherwise never told, gets one notice. Reached from the
+// cwd check and from a spawn that fails after the folder vanished. Never
+// relaunches. A session an app-server still hosts (F34) keeps its old
+// handling: the delivery stays unread and nobody is told.
+function endForGoneCwd(context, { request, hosted = false }) {
+  const failed = surfaceLaunchFailure(context, { requestId: request.id, reason: REFUSAL_CWD_NOT_FOUND, attentionSource: 'resume.cwd_not_found', cwdGone: !hosted });
+  stageTerminalFailureNotice(context, { requestId: request.id });
+  if (hosted) return;
+  if (failed) noticeSenderOfGoneCwd(context, request);
+  else logGoneCwdNotice(context, request, { status: 'skipped', reason: 'delivery_not_failed_here' });
+}
+
+// Already-handled outcomes are info; anything that left the sender unnotified is a warning.
+const QUIET_GONE_CWD_REASONS = new Set(['delivery_not_failed_here', 'already_noticed']);
+function logGoneCwdNotice(context, request, outcome) {
+  const { status, ...result } = outcome;
+  const level = QUIET_GONE_CWD_REASONS.has(result.reason) ? 'info' : 'warn';
+  context.logger?.[level]?.({
+    event: 'resume.cwd_refused_sender_notified',
+    params: { resume_request_id: request.id, endpoint_id: request.endpoint_id, message_id: request.message_id },
+    result,
+    status,
+  });
+}
+
+// After commit, as for any reply: inbox events, and every presentation staged
+// for a parked listener (unpublished, it is missed at its ack deadline).
+function noticeSenderOfGoneCwd(context, request) {
+  try {
+    const notice = withTransaction(context.db, () => stageCwdGoneSenderNotice(context, { requestId: request.id }));
+    if (notice.liveDeliveries?.length) {
+      pushLiveDeliveryEvents(context, { conversationId: notice.conversation_id, liveDeliveries: notice.liveDeliveries });
+    }
+    for (const presentation of notice.presentations ?? []) publishPresentation(context, presentation);
+    if (notice.liveDeliveries?.length > 0) {
+      const notified = notice.liveDeliveries.map((delivery) => delivery.endpoint_id);
+      logGoneCwdNotice(context, request, { status: 'notified', notice_message_id: notice.message_id, notified_endpoint_ids: notified });
+    } else if (notice.idempotent_replay) {
+      logGoneCwdNotice(context, request, { status: 'skipped', reason: 'already_noticed' });
+    } else {
+      logGoneCwdNotice(context, request, { status: 'skipped', reason: notice.skipped ?? 'no_open_sender_endpoint' });
+    }
+  } catch (error) {
+    // A key taken by different content means this message was already noticed.
+    if (error.code === 'idempotency_collision') {
+      logGoneCwdNotice(context, request, { status: 'skipped', reason: 'already_noticed' });
+      return;
+    }
+    context.logger?.warn({ event: 'resume_cwd_gone_notice_unavailable', resume_request_id: request.id, code: error.code, message: error.message });
+  }
+}
+
 // Child stdout carries the provider's own verdict: Claude writes "Not
 // logged in" as a stream-json result, never to stderr (COE-2026-09-22
 // defect 3). It goes to a private file that loses its name before the
@@ -1658,14 +1757,14 @@ function takeChildOutputResult(context, capture, requestId) {
   }
 }
 
-// Child stderr is untrusted and may echo prompts, credentials, or config.
-// Persist a bounded allowlisted diagnostic, never arbitrary stderr text.
+// Child stderr is untrusted and may echo prompts, credentials, or config. Its only
+// persisted forms: this allowlisted code, and stderrTail's bounded, redacted tail.
 function childExitDiagnostic(stderr, unavailable, providerResult = null) {
   if (unavailable) return EXACT_SESSION_UNAVAILABLE;
   if (copilotLoadFailed(stderr)) return COPILOT_SESSION_UNAVAILABLE;
   if (providerResult?.error === 'authentication_failed') return 'authentication_failed';
   if (providerResult?.error === 'rate_limit') return 'rate_limited';
-  if (/unexpected argument|unknown option|unrecognized (?:argument|option)|invalid argument/i.test(stderr)) return 'invalid_arguments';
+  if (/unexpected argument|--[\w-]+ only applies to|unknown option|unrecognized (?:argument|option)|invalid argument/i.test(stderr)) return 'invalid_arguments';
   if (/unauthorized|authentication|invalid api.key|not logged in|401\b/i.test(stderr)) return 'authentication_failed';
   if (/permission denied|access denied|EACCES/i.test(stderr)) return 'permission_denied';
   if (/rate.limit|429\b/i.test(stderr)) return 'rate_limited';
@@ -2181,6 +2280,26 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
       continue;
     }
 
+    // never-wait 2.3.2: one agent process per session. A run whose host is
+    // live (in.pid) gets this mail by push; the request waits a tick. The
+    // skip is logged once per live run, not per tick (review M2). It runs
+    // before the brief is built, so a skipped tick costs no queries (review L1).
+    const liveRunSkips = (context.liveRunSkips ??= new Set());
+    if (!(context.stateRoot && isSafeSessionId(request.session_id) && liveRunHost(context.stateRoot, request.session_id))) {
+      liveRunSkips.delete(request.endpoint_id);
+    } else {
+      summary.skipped += 1;
+      if (liveRunSkips.has(request.endpoint_id)) continue;
+      liveRunSkips.add(request.endpoint_id);
+      logger?.info({
+        event: 'resume.live_run',
+        params: { resume_request_id: request.id, endpoint_id: request.endpoint_id, runtime: request.runtime },
+        result: { decision: 'skip_this_tick', reason: 'run_host_live' },
+        status: 'skipped',
+      });
+      continue;
+    }
+
     // The record comes from the SAME captured snapshot as the candidate
     // list; registry.get canonicalizes a stored legacy spelling ('claude')
     // to its daemon-strategy record without touching the stored cell.
@@ -2368,8 +2487,7 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
     const cwd = existingChildCwd(request.authority_reference);
     if (cwd === null) {
       failRequest(db, { requestId: request.id, now, refusal: { reason: REFUSAL_CWD_NOT_FOUND, attentionSource: 'resume.cwd_not_found' } });
-      surfaceLaunchFailure(context, { requestId: request.id, reason: REFUSAL_CWD_NOT_FOUND, attentionSource: 'resume.cwd_not_found' });
-      stageTerminalFailureNotice(context, { requestId: request.id });
+      endForGoneCwd(context, { request, hosted: hostedVehicle });
       summary.failed += 1;
       logger?.warn({
         event: 'resume.cwd_refused',
@@ -2445,7 +2563,8 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
         }).decided
       )
         summary.custody_losses += 1;
-      surfaceLaunchFailure(context, { requestId: request.id, reason: 'spawn_failed' });
+      if (!hostedVehicle && existingChildCwd(request.authority_reference) === null) endForGoneCwd(context, { request });
+      else surfaceLaunchFailure(context, { requestId: request.id, reason: 'spawn_failed' });
       logger?.error({
         event: 'resume_spawn_failed',
         resume_request_id: request.id,
@@ -2485,7 +2604,8 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
           evidenceKind: 'spawn_error',
           ...spawnErrorEvidence(custodyCapture),
         });
-        surfaceLaunchFailure(context, { requestId: request.id, reason: 'spawn_failed' });
+        if (!hostedVehicle && existingChildCwd(request.authority_reference) === null) endForGoneCwd(context, { request });
+        else surfaceLaunchFailure(context, { requestId: request.id, reason: 'spawn_failed' });
         logger?.error({
           event: 'resume_spawn_failed',
           resume_request_id: request.id,
@@ -2532,7 +2652,7 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
       const diagnostic = failed ? childExitDiagnostic(childStderr, unavailable, providerResult) : null;
       logger?.info({
         event: 'resume_child_exited', resume_request_id: request.id, pid: child.pid, code, signal,
-        ...(failed ? { diagnostic } : {}),
+        ...(failed ? { diagnostic, stderr_tail: stderrTail(childStderr) } : {}),
         ...(providerResult ? { provider_result: providerResult } : {}),
       });
       try {
@@ -2660,17 +2780,13 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
       }
     });
 
-    // EVERY child gets EOF on stdin, in both forms. The resume vectors
-    // read their brief from this pipe (`-p` with no positional prompt,
-    // and codex's trailing `-`). The spawn vectors carry the brief in
-    // argv — and STILL drain stdin to EOF before their first turn:
-    // `codex exec` prints "Reading additional input from stdin..." and
-    // blocks there, so a spawn whose stdin stayed an open pipe never
-    // reached its first turn, never read the message, and was respawned
-    // to the attempt bound. stdio[0] stays 'pipe' for both forms rather
-    // than becoming 'ignore' for the spawn form: one stdio shape, one
-    // code path, and the EPIPE guard below covers both — an ended pipe
-    // gives the child the same immediate EOF that /dev/null would.
+    // EVERY child gets EOF on stdin. Every vector reads its brief from this
+    // pipe: the resume vectors (`-p` with no positional prompt, codex's
+    // trailing `-`) and the run host (cli/run_host.mjs), which reads the
+    // brief to EOF before it starts the agent and writes it through the
+    // runtime adapter. The pipe is always 'pipe', never 'ignore', so there
+    // is one stdio shape and one code path, and the EPIPE guard below covers
+    // it: an ended pipe gives the child immediate EOF.
     if (child.stdin) {
       // A child that died before reading its brief must not take the
       // daemon down with an unhandled EPIPE.
@@ -2731,11 +2847,34 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
  * it. Overlapping passes are impossible — the pass is synchronous — but
  * `running` guards against a re-entrant call from a future async change.
  */
-export function startResumer(context, { env = process.env, spawnFn = spawn } = {}) {
+export function startResumer(context, { env = process.env, spawnFn = spawn, busyLineSweep = runBusyLineSweep, pushLiveRuns = pushToLiveRuns } = {}) {
   const settings = resolveResumerSettings(env);
   // Startup evidence only: each tick captures its own snapshot, so this
   // name list describes the registry as of daemon start.
   const startupRegistry = context.runtimeRegistry ?? createRuntimeRegistry({ stateRoot: context.stateRoot });
+
+  // Async jobs run after the sync tick, each behind its own in-flight guard: a slow push pass never
+  // delays the busy-line sweep, and neither job ever overlaps itself.
+  const asyncJobs = [
+    { name: 'busy_line_sweep', everyMs: BUSY_LINE_SWEEP_MS, lastStartedAt: -Infinity, inFlight: false, run: () => busyLineSweep(context) },
+    { name: 'push_to_live_runs', everyMs: 0, lastStartedAt: -Infinity, inFlight: false, run: () => pushLiveRuns(context) },
+  ];
+  const runAsyncStep = () => {
+    const now = Date.now();
+    for (const job of asyncJobs.filter((j) => !j.inFlight && now - j.lastStartedAt >= j.everyMs)) {
+      job.inFlight = true;
+      job.lastStartedAt = now; // a failed job waits its full interval, then retries
+      (async () => {
+        try {
+          await job.run();
+        } catch (err) {
+          context.logger?.error({ event: 'resumer_async_job_failed', job: job.name, message: err.message, stack: err.stack });
+        }
+      })().finally(() => {
+        job.inFlight = false;
+      });
+    }
+  };
 
   let running = false;
   const timer = setInterval(() => {
@@ -2748,6 +2887,7 @@ export function startResumer(context, { env = process.env, spawnFn = spawn } = {
     } finally {
       running = false;
     }
+    runAsyncStep();
   }, settings.tickMs);
   timer.unref?.();
 

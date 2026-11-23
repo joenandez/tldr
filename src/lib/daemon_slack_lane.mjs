@@ -250,6 +250,7 @@ export function runSlackOutboundOnce({
           logger: outboundLogger(home),
           postTimeoutMs: timeoutMs,
           leaseMs: tldrAgentSlackClaimLease(timeoutMs),
+          tier: 2, // tiers 0-1 have their own lanes
         }).deliverOnce(),
     },
   });
@@ -288,7 +289,7 @@ export function runSlackWorkingOnce({ home, daemonInstanceId, signal }) {
   });
 }
 
-async function slackTickOnce({
+export async function slackTickOnce({
   home,
   once,
   daemonInstanceId,
@@ -314,12 +315,14 @@ async function slackTickOnce({
       );
       if (!phase.ok)
         process.stderr.write(`tldr daemon ${phaseName}: ${phase.error}\n`);
+      return phase.result;
     }
   } catch (error) {
     process.stderr.write(
       `tldr daemon ${phaseName} lane failed: ${error?.message || error}\n`,
     );
   }
+  return undefined;
 }
 
 // Returns a slack lane (outbound, inbound, or the working sweep); the loop supplies

@@ -12,6 +12,9 @@
 //     endpoint.json        the session's registered identity (a cache)
 //     pending-bg/          one empty file per open Codex background item:
 //                          bash-<tool_use_id>, agent-<agent_id>
+//     in.sock              the live run's prompt socket (cli/run_host.mjs)
+//     in.pid               {pid, ino}: the host serving in.sock, for the spawn guard
+//     run_host.log         the run host's own log
 //
 // Ported from the retired helm prefetch-session-inbox hook, lines 29-33, whose
 // per-session directory under ~/.helm/sessions/<id>/ carried the former
@@ -55,5 +58,7 @@ export function sessionPaths(stateRoot, sessionId) {
     endpoint: path.join(dir, 'endpoint.json'),
     recovery: path.join(dir, 'recovery-context.json'),
     pendingBg: path.join(dir, 'pending-bg'),
+    inputSocket: path.join(dir, 'in.sock'),
+    inputPid: path.join(dir, 'in.pid'),
   };
 }

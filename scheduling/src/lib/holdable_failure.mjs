@@ -42,6 +42,35 @@ function parseLines(lines) {
   });
 }
 
+// never-wait 5.2: a hosted Codex run's stdout is raw `codex app-server`
+// JSON-RPC. The notifications Helm classifies read as the `codex exec --json`
+// events they replace; every other line passes through unchanged.
+const NOT_TOOL_ITEMS = new Set(["userMessage", "agentMessage", "reasoning"]);
+const isToolItem = (type) =>
+  typeof type === "string" && !NOT_TOOL_ITEMS.has(type);
+const snakeCase = (type) =>
+  type.replace(/[A-Z]/g, (c) => `_${c.toLowerCase()}`);
+
+function execTurnEvent(turn = {}) {
+  return turn.status === "completed"
+    ? { type: "turn.completed" }
+    : {
+        type: "turn.failed",
+        error: { message: turn.error?.message ?? `turn ${turn.status}` },
+      };
+}
+
+export function codexExecEvent(event) {
+  const { method, params } = event ?? {};
+  if (method === "turn/completed") return execTurnEvent(params?.turn);
+  if (method === "item/started" && isToolItem(params?.item?.type))
+    return {
+      type: "item.started",
+      item: { type: snakeCase(params.item.type) },
+    };
+  return event;
+}
+
 // Next local moment matching "[Mon DD[, YYYY]] H:MM AM|PM" after now; null if unparseable.
 export function parseRetryAt(text, now) {
   const m = RETRY_AT.exec(text || "");
@@ -144,7 +173,11 @@ export function classifyHoldableFailure(
   { provider, now = Date.now() } = {},
 ) {
   if (provider !== "claude" && provider !== "codex") return NOT_HOLDABLE;
-  let events = sinceRecovery(parseLines(lines), provider);
+  const parsed = parseLines(lines);
+  let events = sinceRecovery(
+    provider === "codex" ? parsed.map(codexExecEvent) : parsed,
+    provider,
+  );
   if (provider === "codex")
     events = events.filter((e) => isFailure(e, provider)).slice(-1);
   const found = events

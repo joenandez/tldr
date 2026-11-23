@@ -3,7 +3,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
+import { createHash, createHmac, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
 
 const SCRYPT_KEYLEN = 64;
 const SCRYPT_SALT_BYTES = 16;
@@ -42,6 +42,38 @@ export function verifySecret(secret, stored) {
   if (actual.length !== expected.length) return false;
   return timingSafeEqual(actual, expected);
 }
+
+/**
+ * Returns verifySecret with a per-process cache of checks that passed
+ * (ac-jfv.74.3): scrypt runs once per (stored hash, secret) pair, then a
+ * keyed HMAC compare. Keyed by the stored hash, so a rotated secret_hash
+ * misses; a failed check is never cached, and any miss falls through to
+ * scrypt, so the answer always equals uncached verifySecret. The HMAC key
+ * lives in memory only. Oldest entries go first past maxEntries.
+ */
+export function createSecretVerifier({ maxEntries = 256, verify = verifySecret } = {}) {
+  const key = randomBytes(32);
+  const passed = new Map(); // stored hash -> HMAC(key, secret)
+  const digest = (secret) => createHmac('sha256', key).update(secret).digest();
+
+  const check = (secret, stored) => {
+    if (typeof secret !== 'string' || typeof stored !== 'string') return false;
+    const known = passed.get(stored);
+    const presented = known ? digest(secret) : null;
+    const ok = Boolean(known && timingSafeEqual(known, presented)) || verify(secret, stored);
+    if (ok) {
+      passed.delete(stored);
+      passed.set(stored, presented ?? digest(secret));
+      if (passed.size > maxEntries) passed.delete(passed.keys().next().value);
+    }
+    return ok;
+  };
+  check.size = () => passed.size;
+  return check;
+}
+
+/** The daemon's handshake verifier: one cache per daemon run. */
+export const verifySecretCached = createSecretVerifier();
 
 /**
  * Generates a new one-time app secret, returned to the caller once

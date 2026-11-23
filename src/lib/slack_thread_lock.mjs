@@ -19,3 +19,11 @@ export async function withThreadLock({ home, channelId, threadTs }, fn) {
     if (tails.get(id) === tail) tails.delete(id);
   }
 }
+
+// A busy line stands alone (clears nothing, answers nothing), so it never waits behind a slow
+// post's turn: it must reach the user within 2:15 (ac-jfv.74.1). Every other post takes its turn.
+export function withThreadTurn(claim, key, fn) {
+  return claim.message?.metadata?.notice === "busy"
+    ? fn()
+    : withThreadLock(key, fn);
+}

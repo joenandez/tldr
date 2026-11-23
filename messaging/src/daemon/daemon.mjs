@@ -3,6 +3,7 @@
 // §2, §3; the state ownership contract "State root layout".
 
 import fs from 'node:fs';
+import { monitorEventLoopDelay } from 'node:perf_hooks';
 
 import { DAEMON_VERSION, PROTOCOL_VERSION } from '../protocol/envelope.mjs';
 import { resolveStateRoot, ensureStateRoot, acquireDaemonLock } from './state_root.mjs';
@@ -15,6 +16,7 @@ import { createEventBus } from './event_bus.mjs';
 import { startResumer, resolveResumerSettings } from './resumer.mjs';
 import { startListenerReconciler } from './listener_reconciler.mjs';
 import { resolveResumeStaleAfterMs } from './ops/message_shared.mjs';
+import { registerUserRouteSignal } from '../protocol/user_route_signal.mjs';
 
 const LOG_LEVELS = { error: 0, warn: 1, info: 2, debug: 3 };
 
@@ -37,6 +39,9 @@ export function createLogger({ level = 'info', stream } = {}) {
     error: (fields) => write('error', fields),
   };
 }
+
+const EVENT_LOOP_LAG_WINDOW_MS = 60_000;
+const EVENT_LOOP_LAG_WARN_MS = 1_000;
 
 /**
  * Starts the daemon against stateRoot: creates the root layout, acquires
@@ -67,6 +72,8 @@ export async function startDaemon({
   let handle;
   let resumer;
   let listenerReconciler;
+  let loopDelay;
+  let loopLagTimer;
   try {
     db = openDatabase(paths.db);
     const schemaVersion = openSchema(db);
@@ -105,6 +112,7 @@ export async function startDaemon({
       resumeStaleAfterMs: resolveResumeStaleAfterMs(process.env),
     };
 
+    registerUserRouteSignal(db, { stateRoot, logger });
     const opTable = buildOpTable();
     handle = createServer({ opTable, context, logger });
     await handle.listen(paths.socket);
@@ -117,6 +125,24 @@ export async function startDaemon({
     // bounds missed live handoffs before the daemon starts serving work.
     listenerReconciler = startListenerReconciler(context);
     resumer = withResumer ? startResumer(context, { env: process.env }) : { settings: resolveResumerSettings(process.env), stop() {} };
+
+    // 74.2: one blocked event loop starves every client, so report a stall
+    // once per window when the worst delay crosses the bound.
+    loopDelay = monitorEventLoopDelay({ resolution: 50 });
+    loopDelay.enable();
+    loopLagTimer = setInterval(() => {
+      const maxMs = Math.round(loopDelay.max / 1e6);
+      if (maxMs >= EVENT_LOOP_LAG_WARN_MS) {
+        logger.warn({
+          event: 'event_loop_lag',
+          params: { window_ms: EVENT_LOOP_LAG_WINDOW_MS },
+          result: { max_ms: maxMs, p99_ms: Math.round(loopDelay.percentile(99) / 1e6), mean_ms: Math.round(loopDelay.mean / 1e6) },
+          status: 'warn',
+        });
+      }
+      loopDelay.reset();
+    }, EVENT_LOOP_LAG_WINDOW_MS);
+    loopLagTimer.unref();
 
     logger.info({
       event: 'daemon_started',
@@ -135,6 +161,8 @@ export async function startDaemon({
       if (stopping) return stopping;
       stopping = (async () => {
         logger.info({ event: 'daemon_stopping' });
+        clearInterval(loopLagTimer);
+        loopDelay.disable();
         await listenerReconciler.stop();
         resumer.stop();
         await handle.close();
@@ -156,6 +184,8 @@ export async function startDaemon({
     // Startup failed after the lock was acquired: release everything we
     // opened so a retry (or the caller's own cleanup) is not blocked by a
     // lock this process no longer holds meaningfully.
+    clearInterval(loopLagTimer);
+    loopDelay?.disable();
     if (resumer) resumer.stop();
     if (listenerReconciler) await listenerReconciler.stop();
     if (handle) {

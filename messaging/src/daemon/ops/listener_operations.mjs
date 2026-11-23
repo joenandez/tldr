@@ -13,6 +13,7 @@ import { admitParkExpiryRetirement } from '../endpoint_retirement.mjs';
 import { openOldestUnreadAdmission } from './delivery_admission.mjs';
 import { refreshSessionWatermark } from './message_shared.mjs';
 import { notificationContext } from './notification_context.mjs';
+import { isEndpointOwnerGone, ownerGoneSql } from '../listener_owner_loss.mjs';
 // listener_operations <-> lifecycle_transition is a cycle: never read these imports at module load (TDZ).
 import { CANCEL_NOTICE_ROUTE_REASON, DELEGATION_NOTICE_ROUTE_REASON, oldestUnreadDeliveryForStop } from '../lifecycle_transition.mjs';
 
@@ -54,7 +55,8 @@ function exactListener(db, connection, request, { activeOnly = true } = {}) {
   const listener = db
     .prepare(
       `SELECT l.*, e.created_by_app_id, e.state AS endpoint_state, e.process_generation AS endpoint_process_generation,
-              e.provider_session_id AS endpoint_provider_session_id, e.owner_epoch, e.owner_launch_token
+              e.provider_session_id AS endpoint_provider_session_id, e.owner_epoch, e.owner_launch_token,
+              e.owner_process_exited_at, e.launch_mode AS endpoint_launch_mode
          FROM listeners l
          JOIN endpoints e ON e.id = l.endpoint_id
         WHERE l.id = ? AND l.endpoint_id = ? AND l.process_generation = ? AND l.listener_generation = ?
@@ -113,6 +115,7 @@ export function activeListenerForEndpoint(db, { endpointId, processGeneration, p
           AND l.provider_session_id IS ?
           AND e.process_generation = ? AND e.provider_session_id IS ?
           AND l.state IN ('parked', 'attached')
+          AND e.state <> 'closed' AND NOT ${ownerGoneSql('e')}
         ORDER BY l.listener_generation DESC
         LIMIT 1`,
     )
@@ -131,6 +134,7 @@ export function logListenerPresentationSkipped(logger, db, { endpointId, process
   if (!row) return null;
   const generationMatch = row.process_generation === processGeneration;
   const sessionMatch = row.provider_session_id === providerSessionId;
+  const endpoint = db.prepare('SELECT state, owner_process_exited_at FROM endpoints WHERE id = ?').get(endpointId);
   // A matching unexpired waking listener is already presenting: the normal case, not a miss.
   if (row.state === 'waking' && generationMatch && sessionMatch && isUnexpired(row, nowMs)) return null;
   logger?.info?.({
@@ -145,6 +149,8 @@ export function logListenerPresentationSkipped(logger, db, { endpointId, process
       now: new Date(nowMs).toISOString(),
       generation_match: generationMatch,
       session_match: sessionMatch,
+      endpoint_state: endpoint?.state ?? null,
+      owner_exited: Boolean(endpoint?.owner_process_exited_at),
     },
   });
   return null;
@@ -164,7 +170,8 @@ function backfillPresentation(context, listener, trigger) {
   const skippedRouteReasons = [DELEGATION_NOTICE_ROUTE_REASON, CANCEL_NOTICE_ROUTE_REASON, 'recovery.switch'];
   // Only an idle session needs waking; a busy one reads at its next tool boundary.
   const own = [listener.id, listener.listener_generation];
-  if (listener.endpoint_state !== 'idle' || db.prepare("SELECT 1 FROM listener_presentations WHERE listener_id = ? AND listener_generation = ? AND state = 'pending'").get(...own)) return null;
+  const gone = isEndpointOwnerGone({ state: listener.endpoint_state, owner_process_exited_at: listener.owner_process_exited_at, launch_mode: listener.endpoint_launch_mode });
+  if (listener.endpoint_state !== 'idle' || gone || db.prepare("SELECT 1 FROM listener_presentations WHERE listener_id = ? AND listener_generation = ? AND state = 'pending'").get(...own)) return null;
   const delivery = oldestUnreadDeliveryForStop(db, { endpointId: listener.endpoint_id, processGeneration: listener.process_generation, excludeRouteReasons: skippedRouteReasons });
   if (!delivery || db.prepare('SELECT 1 FROM listener_presentations WHERE listener_id = ? AND listener_generation = ? AND target_delivery_id = ?').get(...own, delivery.delivery_id)) return null;
   const now = new Date().toISOString();
@@ -340,7 +347,7 @@ export const listenerAcknowledgeOp = operation(LISTENER_ACK_OPERATION, (context,
     const updated = context.db.prepare("UPDATE listener_presentations SET state = 'acked', acked_at = ?, ack_deadline_at = ?, updated_at = ? WHERE id = ? AND state = 'pending'").run(now, admissionDeadline, now, presentation.id);
     if (updated.changes !== 1) conflict('presentation was claimed by another terminal transition');
     context.db.prepare("UPDATE listeners SET state = 'ended', terminal_reason = 'acknowledged', updated_at = ?, ended_at = ? WHERE id = ? AND state IN ('attached', 'waking')").run(now, now, listener.id);
-    context.db.prepare("UPDATE endpoints SET state = 'busy', updated_at = ? WHERE id = ? AND process_generation = ? AND state NOT IN ('retiring', 'closed', 'dead', 'takeover_pending')").run(now, listener.endpoint_id, listener.process_generation);
+    context.db.prepare(`UPDATE endpoints SET state = 'busy', updated_at = ? WHERE id = ? AND process_generation = ? AND state NOT IN ('retiring', 'closed', 'dead', 'takeover_pending') AND NOT ${ownerGoneSql('endpoints')}`).run(now, listener.endpoint_id, listener.process_generation);
     openOldestUnreadAdmission(context.db, {
       endpoint: {
         id: listener.endpoint_id,

@@ -64,10 +64,11 @@ import {
   stampOwnerIfUnset,
   validateBody,
   validateIdempotencyKey,
-  validateMetadata,
   withIdempotency,
 } from './ops/message_shared.mjs';
 import { validateConversationMetadata } from './ops/conversation_create.mjs';
+import { validateCommitMetadata } from './ops/reserved_notice.mjs';
+import { identityMetadata, replayHashes } from './ops/replay_identity.mjs';
 import { createChannelDeliveries, requireOriginRoute } from './ops/origin_route.mjs';
 import { tightbeamCommandName } from '../cli/package_context.mjs';
 import { resolveOriginRouteId } from './origin_route_resolution.mjs';
@@ -352,8 +353,9 @@ function authorizeCancel(db, { node, senderEndpointId, logger }) {
  * makes an identical-key replay able to return the originally created
  * root/attempt/delegation/watch IDs.
  */
-export function insertEffectRow(db, { messageId, effect, obligationId, obligationGeneration, created, route = null, now }) {
-  const payload = { declaration: effect, created: created ?? null, ...(route ? { route } : {}) };
+export function insertEffectRow(db, { messageId, effect, obligationId, obligationGeneration, created, route = null, notice = null, now }) {
+  // `notice` marks a daemon-written notice; a client declaration can never set it.
+  const payload = { declaration: effect, created: created ?? null, ...(route ? { route } : {}), ...(notice ? { notice } : {}) };
   db.prepare(
     `INSERT INTO message_effects (id, message_id, effect, effect_payload, obligation_id, obligation_generation, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -1228,10 +1230,10 @@ const APPLY_BY_TYPE = {
 // ---------------------------------------------------------------------
 // Idempotent replay.
 
-function findIdempotentReplay(db, { appId, idempotencyKey, hash }) {
+function findIdempotentReplay(db, { appId, idempotencyKey, hashes }) {
   const existing = db.prepare('SELECT id, conversation_id, payload_hash FROM messages WHERE app_id = ? AND idempotency_key = ?').get(appId, idempotencyKey);
   if (!existing) return null;
-  if (existing.payload_hash !== hash) {
+  if (!hashes.includes(existing.payload_hash)) {
     throw new TightbeamError('idempotency_collision', `idempotency_key "${idempotencyKey}" was already used with a different payload`, { field: 'idempotency_key' });
   }
   return existing;
@@ -1446,45 +1448,57 @@ const RESUME_FAILURE_NOTICE = 'Tightbeam received your message but could not res
  */
 export function stageTerminalResumeFailureNotice(db, { requestId }) {
   const request = db.prepare(
-    `SELECT r.id, r.endpoint_id, r.conversation_id, r.message_id, m.app_id, m.sender_principal_id, m.origin_channel_route_id
-       FROM resume_requests r JOIN messages m ON m.id = r.message_id
+    `SELECT r.id, r.endpoint_id, r.conversation_id, r.message_id
+       FROM resume_requests r
       WHERE r.id = ? AND r.state IN ('failed', 'claimed', 'pending')`,
   ).get(requestId);
-  if (!request?.origin_channel_route_id) return null;
+  if (!request) return null;
   const root = db.prepare(
     `SELECT id FROM obligations WHERE conversation_id = ? AND role = 'root' AND status = 'open' LIMIT 1`,
   ).get(request.conversation_id);
   if (!root) return null;
-  const routes = resolveChannelRoutes(db, {
-    selectors: ['origin'], conversationId: request.conversation_id, inReplyToMessageId: request.message_id,
+  return stageOriginNotice(db, {
+    messageId: request.message_id, endpointId: request.endpoint_id,
+    key: `resume-failure:${request.id}`, body: RESUME_FAILURE_NOTICE, notice: 'resume_failed',
   });
-  const key = `resume-failure:${request.id}`;
-  const hash = payloadHash({ body: RESUME_FAILURE_NOTICE, in_reply_to_message_id: request.message_id, channel_selectors: ['origin'] });
-  return withIdempotency(db, { appId: request.app_id, idempotencyKey: key, hash }, () => {
-    const messageId = insertMessage(db, {
-      conversationId: request.conversation_id,
-      appId: request.app_id,
-      senderPrincipalId: request.sender_principal_id,
+}
+
+// Stages one agent-origin notice replying to an inbound message on its origin route,
+// once per `key`; needs no open root. A non-null `notice` tags metadata.notice.
+export function stageOriginNotice(db, { messageId, endpointId, key, body, notice, logger, logExtra }) {
+  const origin = db.prepare(
+    `SELECT conversation_id, app_id, sender_principal_id, origin_channel_route_id FROM messages WHERE id = ?`,
+  ).get(messageId);
+  if (!origin?.origin_channel_route_id) return null;
+  const routes = resolveChannelRoutes(db, {
+    selectors: ['origin'], conversationId: origin.conversation_id, inReplyToMessageId: messageId,
+  });
+  const hash = payloadHash({ body, in_reply_to_message_id: messageId, channel_selectors: ['origin'] });
+  const staged = withIdempotency(db, { appId: origin.app_id, idempotencyKey: key, hash }, () => {
+    const noticeMessageId = insertMessage(db, {
+      conversationId: origin.conversation_id,
+      appId: origin.app_id,
+      senderPrincipalId: origin.sender_principal_id,
       kind: 'commit',
-      body: RESUME_FAILURE_NOTICE,
-      metadata: {},
+      body,
+      metadata: notice ? { notice } : {}, // resume_failed is tier 0 at claim; busy_line.mjs still counts it as an answer
       idempotencyKey: key,
       hash,
       origin: 'agent',
-      inReplyToMessageId: request.message_id,
+      inReplyToMessageId: messageId,
     });
-    // The notice is delivered like any agent reply, so a reply-capable
-    // route also binds the user's answer to the agent whose resume failed:
-    // answering the notice is the retry the notice offers.
+    // A reply to the notice binds to the agent endpoint, so answering it retries.
     const { liveDeliveries } = createDeliveriesForChannelRoutes(db, {
-      conversationId: request.conversation_id,
-      messageId,
+      conversationId: origin.conversation_id,
+      messageId: noticeMessageId,
       routes,
-      replyTargetEndpointId: request.endpoint_id,
+      replyTargetEndpointId: endpointId,
       replyTargetMustBeSender: false,
     });
-    return { message_id: messageId, conversation_id: request.conversation_id, delivery_count: liveDeliveries.length, liveDeliveries };
+    return { message_id: noticeMessageId, conversation_id: origin.conversation_id, delivery_count: liveDeliveries.length, liveDeliveries };
   });
+  if (!staged.idempotent_replay) logger?.info?.({ event: 'notice.staged', params: { kind: notice ?? 'resume_failure', message_id: messageId }, result: { notice_message_id: staged.message_id, ...logExtra } });
+  return staged;
 }
 
 function validateInboundOrigin(db, { appId, senderPrincipalId, originChannelRouteId }) {
@@ -1655,7 +1669,7 @@ function rejectUnreadForActingEndpoint(db, { appId, senderPrincipalId, conversat
  * inbound (channel) message has none. The endpoint must still belong to the
  * message's sender principal, so a hand-edited audit cannot redirect a wake.
  */
-function senderEndpointOfMessage(db, messageId, effectFilter = null) {
+export function senderEndpointOfMessage(db, messageId, effectFilter = null) {
   const row = db
     .prepare(
       `SELECT m.sender_principal_id AS principal_id, m.created_at AS created_at, me.effect_payload AS payload
@@ -1746,7 +1760,7 @@ export function commitMessageWithEffect(context, connection, request) {
   }
   validateBody(request.body);
   validateIdempotencyKey(request.idempotency_key);
-  validateMetadata(request.metadata);
+  validateCommitMetadata(request.metadata);
   const effect = validateEffect(request.obligation_effect);
 
   const hasConversationId = typeof request.conversation_id === 'string' && request.conversation_id.length > 0;
@@ -1790,13 +1804,13 @@ export function commitMessageWithEffect(context, connection, request) {
   }
   checkRecipientEndpointRequest({ logger: context.logger, recipientEndpointId: requestedRecipientEndpointId, effect, sendBranch });
 
-  const hash = payloadHash({
+  const accepted = replayHashes((metadata) => payloadHash({
     conversation_id: request.conversation_id ?? null,
     destination_principal_id: request.destination_principal_id ?? null,
     sender_principal_id: senderPrincipalId,
     in_reply_to_message_id: inReplyToMessageId ?? null,
     body: request.body,
-    metadata: request.metadata ?? null,
+    metadata,
     conversation_metadata: request.conversation_metadata ?? null,
     obligation_effect: effect,
     channel_selectors: channelSelectors,
@@ -1806,15 +1820,15 @@ export function commitMessageWithEffect(context, connection, request) {
     // Added only when present: a request without the field keeps the hash it
     // had before this field existed, so in-flight retries still replay.
     ...(requestedRecipientEndpointId === undefined || requestedRecipientEndpointId === null ? {} : { recipient_endpoint_id: requestedRecipientEndpointId }),
-  });
+  }), { current: identityMetadata(request.metadata), raw: request.metadata ?? null });
 
-  const preChecked = findIdempotentReplay(context.db, { appId: connection.appId, idempotencyKey: request.idempotency_key, hash });
+  const preChecked = findIdempotentReplay(context.db, { appId: connection.appId, idempotencyKey: request.idempotency_key, hashes: accepted });
   if (preChecked) {
     return { result: reconstructResult(context.db, { messageId: preChecked.id, conversationId: preChecked.conversation_id, idempotentReplay: true }) };
   }
 
   const startedAt = Date.now();
-  const outcome = withIdempotency(context.db, { appId: connection.appId, idempotencyKey: request.idempotency_key, hash }, () =>
+  const outcome = withIdempotency(context.db, { appId: connection.appId, idempotencyKey: request.idempotency_key, hash: accepted[0], accepted }, () =>
     withTransaction(context.db, () => {
       let conversationId;
       if (hasConversationId) {
@@ -1896,7 +1910,7 @@ export function commitMessageWithEffect(context, connection, request) {
         body: request.body,
         metadata: request.metadata,
         idempotencyKey: request.idempotency_key,
-        hash,
+        hash: accepted[0],
         origin: sendBranch,
         originChannelRouteId,
         inReplyToMessageId,

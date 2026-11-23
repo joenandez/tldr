@@ -30,13 +30,13 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 import { pipeline } from 'node:stream/promises';
 import { DatabaseSync } from 'node:sqlite';
 
 import { TIGHTBEAM_MARKER, recordSettingsPath } from './hooks_install.mjs';
 import { HOOK_CREDENTIALS_FILENAME } from './hook_credentials.mjs';
 import { tightbeamCommandName } from './package_context.mjs';
+import { codexPluginTrustPresent } from './codex_plugin_trust.mjs';
 import { createRuntimeRegistry } from '../runtimes/registry.mjs';
 import { pendingStateRootMigration, STATE_ROOT_MIGRATION_PENDING } from '../protocol/state_root_location.mjs';
 
@@ -177,176 +177,6 @@ function findPluginHookFiles(cacheRoot, wrapperDir) {
   };
   visit(cacheRoot, 0);
   return found;
-}
-
-const CODEX_HOOK_EVENT_KEYS = Object.freeze({
-  PreToolUse: 'pre_tool_use',
-  PermissionRequest: 'permission_request',
-  PostToolUse: 'post_tool_use',
-  PreCompact: 'pre_compact',
-  PostCompact: 'post_compact',
-  SessionStart: 'session_start',
-  SessionEnd: 'session_end',
-  UserPromptSubmit: 'user_prompt_submit',
-  SubagentStart: 'subagent_start',
-  SubagentStop: 'subagent_stop',
-  Stop: 'stop',
-  Interrupt: 'interrupt',
-});
-
-const CODEX_MATCHER_EVENTS = new Set([
-  'pre_tool_use',
-  'permission_request',
-  'post_tool_use',
-  'pre_compact',
-  'post_compact',
-  'session_start',
-  'session_end',
-  'subagent_start',
-  'subagent_stop',
-]);
-
-const CODEX_ADDITIONAL_CONTEXT_EVENTS = new Set([
-  'pre_tool_use',
-  'post_tool_use',
-  'session_start',
-  'user_prompt_submit',
-  'subagent_start',
-]);
-
-function canonicalJson(value) {
-  if (Array.isArray(value)) return value.map(canonicalJson);
-  if (!value || typeof value !== 'object') return value;
-  return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalJson(value[key])]));
-}
-
-function normalizedCodexCommandHandler(eventKey, handler) {
-  if (!handler || handler.type !== 'command') return null;
-  const platformCommand = process.platform === 'win32'
-    ? (handler.commandWindows ?? handler.command_windows ?? handler.command)
-    : handler.command;
-  if (typeof platformCommand !== 'string' || platformCommand.trim().length === 0) return null;
-  const requestedTimeout = handler.timeout;
-  if (requestedTimeout !== undefined && (!Number.isSafeInteger(requestedTimeout) || requestedTimeout < 0)) return null;
-  const timeout = eventKey === 'session_end' || eventKey === 'interrupt'
-    ? Math.min(3, Math.max(1, requestedTimeout ?? 1))
-    : Math.max(1, requestedTimeout ?? 600);
-  const normalized = {
-    type: 'command',
-    command: platformCommand,
-    timeout,
-    async: handler.async === true,
-  };
-  if (typeof handler.statusMessage === 'string') normalized.statusMessage = handler.statusMessage;
-  if (
-    CODEX_ADDITIONAL_CONTEXT_EVENTS.has(eventKey)
-    && Number.isSafeInteger(handler.additionalContextLimit)
-    && handler.additionalContextLimit >= 0
-    && handler.additionalContextLimit !== 2500
-  ) {
-    normalized.additionalContextLimit = handler.additionalContextLimit;
-  }
-  return normalized;
-}
-
-function codexHookHash(eventKey, group, handler) {
-  const normalizedHandler = normalizedCodexCommandHandler(eventKey, handler);
-  if (!normalizedHandler) return null;
-  const identity = { event_name: eventKey };
-  if (CODEX_MATCHER_EVENTS.has(eventKey) && typeof group.matcher === 'string') identity.matcher = group.matcher;
-  identity.hooks = [normalizedHandler];
-  const serialized = JSON.stringify(canonicalJson(identity));
-  return `sha256:${createHash('sha256').update(serialized).digest('hex')}`;
-}
-
-function codexPluginIdentity(codexHome, hookFile) {
-  const cacheRoot = path.join(codexHome, 'plugins', 'cache');
-  const relative = path.relative(cacheRoot, hookFile);
-  const parts = relative.split(path.sep);
-  if (relative.startsWith('..') || path.isAbsolute(relative) || parts.length < 5) return null;
-  const [marketplace, plugin, , ...sourceParts] = parts;
-  if (!marketplace || !plugin || sourceParts.length === 0) return null;
-  return {
-    pluginId: `${plugin}@${marketplace}`,
-    sourceRelativePath: sourceParts.join('/'),
-  };
-}
-
-function codexHookStates(config) {
-  const states = new Map();
-  let current = null;
-  for (const line of config.split(/\r?\n/)) {
-    const header = line.match(/^\s*\[hooks\.state\."((?:\\.|[^"\\])*)"\]\s*(?:#.*)?$/);
-    if (header) {
-      try {
-        current = JSON.parse(`"${header[1]}"`);
-      } catch {
-        current = null;
-      }
-      if (current !== null && !states.has(current)) states.set(current, {});
-      continue;
-    }
-    if (/^\s*\[/.test(line)) {
-      current = null;
-      continue;
-    }
-    if (current === null) continue;
-    const trustedHash = line.match(/^\s*trusted_hash\s*=\s*"([^"]+)"\s*(?:#.*)?$/);
-    if (trustedHash) {
-      states.get(current).trustedHash = trustedHash[1];
-      continue;
-    }
-    const enabled = line.match(/^\s*enabled\s*=\s*(true|false)\s*(?:#.*)?$/);
-    if (enabled) states.get(current).enabled = enabled[1] === 'true';
-  }
-  return states;
-}
-
-function expectedCodexPluginTrust(codexHome, hookFile) {
-  const identity = codexPluginIdentity(codexHome, hookFile);
-  if (!identity) return null;
-  let hooks;
-  try {
-    hooks = JSON.parse(fs.readFileSync(hookFile, 'utf8')).hooks;
-  } catch {
-    return null;
-  }
-  if (!hooks || typeof hooks !== 'object' || Array.isArray(hooks)) return null;
-  const expected = [];
-  for (const [eventName, groups] of Object.entries(hooks)) {
-    const eventKey = CODEX_HOOK_EVENT_KEYS[eventName];
-    if (!eventKey || !Array.isArray(groups)) continue;
-    for (const [groupIndex, group] of groups.entries()) {
-      if (!group || !Array.isArray(group.hooks)) continue;
-      for (const [handlerIndex, handler] of group.hooks.entries()) {
-        if (handler?._tightbeam !== TIGHTBEAM_MARKER) continue;
-        const trustedHash = codexHookHash(eventKey, group, handler);
-        if (!trustedHash) return null;
-        expected.push({
-          key: `${identity.pluginId}:${identity.sourceRelativePath}:${eventKey}:${groupIndex}:${handlerIndex}`,
-          trustedHash,
-        });
-      }
-    }
-  }
-  return expected.length > 0 ? expected : null;
-}
-
-function codexPluginTrustPresent(codexHome, hookFile) {
-  let config;
-  try {
-    config = fs.readFileSync(path.join(codexHome, 'config.toml'), 'utf8');
-  } catch {
-    return false;
-  }
-  if (/^\s*bypass_hook_trust\s*=\s*true\s*$/m.test(config)) return true;
-  const expected = expectedCodexPluginTrust(codexHome, hookFile);
-  if (!expected) return false;
-  const states = codexHookStates(config);
-  return expected.every(({ key, trustedHash }) => {
-    const state = states.get(key);
-    return state?.enabled !== false && state?.trustedHash === trustedHash;
-  });
 }
 
 function pluginWiring(record, home) {
@@ -522,8 +352,8 @@ export async function runDoctorChecks({
             fail(
               'hook-marker',
               'HOOK_PLUGIN_TRUST_MISSING',
-              `${record.id} plugin wiring is installed at ${plugin.file}, but Codex hook trust is not approved`,
-              `approve the Tightbeam plugin hooks in Codex, then rerun ${tightbeamCommandName()} doctor`,
+              `${record.id} plugin wiring is installed at ${plugin.file}, but Codex hook trust is not approved (or was approved for a different build, so Codex refuses the hooks)`,
+              `run codex, open /hooks, approve the Tightbeam plugin hooks, then rerun ${tightbeamCommandName()} doctor`,
             ),
           );
         } else {
@@ -552,8 +382,8 @@ export async function runDoctorChecks({
           fail(
             'hook-marker',
             'HOOK_PLUGIN_TRUST_MISSING',
-            `${record.id} plugin wiring is installed at ${plugin.file}, but Codex hook trust is not approved`,
-            `approve the Tightbeam plugin hooks in Codex, then rerun ${tightbeamCommandName()} doctor`,
+            `${record.id} plugin wiring is installed at ${plugin.file}, but Codex hook trust is not approved (or was approved for a different build, so Codex refuses the hooks)`,
+            `run codex, open /hooks, approve the Tightbeam plugin hooks, then rerun ${tightbeamCommandName()} doctor`,
           ),
         );
       } else {

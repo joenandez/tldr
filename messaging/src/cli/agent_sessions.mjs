@@ -31,6 +31,27 @@ export function deriveSessionState(endpoint) {
   return { state: 'unknown', resumable: false };
 }
 
+const BUSY_ACTIVITIES = new Set(['working', 'waiting_on_message']);
+
+/**
+ * Is the recorded owner process still running? false: its exit is recorded;
+ * true: the daemon's last reconciler pass saw this exact owner alive
+ * (`owner_observed_alive`); null: no owner pid recorded, or not observed (just
+ * registered, daemon just restarted, an unwatched state). An endpoint being
+ * `dead` says nothing about its owner. `activity` is non-null only for an
+ * observed live owner: working or waiting_on_message while busy,
+ * waiting_on_background while a Stop is held (idle); `waiting_since` only with
+ * a waiting activity. An older daemon omits the `owner_*` activity and
+ * observation fields: exited reads false, everything else null.
+ */
+function ownerFacts(endpoint, state) {
+  if ((endpoint.owner_process_pid ?? null) === null) return { owner_alive: null, activity: null, waiting_since: null };
+  const ownerAlive = endpoint.owner_process_exited_at ? false : endpoint.owner_observed_alive === true ? true : null;
+  const reported = endpoint.owner_activity ?? null;
+  const activity = ownerAlive && ((state === 'busy' && BUSY_ACTIVITIES.has(reported)) || (state === 'idle' && reported === 'waiting_on_background')) ? reported : null;
+  return { owner_alive: ownerAlive, activity, waiting_since: activity !== null && activity !== 'working' ? endpoint.owner_waiting_since ?? null : null };
+}
+
 /**
  * One session row as agents see it, from an endpoint.list row.
  * `topic` is always null: nothing derives it in this scope. `you` mirrors
@@ -54,6 +75,7 @@ export function sessionRow(endpoint, { callerEndpointId = null, callerCwd = null
     last_active_at: endpoint.updated_at,
     created_at: endpoint.created_at,
     tachyon_armed: endpoint.tachyon_armed === true,
+    ...ownerFacts(endpoint, state),
     is_self: isSelf,
     you: isSelf,
     group: callerCwd !== null && cwd === callerCwd ? 'this_folder' : 'elsewhere',
@@ -103,13 +125,25 @@ async function branchesByCwd(cwds, readBranch) {
   return branches;
 }
 
+// The caller's facts for the listing; empty when the caller is not an agent session.
+function callerView(session) {
+  if (!session) return { endpointId: null, cwd: null, ids: [], you: null };
+  const cwd = session.authority_reference ?? null;
+  return {
+    endpointId: session.endpoint_id,
+    cwd,
+    ids: [session.session_id ?? ''],
+    you: { session_id: session.session_id ?? null, endpoint_id: session.endpoint_id, runtime: session.runtime ?? null, cwd },
+  };
+}
+
 /**
  * Lists the caller's sessions that are live or were active in the last 24
  * hours; with `all`, the 200 most recently active, ended ones included.
  * @param {{request: Function}} client
- * @param {object} session the loaded agent session (endpoint_id, authority_reference, runtime, session_id)
+ * @param {object|null} session the loaded agent session (endpoint_id, authority_reference, runtime, session_id); null when the caller is not an agent session (no you, no this-folder group)
  * @param {{here?: boolean, cwd?: string|null, runtime?: string|null, state?: string|null, all?: boolean}} filters
- * @returns {Promise<{outcome: 'committed', complete: boolean, truncated: boolean, count: number, you: object, here_cwd: string|null, sessions: object[], rendered: string}>}
+ * @returns {Promise<{outcome: 'committed', complete: boolean, truncated: boolean, count: number, you: object|null, here_cwd: string|null, sessions: object[], rendered: string}>}
  */
 export async function listAgentSessions(client, session, filters = {}, { readBranch = readGitBranch, now = Date.now(), log = debugLog } = {}) {
   const started = Date.now();
@@ -121,7 +155,8 @@ export async function listAgentSessions(client, session, filters = {}, { readBra
   const listed = await client.request('endpoint.list', payload);
   const truncated = listed.truncated === true;
 
-  const callerCwd = session.authority_reference ?? null;
+  const caller = callerView(session);
+  const callerCwd = caller.cwd;
   const wantedCwd = filters.cwd ?? null;
   const candidates = (listed.endpoints ?? [])
     .filter((endpoint) => typeof endpoint.provider_session_id === 'string' && endpoint.provider_session_id.length > 0)
@@ -133,10 +168,10 @@ export async function listAgentSessions(client, session, filters = {}, { readBra
 
   const branches = await branchesByCwd(new Set(candidates.map(({ endpoint }) => endpoint.authority_reference).filter(Boolean)), readBranch);
   const rows = candidates
-    .map(({ endpoint }) => sessionRow(endpoint, { callerEndpointId: session.endpoint_id, callerCwd, branch: branches.get(endpoint.authority_reference) ?? null }))
+    .map(({ endpoint }) => sessionRow(endpoint, { callerEndpointId: caller.endpointId, callerCwd, branch: branches.get(endpoint.authority_reference) ?? null }))
     .sort((a, b) => (a.group === b.group ? byNewestActivity(a, b) : a.group === 'this_folder' ? -1 : 1));
   // The header names the caller beside the rows, so its id is in the set too.
-  const handles = uniqueShortIds([...rows.map((row) => row.session_id), session.session_id ?? '']);
+  const handles = uniqueShortIds([...rows.map((row) => row.session_id), ...caller.ids]);
   const sessions = rows.map((row, index) => ({ ...row, short_id: handles[index] }));
 
   const result = {
@@ -144,15 +179,15 @@ export async function listAgentSessions(client, session, filters = {}, { readBra
     complete: !truncated,
     truncated,
     count: sessions.length,
-    you: { session_id: session.session_id ?? null, endpoint_id: session.endpoint_id, runtime: session.runtime ?? null, cwd: callerCwd },
+    you: caller.you,
     here_cwd: callerCwd,
     ...(showEnded ? { includes_ended: true } : {}),
     sessions,
   };
-  log({ event: 'agent_sessions', params: { ...payload, state: filters.state ?? null, here: filters.here === true }, result: { count: sessions.length, truncated }, status: 'ok', latency_ms: Date.now() - started });
+  log({ event: 'agent_sessions', params: { ...payload, state: filters.state ?? null, here: filters.here === true, caller: caller.you !== null }, result: { count: sessions.length, truncated }, status: 'ok', latency_ms: Date.now() - started });
   // A narrowed list (--all, --cwd, --here, --state) shows every session; the default view collapses stopped ones by folder.
   const collapse = !filters.all && !filters.cwd && !filters.here && !filters.state;
-  return { ...result, rendered: renderSessions(result, { now, youShortId: handles.at(-1), collapse }) };
+  return { ...result, rendered: renderSessions(result, { now, youShortId: caller.ids.length > 0 ? handles.at(-1) : null, collapse, hasCaller: caller.you !== null }) };
 }
 
 const shortId = (id) => String(id ?? '').slice(0, 8);
@@ -270,17 +305,18 @@ function collapsedLines(rows, now, folderLimit) {
  * UX §9 S1 text: header, This folder, Elsewhere, footer; empty state when nobody else is around.
  * With `collapse`, sessions not proven running show one line per folder and Elsewhere shows the newest STOPPED_FOLDER_LIMIT folders.
  */
-export function renderSessions(result, { now = Date.now(), youShortId = null, collapse = false } = {}) {
+export function renderSessions(result, { now = Date.now(), youShortId = null, collapse = false, hasCaller = true } = {}) {
   const sessions = result.sessions ?? [];
   const more = result.truncated ? ['More sessions exist than shown; narrow with --runtime.'] : [];
-  if (!sessions.some((row) => !row.you)) return ['No other agent sessions. Start one with --to new:<runtime>:<cwd> or --to academy:<name>.', ...more].join('\n');
-  const you = result.you ?? {};
+  // No caller (a plain process, not an agent session): no "you", one ungrouped list.
+  if (!sessions.some((row) => !row.you)) return [`No ${hasCaller ? 'other ' : ''}agent sessions. Start one with --to new:<runtime>:<cwd> or --to academy:<name>.`, ...more].join('\n');
   const label = result.includes_ended ? 'live, resumable, or ended' : 'live or resumable';
-  const lines = [`Sessions · ${sessions.length} ${label} · you are ${you.runtime ?? 'agent'} ${youShortId ?? shortId(you.session_id)}`.trimEnd()];
-  const groups = [[`This folder (${result.here_cwd ?? 'unknown'})`, 'this_folder'], ['Elsewhere', 'elsewhere']];
+  const you = result.you ?? {};
+  const lines = [hasCaller ? `Sessions · ${sessions.length} ${label} · you are ${you.runtime ?? 'agent'} ${youShortId ?? shortId(you.session_id)}`.trimEnd() : `Sessions · ${sessions.length} ${label}`];
+  const groups = hasCaller ? [[`This folder (${result.here_cwd ?? 'unknown'})`, 'this_folder'], ['Elsewhere', 'elsewhere']] : [[null, 'elsewhere']];
   let collapsed = false;
   for (const [heading, group] of groups) {
-    lines.push(heading);
+    if (heading) lines.push(heading);
     const rows = sessions.filter((row) => row.group === group);
     if (rows.length === 0) lines.push('  (none)');
     else if (!collapse) lines.push(...rows.map((row) => rowLine(row, now)));

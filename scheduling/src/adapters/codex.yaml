@@ -1,8 +1,23 @@
 name: codex
 version: 1
 
+# never-wait 5.2: the run host drives `codex app-server` and owns its stdin, so
+# the prompt goes there. `--approval-policy never` is plain `codex exec`'s own
+# policy; the sandbox stays the configured one (Helm never bypasses by default).
 command:
-  argv: [codex, exec, --json, "{{prompt}}"]
+  argv:
+    [
+      "{{node}}",
+      "{{run_host}}",
+      --runtime,
+      codex,
+      --approval-policy,
+      never,
+      --,
+      codex,
+      app-server,
+    ]
+  stdin: "{{prompt}}"
   env: {}
 
 session_id:

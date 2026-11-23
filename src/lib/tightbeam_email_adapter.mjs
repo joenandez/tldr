@@ -57,12 +57,13 @@ export function createTightbeamEmailAdapter({ channel, send } = {}) {
   }
 
   async function deliverOnce({
+    tier,
     sendContext = {},
     afterProviderAccepted,
     afterReplyBindingRecorded,
     afterProviderRecorded,
   } = {}) {
-    const claimed = await channel.claimEmailDelivery();
+    const claimed = await channel.claimEmailDelivery({ tier });
     if (claimed?.ok !== true) return claimed;
     const claim = claimed.claim;
     if (!validClaim(claim)) {

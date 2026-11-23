@@ -1,5 +1,7 @@
 import { performance } from "node:perf_hooks";
 
+import { appendActivityEvent } from "./tldr_agent_diagnostics.mjs";
+
 const POLL_INTERVAL_MS = 15_000;
 
 // This is the retained daemon-local scheduler extracted from daemon.mjs so the
@@ -86,4 +88,23 @@ export function createInboxPollScheduler({
       return state;
     },
   };
+}
+
+export function emitInboxPollSchedulerSkip({
+  daemonInstanceId,
+  targetScope,
+  inboxId,
+  decision,
+}) {
+  appendActivityEvent({
+    event_type: "daemon_inbox_poll_scheduler",
+    daemon_instance_id: daemonInstanceId,
+    scope_id: targetScope?.scope_id || null,
+    cwd: targetScope?.cwd || null,
+    metadata: {
+      skipped: true,
+      reason: decision?.reason || "poll_skipped",
+      inbox_id: inboxId,
+    },
+  });
 }

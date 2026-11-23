@@ -1,3 +1,5 @@
+import { receivedAtMetadata } from "./provider_received_at.mjs";
+
 const RAW_REPLY_AUTHORITY_FIELDS = Object.freeze([
   "conversation_id",
   "route_id",
@@ -19,6 +21,7 @@ export function createTightbeamInboundPublisher({
     binding,
     provider_message_id: providerMessageId,
     provider_thread_id: providerThreadId,
+    provider_received_at: providerReceivedAt,
     body,
   }) {
     const hasReplyBinding =
@@ -49,7 +52,10 @@ export function createTightbeamInboundPublisher({
           "--external-event-id",
           providerMessageId,
           "--provider-metadata-json",
-          JSON.stringify({ channel: "email" }),
+          JSON.stringify({
+            channel: "email",
+            ...receivedAtMetadata(providerReceivedAt),
+          }),
         ],
       });
       if (

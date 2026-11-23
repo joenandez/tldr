@@ -19,7 +19,7 @@ import { createRuntimeSnapshot, loadPersistedRuntimeEntries } from '../src/daemo
 // anything in schema.mjs that opens or migrates.
 import { SCHEMA_VERSION } from '../src/daemon/schema.mjs';
 import { runDoctorChecks } from '../src/cli/doctor_checks.mjs';
-import { refreshRuntime } from '../src/cli/agent_sessions.mjs';
+import { listAgentSessions, refreshRuntime } from '../src/cli/agent_sessions.mjs';
 import { AgentCommandError, loadAgentSession, parseAgentCommand, resolveAgentSessionIdentity, runAgentCommand } from '../src/cli/agent_commands.mjs';
 import { agentWaitHandshakeError, cacheAgentWaitStartup, prepareAgentWaitStartup } from '../src/cli/agent_wait_startup.mjs';
 // Recipe text uses the supported `tldr-agents messaging` front door.
@@ -61,6 +61,13 @@ function extractFlag(args, name, { boolean: isBoolean = false } = {}) {
   if (value === undefined) throw new UsageError(`--${name} requires a value`);
   args.splice(idx, 2);
   return value;
+}
+
+// Agent commands always carry details and next_action; a daemon error carries its details when it
+// has any (a claim_held echoes its tier there).
+function jsonErrorExtras(err) {
+  if (err instanceof AgentCommandError) return { details: err.details ?? null, next_action: err.next_action ?? null };
+  return err.details === undefined ? {} : { details: err.details };
 }
 
 function requirePositional(args, name) {
@@ -336,6 +343,40 @@ function agentSessionPolicy({ registry, identity, refreshSession, log }) {
 // `args` is whatever remains after positionals are shifted off.
 // ---------------------------------------------------------------------
 
+// A missing session registration is repaired once through the policy; `wait` never registers.
+async function loadOrRecoverSession(stateRoot, { identity, command, policy }) {
+  try {
+    return loadAgentSession(stateRoot, { identity });
+  } catch (error) {
+    if (!(error instanceof AgentCommandError) || error.code !== 'session_unavailable' || command.command === 'wait') throw error;
+    return policy.recover();
+  }
+}
+
+// `agent sessions` is a read: a caller outside any agent session (no session
+// id and no runtime pin, e.g. an app's sidecar) lists without one and never
+// registers one (ac-jfv.133). A pinned runtime with no session id is a
+// misbound agent and keeps its refusal (Copilot's names the binding). Every
+// other verb still needs a session.
+function callerless(command, identity) {
+  return command.command === 'sessions' && !identity.sessionId && identity.source !== 'pin';
+}
+
+async function listSessionsWithoutCaller(command, globalFlags, log) {
+  log({ event: 'agent_sessions_no_caller', params: { here: command.here, admin: globalFlags.admin === true }, result: command.here ? 'refuse_here' : 'list_without_caller' });
+  if (command.here) {
+    throw new AgentCommandError('session_unavailable', '--here needs a current agent session; none was found for this process', {
+      next_action: `Run it from inside an agent session, or name the folder: ${tightbeamCommandName()} agent sessions --cwd <folder>`,
+    });
+  }
+  const client = await buildClient(globalFlags);
+  try {
+    return await listAgentSessions(client, null, command);
+  } finally {
+    await client.close();
+  }
+}
+
 const COMMANDS = {
   status: {
     op: 'daemon.status',
@@ -366,6 +407,7 @@ const COMMANDS = {
         entries: loadPersistedRuntimeEntries({ runtimesDir: paths.runtimesDir }),
       });
       const identity = resolveAgentSessionIdentity({ registry, log: identityLog });
+      if (callerless(command, identity)) return listSessionsWithoutCaller(command, globalFlags, identityLog);
       const refreshSession = async ({ reviveDeadGeneration }) => {
         await runHookVerb('session-start', {
           stateRoot: globalFlags.stateRoot,
@@ -391,14 +433,7 @@ const COMMANDS = {
         return { ...loadAgentSession(globalFlags.stateRoot, { identity }), runtime_registry: registry };
       };
       const policy = agentSessionPolicy({ registry, identity, refreshSession, log: identityLog });
-      let session;
-      try {
-        session = loadAgentSession(globalFlags.stateRoot, { identity });
-      } catch (error) {
-        if (!(error instanceof AgentCommandError) || error.code !== 'session_unavailable' || command.command === 'wait') throw error;
-        session = await policy.recover();
-      }
-      session = { ...policy.bind(session), runtime_registry: registry };
+      const session = { ...policy.bind(await loadOrRecoverSession(globalFlags.stateRoot, { identity, command, policy })), runtime_registry: registry };
       const startup = prepareAgentWaitStartup(session, command);
       const client = await buildClient({ ...globalFlags, agentWaitContext: startup.agentWaitContext });
       try {
@@ -667,6 +702,7 @@ const COMMANDS = {
       const channelSelectors = extractRepeatableFlag(args, 'channel-selector');
       const originChannelRouteId = extractFlag(args, 'origin-channel-route');
       const inboundTargetEndpointId = extractFlag(args, 'inbound-target-endpoint');
+      const providerReceivedAt = extractFlag(args, 'provider-received-at');
       const effectType = extractFlag(args, 'effect');
       const subject = extractFlag(args, 'subject');
       const reason = extractFlag(args, 'reason');
@@ -730,6 +766,8 @@ const COMMANDS = {
       if (channelSelectors.length > 0) payload.channel_selectors = channelSelectors;
       if (originChannelRouteId !== undefined) payload.origin_channel_route_id = originChannelRouteId;
       if (inboundTargetEndpointId !== undefined) payload.inbound_target_endpoint_id = inboundTargetEndpointId;
+      // The provider's arrival time (bridge ingestion lag); the busy line counts from it, clamped to 60 s before ingestion.
+      if (providerReceivedAt !== undefined) payload.metadata = { provider_metadata: { provider_received_at: providerReceivedAt } };
       return payload;
     },
   },
@@ -831,6 +869,17 @@ const COMMANDS = {
     op: 'recovery.switch',
     build(args) {
       return buildRecoveryPayload(args);
+    },
+  },
+  // Backfill of inbound channel replies into Subspace routes that hold the
+  // thread (ac-8jj0s). Operator verb, so admin scope; safe to re-run.
+  'recovery mirror-replies': {
+    admin: true,
+    op: 'recovery.mirror_replies',
+    build(args) {
+      const dryRun = extractFlag(args, 'dry-run', { boolean: true }) === true;
+      if (args.length > 0) throw new UsageError(`unknown argument: ${args.join(' ')}`);
+      return { dry_run: dryRun };
     },
   },
 
@@ -945,12 +994,20 @@ const COMMANDS = {
       const channelRouteId = extractFlag(args, 'channel-route');
       const leaseMs = extractFlag(args, 'lease-ms');
       const acceptReplyBinding = extractFlag(args, 'accept-reply-binding', { boolean: true }) ?? false;
+      const tier = extractFlag(args, 'tier');
       const payload = {};
       if (endpointId !== undefined) payload.endpoint_id = endpointId;
       if (deliveryId !== undefined) payload.delivery_id = deliveryId;
       if (channelRouteId !== undefined) payload.channel_route_id = channelRouteId;
       if (leaseMs !== undefined) payload.lease_ms = Number(leaseMs);
       if (acceptReplyBinding) payload.accept_reply_binding = true;
+      if (tier !== undefined) {
+        // The daemon owns the range check; a non-number cannot cross JSON, so refuse it here.
+        if (tier.trim() === '' || Number.isNaN(Number(tier))) throw new UsageError('--tier must be 0, 1 or 2');
+        payload.tier = Number(tier);
+      }
+      // An unknown flag must never be dropped: a typo would widen a tier claim to every tier.
+      if (args.length > 0) throw new UsageError(`unknown argument: ${args.join(' ')}`);
       return payload;
     },
   },
@@ -1524,7 +1581,7 @@ async function main() {
 // verbatim: it is the command an agent reaches for most, and
 // test/unit/cli_usage_drift.test.mjs pins its flags against the builder.
 const COMMIT_USAGE = [
-  '  message commit (--to <principal> --subject <text> --reason <text> | --conversation <id>) --from <principal> --body <text> --key <k> --effect <open|update|handoff.offer|handoff.accept|handoff.decline|close.fulfilled|close.cancelled|none> [--channel-selector <selector>] [--origin-channel-route <route_id>] [effect flags]',
+  '  message commit (--to <principal> --subject <text> --reason <text> | --conversation <id>) --from <principal> --body <text> --key <k> --effect <open|update|handoff.offer|handoff.accept|handoff.decline|close.fulfilled|close.cancelled|none> [--channel-selector <selector>] [--origin-channel-route <route_id>] [--provider-received-at <iso8601>] [effect flags]',
   '    open: --target-principal <id> --target-endpoint <id> --sender-endpoint <id> --process-generation <n> --completion-mode <message_committed|delivery_confirmed>',
   '    update/handoff.*/close.fulfilled: --obligation <id> --generation <n> --sender-endpoint <id> --process-generation <n>',
   '    handoff.offer also: --target-principal <id> --registration-key <k> --acceptance-deadline <iso>',
@@ -1652,6 +1709,7 @@ const FULL_USAGE_AFTER_COMMIT = [
       '  message delivery list <message_id>',
       '  recovery retry --root <obligation_id> --generation <n> --target-endpoint <id> --target-process-generation <n> --key <k>',
       '  recovery switch --root <obligation_id> --generation <n> --target-endpoint <id> --target-process-generation <n> --key <k>',
+      '  recovery mirror-replies [--dry-run]',
       '  lifecycle view [--root <obligation_id>] [--conversation <id>]   (derived labels, read-time only)',
       '  (send/reply/obligations/obligation create/obligation resolve are disabled by the forward lifecycle cutover)',
       '  inbox <principal_id> [--unread]',
@@ -1661,7 +1719,7 @@ const FULL_USAGE_AFTER_COMMIT = [
       '  obligation create --endpoint <id> --key <k> --conversation <id> [--confirmation <message_id>]',
       '  obligation resolve <obligation_id> [--by <message_id>] [--outcome <success|failure|blocked>]',
       '  obligation resolve <obligation_id> --cancel --reason <text> --source-ref <ref>',
-      '  delivery claim [--endpoint <id>] [--delivery <id>] [--lease-ms <n>] [--accept-reply-binding]',
+      '  delivery claim [--endpoint <id>] [--delivery <id>] [--lease-ms <n>] [--accept-reply-binding] [--tier <0|1|2>]',
       '  delivery complete <delivery_id> --token <token> --outcome <delivered|failed>',
       '  delivery release <delivery_id> --token <token> [--outcome aborted_unsent]',
       '  resume list [--runtime-type <type>] [--state <state>]',
@@ -1706,10 +1764,7 @@ main().catch((err) => {
         error: {
           code: err.code,
           message: err.message,
-          ...(err instanceof AgentCommandError ? {
-            details: err.details ?? null,
-            next_action: err.next_action ?? null,
-          } : {}),
+          ...jsonErrorExtras(err),
         },
       });
     }

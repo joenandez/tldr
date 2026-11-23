@@ -2,6 +2,11 @@ import {
   commandFailure,
   expectedPreflightArgs,
 } from "./tightbeam_channel_runtime.mjs";
+import {
+  PROVIDER_RECEIVED_AT_FLAG,
+  providerReceivedAtIso,
+  receivedAtMetadata,
+} from "./provider_received_at.mjs";
 import { TLDR_AGENT_SLACK_SETTLE_MS } from "./tldr_agent_daemon_phase_timeouts.mjs";
 import {
   OK,
@@ -58,7 +63,7 @@ function dropCache(cache, failed, hadTarget) {
   return hadTarget ? { ...failed, cache_reset: 1 } : failed;
 }
 
-async function claimSlackDelivery(ctx, listRoutes, { leaseMs, cache }) {
+async function claimSlackDelivery(ctx, listRoutes, { leaseMs, tier, cache }) {
   const cached =
     Date.now() - cache.resolvedAt < TARGET_TTL_MS ? cache.target : null;
   const target = await claimTarget(ctx, listRoutes, cached);
@@ -78,6 +83,8 @@ async function claimSlackDelivery(ctx, listRoutes, { leaseMs, cache }) {
       "--accept-reply-binding",
       // Tightbeam's default lease is 60 s; the caller's post deadline can be longer.
       ...(leaseMs ? ["--lease-ms", String(leaseMs)] : []),
+      // One tier per lane: 0 notices, 1 answers to the user, 2 the rest. None: all tiers.
+      ...(tier === undefined ? [] : ["--tier", String(tier)]),
     ],
     // Only a hung CLI is killed, leaseMs after it started. A shorter kill would orphan claims it
     // committed (held for the lease, then counted; ac-jfv.59 r6). A commit late in that window
@@ -94,13 +101,16 @@ async function claimSlackDelivery(ctx, listRoutes, { leaseMs, cache }) {
   return Object.freeze({ ok: true, claim: claimed.result });
 }
 
-async function deliveryCommand(ctx, { name, args, failureCode, params }) {
+async function deliveryCommand(
+  ctx,
+  { name, args, failureCode, params, timeoutMs = TLDR_AGENT_SLACK_SETTLE_MS },
+) {
   const identity = await ctx.safeIdentity();
   if (!identity) return fail("not_configured");
   const finish = ctx.begin(`tightbeam_slack_${name}`);
   // Bounded inside the claim's lease (deadline + 2 settle), so a hung CLI cannot outlive it.
   const result = await ctx.asApp(identity, ["delivery", name, ...args], {
-    timeoutMs: TLDR_AGENT_SLACK_SETTLE_MS,
+    timeoutMs,
   });
   if (commandFailure(result)) {
     finish("failed", { ...params, tightbeam_code: tightbeamCodeOf(result) });
@@ -136,7 +146,10 @@ async function publishSlackReply(ctx, input) {
     "--external-event-id",
     input.external_event_id,
     "--provider-metadata-json",
-    JSON.stringify({ channel: "slack" }),
+    JSON.stringify({
+      channel: "slack",
+      ...receivedAtMetadata(input.provider_received_at),
+    }),
   ]);
   return messageOutcome({ name: "publish", result, finish });
 }
@@ -168,6 +181,12 @@ async function commitSlackMessage(ctx, listRoutes, input) {
     String(owner.endpoint.process_generation),
     "--origin-channel-route",
     route.route_id,
+    ...(providerReceivedAtIso(input.provider_received_at)
+      ? [
+          PROVIDER_RECEIVED_AT_FLAG,
+          providerReceivedAtIso(input.provider_received_at),
+        ]
+      : []),
     // one named session instead of every sibling endpoint of the principal
     ...(input.target_endpoint_id
       ? ["--inbound-target-endpoint", input.target_endpoint_id]
@@ -237,21 +256,27 @@ export function createSlackDelivery({ ctx, listRoutes }) {
   // `delivery claim` call alone (ac-jfv.97).
   const cache = { capable: false, target: null, resolvedAt: 0 };
   return {
-    async claimSlackDelivery({ leaseMs } = {}) {
+    async claimSlackDelivery({ leaseMs, tier } = {}) {
       cache.capable ||= await deliveryCapabilityAvailable(ctx);
       if (!cache.capable) return fail("delivery_capability_unavailable");
-      return claimSlackDelivery(ctx, listRoutes, { leaseMs, cache });
+      return claimSlackDelivery(ctx, listRoutes, {
+        leaseMs,
+        tier,
+        cache,
+      });
     },
-    completeSlackDelivery: ({ delivery_id: id, token, outcome }) =>
+    completeSlackDelivery: ({ delivery_id: id, token, outcome, timeoutMs }) =>
       deliveryCommand(ctx, {
+        timeoutMs,
         name: "complete",
         args: [id, "--token", token, "--outcome", outcome],
         failureCode: "complete_failed",
         params: { delivery_id: id, outcome },
       }),
     // outcome "aborted_unsent": the claim was cut off before any Slack request (ac-jfv.87).
-    releaseSlackDelivery: ({ delivery_id: id, token, outcome }) =>
+    releaseSlackDelivery: ({ delivery_id: id, token, outcome, timeoutMs }) =>
       deliveryCommand(ctx, {
+        timeoutMs,
         name: "release",
         args: [
           id,

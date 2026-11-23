@@ -18,7 +18,10 @@ import {
   runDaemonMailSequence,
   runDaemonOutboundSequence,
 } from "./daemon_mail_child_phases.mjs";
-import { createInboxPollScheduler } from "./daemon_inbox_poll_scheduler.mjs";
+import {
+  createInboxPollScheduler,
+  emitInboxPollSchedulerSkip,
+} from "./daemon_inbox_poll_scheduler.mjs";
 import { helmHome } from "./store.mjs";
 import {
   createSlackLane,
@@ -27,6 +30,8 @@ import {
   runSlackOutboundOnce,
   runSlackWorkingOnce,
 } from "./daemon_slack_lane.mjs";
+import { runLanes } from "./daemon_lanes_run.mjs";
+import { createTierLanes } from "./daemon_tier_lanes.mjs";
 
 function defaultEmailConfigPath() {
   return (
@@ -41,25 +46,6 @@ function readEmailConfig() {
   } catch {
     return null;
   }
-}
-
-function emitInboxPollSchedulerSkip({
-  daemonInstanceId,
-  targetScope,
-  inboxId,
-  decision,
-}) {
-  appendActivityEvent({
-    event_type: "daemon_inbox_poll_scheduler",
-    daemon_instance_id: daemonInstanceId,
-    scope_id: targetScope?.scope_id || null,
-    cwd: targetScope?.cwd || null,
-    metadata: {
-      skipped: true,
-      reason: decision?.reason || "poll_skipped",
-      inbox_id: inboxId,
-    },
-  });
 }
 
 function phaseTimeoutError(name) {
@@ -165,6 +151,8 @@ export async function runTldrAgentDaemonLoop({
   runOutboundSequence = runDaemonOutboundSequence,
   maintainDiagnostics = maintainTldrAgentDiagnostics,
   runSlackTick = runSlackOutboundOnce, // the Slack outbound tick
+  runSlackAnswer, // the answer (tier 1) Slack tick
+  runSlackNotice, // the notice (tier 0) Slack tick
   runSlackInbound = runSlackInboundOnce,
   runSlackSweep = runSlackWorkingOnce,
   slackListener = createSlackListenerSupervisor({ home }),
@@ -179,6 +167,14 @@ export async function runTldrAgentDaemonLoop({
   ),
   slackPostTimeoutMs: slackPostTimeoutOption,
   slackOutboundPhaseTimeoutMs: slackPhaseTimeoutOption,
+  slackAnswerPhaseTimeoutMs,
+  slackNoticePhaseTimeoutMs,
+  runAnswerEmailSequence, // the answer (tier 1) email drain
+  emailNoticeWarm, // the notice (tier 0) email lane's warm child
+  // Test seams of the user-route lanes' wake: watermark file and poll/fallback cadence.
+  urgentPollMs,
+  urgentFallbackMs,
+  watermarkPath,
 } = {}) {
   if (!homeExists(home)) return [];
   trimDaemonStderrAtStart(home);
@@ -234,20 +230,23 @@ export async function runTldrAgentDaemonLoop({
       throw error;
     }
   };
+  const emailSequenceArgs = {
+    runPhase,
+    scopes: [scope],
+    schedulerScriptPath,
+    daemonInstanceId,
+    defaultEmailConfigPath,
+    readEmailConfig,
+    inboxPollScheduler,
+    appendActivityEvent,
+    nowMs: Date.now,
+  };
   const outboundLane = async () => {
     do {
       try {
         // eslint-disable-next-line no-await-in-loop -- one ordered outbound drain per outbound tick.
         const outbound = await runOutboundSequence({
-          runPhase,
-          scopes: [scope],
-          schedulerScriptPath,
-          daemonInstanceId,
-          defaultEmailConfigPath,
-          readEmailConfig,
-          inboxPollScheduler,
-          appendActivityEvent,
-          nowMs: Date.now,
+          ...emailSequenceArgs,
           outboundTimeoutMs,
         });
         // --once reports both lanes, so a failed drain fails the run.
@@ -299,6 +298,30 @@ export async function runTldrAgentDaemonLoop({
     isStopped: () => stopped,
     phaseName: "slack_outbound",
   });
+  // Notices (tier 0) and answers (tier 1) get their own lanes, Slack and email: a normal delivery
+  // stuck in claim, complete or a long send cannot hold them, nor can one tier hold another
+  // (ac-jfv.74.1).
+  const { slackAnswerLane, slackNoticeLane, emailAnswerLane, emailNoticeLane } =
+    createTierLanes({
+      home,
+      once,
+      daemonInstanceId,
+      slackListener,
+      runPhase,
+      waitFn,
+      homeExists,
+      isStopped: () => stopped,
+      emailSequenceArgs,
+      runSlackAnswer,
+      runSlackNotice,
+      runAnswerEmailSequence,
+      emailNoticeWarm,
+      slackAnswerPhaseTimeoutMs,
+      slackNoticePhaseTimeoutMs,
+      pollMs: urgentPollMs,
+      fallbackMs: urgentFallbackMs,
+      watermarkPath,
+    });
   // Inbound is its own lane and phase so a slow or aborted send cannot starve it (ac-jfv.74).
   const slackInboundLane = createSlackLane({
     home,
@@ -329,32 +352,20 @@ export async function runTldrAgentDaemonLoop({
     phaseName: "slack_working",
   });
   try {
-    if (once) {
-      // Kept apart: each admin client writes its own nonce-<hash> file (ac-jfv.4), so
-      // this is caution for a short-lived run, not a hard need.
-      const runInOrder = async ([lane, ...rest]) => {
-        try {
-          await lane();
-        } finally {
-          if (rest.length) await runInOrder(rest);
-        }
-      };
-      await runInOrder([
-        inboundLane,
-        outboundLane,
+    await runLanes({
+      once,
+      inboundLane,
+      outboundLane,
+      lanes: [
         slackLane,
+        slackAnswerLane,
+        slackNoticeLane,
+        emailAnswerLane,
+        emailNoticeLane,
         slackInboundLane,
         workingLane,
-      ]);
-    } else {
-      await Promise.all([
-        inboundLane(),
-        outboundLane(),
-        slackLane(),
-        slackInboundLane(),
-        workingLane(),
-      ]);
-    }
+      ],
+    });
   } finally {
     slackListener.stop();
     process.removeListener("SIGINT", stop);

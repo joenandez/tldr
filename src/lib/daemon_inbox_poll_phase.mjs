@@ -15,14 +15,14 @@ function readTldrAgentPollConfigDefault() {
   });
 }
 
-function resolveInboxTarget({
+export function resolveInboxTarget({
   scopes,
   daemonInstanceId,
   defaultEmailConfigPath,
   readEmailConfig,
   appendActivityEvent,
-  pollOnly,
-  readTldrAgentPollConfig,
+  pollOnly = isTldrAgentPollOnlyDaemon(),
+  readTldrAgentPollConfig = readTldrAgentPollConfigDefault,
 }) {
   const configPath = defaultEmailConfigPath();
   const legacyConfigured = !pollOnly && existsSync(configPath);
@@ -75,8 +75,8 @@ export async function runInboxPollChildPhase({
   emitInboxPollSchedulerSkip,
   appendActivityEvent,
   runInboxPoll = runInboxPollChild,
-  pollOnly = isTldrAgentPollOnlyDaemon(),
-  readTldrAgentPollConfig = readTldrAgentPollConfigDefault,
+  pollOnly,
+  readTldrAgentPollConfig,
 }) {
   const target = resolveInboxTarget({
     scopes,
@@ -260,6 +260,8 @@ function pollResult(data, started, candidateFound) {
 
 // Outbound lane: no due gate, only an own in-flight key so it never overlaps
 // itself. It never feeds poll health; only the inbound result stamps that.
+// answerOnly is the answer email lane's drain (tier 1, ac-jfv.74.1): its own key, so a hung
+// ordinary drain never holds it, and its own events. An idle tick is silent.
 export async function runOutboundDrainChildPhase({
   scopes,
   schedulerScriptPath,
@@ -271,8 +273,9 @@ export async function runOutboundDrainChildPhase({
   inboxPollScheduler,
   appendActivityEvent,
   runOutboundDrain = runOutboundDrainChild,
-  pollOnly = isTldrAgentPollOnlyDaemon(),
-  readTldrAgentPollConfig = readTldrAgentPollConfigDefault,
+  pollOnly,
+  readTldrAgentPollConfig,
+  answerOnly = false,
 }) {
   const target = resolveInboxTarget({
     scopes,
@@ -285,7 +288,10 @@ export async function runOutboundDrainChildPhase({
   });
   if (target.skip) return target.skip;
   const { targetScope } = target;
-  const key = `${target.inboxId}:outbound`;
+  const key = `${target.inboxId}:${answerOnly ? "outbound_answer" : "outbound"}`;
+  const tickEvent = answerOnly
+    ? "daemon_email_answer_tick"
+    : "daemon_outbound_tick";
   if (
     inboxPollScheduler.nextDecision(key).reason === "poll_skipped_in_flight"
   ) {
@@ -320,6 +326,7 @@ export async function runOutboundDrainChildPhase({
       daemonInstanceId,
       signal,
       timeoutMs: childTimeoutMs,
+      answerOnly,
     });
     const outbound = child.data?.outbound || null;
     if (!child.ok) {
@@ -336,17 +343,20 @@ export async function runOutboundDrainChildPhase({
         },
       );
     }
-    event("daemon_outbound_tick", {
-      metadata: {
-        ok: Boolean(outbound?.ok),
-        error: outbound?.error || null,
-        ...counts(outbound),
-      },
-    });
+    const idle = answerOnly && !outbound?.attempted && outbound?.ok !== false;
+    if (!idle)
+      event(tickEvent, {
+        metadata: {
+          ok: Boolean(outbound?.ok),
+          error: outbound?.error || null,
+          ...counts(outbound),
+          ...outbound?.timings,
+        },
+      });
     return { action: "drained", ...counts(outbound) };
   } catch (err) {
     process.stderr.write(`helm daemon outbound drain failed: ${err.message}\n`);
-    event("daemon_outbound_tick_failed", {
+    event(`${tickEvent}_failed`, {
       top: {
         error_code: err.code || null,
         reason_code: err.reasonCode || "poll_child_failed",
@@ -354,6 +364,7 @@ export async function runOutboundDrainChildPhase({
       metadata: {
         error: err.message,
         ...counts(err.outbound),
+        ...err.outbound?.timings,
         ...(err.outbound?.cause ? { cause: err.outbound.cause } : {}),
       },
     });

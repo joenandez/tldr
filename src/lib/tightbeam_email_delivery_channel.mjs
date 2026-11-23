@@ -1,5 +1,12 @@
 import { expectedPreflightArgs } from "./tightbeam_channel_runtime.mjs";
 import {
+  echoesTier,
+  holdTierEcho,
+  tierEchoBackoffPath,
+  tierEchoHeld,
+  tierEchoWarning,
+} from "./tier_echo.mjs";
+import {
   lookupProviderMap,
   lookupProviderReplyBinding,
   recordBoundProviderAcceptance,
@@ -9,6 +16,8 @@ import {
 
 const REPLY_BINDING_CAPABILITY = "channels.reply-binding.v1";
 const LISTENER_CAPABILITY = "listener.v1";
+// The delivery.release outcome tightbeam excludes from attempt counting (as in the Slack settle).
+const UNSENT_OUTCOME = "aborted_unsent";
 const TIGHTBEAM_CODE = /^[a-z][a-z_]{0,63}$/u;
 
 // Item 49: an idle auto-select claim returns `claim_held` and takes no lease
@@ -35,6 +44,26 @@ export function claimFailure(claimed, latencyMs = null) {
     code: "claim_failed",
     tightbeam_code: tightbeamCode,
   });
+}
+
+// The claim did not echo the lane's tier (tier_echo.mjs): release it (nothing was sent), hold this
+// tier's claims for one backoff period, and warn once. The release is `aborted_unsent`: a plain
+// release costs an attempt, and 8 refusals would fail a row that never went out (review r6). It
+// reads as an idle claim to the drain; a release that fails is reported, the claim then stays
+// leased until it expires.
+async function refuseUnechoed({ home, tier, result, release }) {
+  const released = await release({
+    delivery_id: result.delivery_id,
+    token: result.token,
+    outcome: UNSENT_OUTCOME,
+  });
+  holdTierEcho(tierEchoBackoffPath(home, tier));
+  process.stderr.write(
+    `${JSON.stringify({ ts: new Date().toISOString(), ...tierEchoWarning(tier, result) })}\n`,
+  );
+  return released.ok === true
+    ? Object.freeze({ ok: false, code: "claim_unavailable" })
+    : released;
 }
 
 export function createTightbeamEmailDeliveryChannel({
@@ -124,7 +153,37 @@ export function createTightbeamEmailDeliveryChannel({
     return { identity, endpoint: endpoint.result };
   }
 
-  async function claimEmailDelivery() {
+  // The identity and route one claim needs. Kept after a success, so every later claim of the
+  // process runs `delivery claim` alone (the notice lane's warm child makes one per wake).
+  let resolved = null;
+  async function resolveEmailRoute() {
+    if (!resolved) {
+      const emailIdentity = await registeredEmailIdentity();
+      const routes = emailIdentity
+        ? await execute({
+            admin: false,
+            credentials: emailIdentity.identity,
+            args: ["channel", "route", "list"],
+          })
+        : null;
+      const route = routes?.result?.routes?.find(
+        (candidate) => candidate?.selector === "email",
+      );
+      if (!emailIdentity || commandFailure(routes) || !route)
+        return Object.freeze({
+          ok: false,
+          code: emailIdentity ? "route_unavailable" : "not_configured",
+        });
+      resolved = { emailIdentity, route };
+    }
+    return resolved;
+  }
+
+  // tier (ac-jfv.74.1): 0 busy and resume_failed notices, 1 answers to the user, 2 the rest, each
+  // its own lane; claim_held when its tier has none. No tier: all tiers.
+  async function claimEmailDelivery({ tier } = {}) {
+    if (tier !== undefined && tierEchoHeld(tierEchoBackoffPath(home, tier)))
+      return Object.freeze({ ok: false, code: "claim_unavailable" });
     const capability = await deliveryCapabilities();
     if (!capability.replyBinding || !capability.listener) {
       return Object.freeze({
@@ -132,20 +191,9 @@ export function createTightbeamEmailDeliveryChannel({
         code: "delivery_capability_unavailable",
       });
     }
-    const emailIdentity = await registeredEmailIdentity();
-    if (!emailIdentity)
-      return Object.freeze({ ok: false, code: "not_configured" });
-    const routes = await execute({
-      admin: false,
-      credentials: emailIdentity.identity,
-      args: ["channel", "route", "list"],
-    });
-    const route = routes?.result?.routes?.find(
-      (candidate) => candidate?.selector === "email",
-    );
-    if (commandFailure(routes) || !route) {
-      return Object.freeze({ ok: false, code: "route_unavailable" });
-    }
+    const target = await resolveEmailRoute();
+    if (target.ok === false) return target;
+    const { emailIdentity, route } = target;
     const startedAt = Date.now();
     const claimed = await execute({
       admin: false,
@@ -158,11 +206,22 @@ export function createTightbeamEmailDeliveryChannel({
         "--channel-route",
         route.route_id,
         "--accept-reply-binding",
+        ...(tier === undefined ? [] : ["--tier", String(tier)]),
       ],
     });
     if (!commandFailure(claimed))
-      return Object.freeze({ ok: true, claim: claimed.result });
-    return claimFailure(claimed, Date.now() - startedAt);
+      return echoesTier(tier, claimed.result)
+        ? Object.freeze({ ok: true, claim: claimed.result })
+        : refuseUnechoed({
+            home,
+            tier,
+            result: claimed.result,
+            release: releaseEmailDelivery,
+          });
+    const failure = claimFailure(claimed, Date.now() - startedAt);
+    // Anything but an idle claim may mean a stale identity or route: resolve again next time.
+    if (failure.code !== "claim_unavailable") resolved = null;
+    return failure;
   }
 
   async function completeEmailDelivery({
@@ -190,13 +249,24 @@ export function createTightbeamEmailDeliveryChannel({
       : Object.freeze({ ok: true });
   }
 
-  async function releaseEmailDelivery({ delivery_id: deliveryId, token }) {
+  async function releaseEmailDelivery({
+    delivery_id: deliveryId,
+    token,
+    outcome,
+  }) {
     const identity = await readIdentity();
     if (!identity) return Object.freeze({ ok: false, code: "not_configured" });
     const released = await execute({
       admin: false,
       credentials: identity,
-      args: ["delivery", "release", deliveryId, "--token", token],
+      args: [
+        "delivery",
+        "release",
+        deliveryId,
+        "--token",
+        token,
+        ...(outcome ? ["--outcome", outcome] : []),
+      ],
     });
     return commandFailure(released)
       ? Object.freeze({ ok: false, code: "release_failed" })

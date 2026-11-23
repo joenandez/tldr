@@ -20,9 +20,12 @@ const NEVER_HEALS = new Set([...AUTH_ERRORS, "missing_scope"]);
 
 // A look gets its own window; `outer` also ends it (the tick's signal, for a look before a send).
 // After a send the deadline that cut it must not cut the look, so that look passes no outer.
-const lookWindow = (outer) =>
+const lookWindow = (ctx, outer) =>
   AbortSignal.any(
-    [AbortSignal.timeout(TLDR_AGENT_SLACK_LOOKUP_MS), outer].filter(Boolean),
+    [
+      AbortSignal.timeout(ctx.lookupMs ?? TLDR_AGENT_SLACK_LOOKUP_MS),
+      outer,
+    ].filter(Boolean),
   );
 
 // Look for a post by its marker. A failed look is retryable, never final: the delivery is
@@ -30,7 +33,10 @@ const lookWindow = (outer) =>
 export async function lookup(ctx, args, outer) {
   try {
     return await timed(ctx, "lookup_ms", () =>
-      findMarkedPost(args, { ...ctx.slackOpts, signal: lookWindow(outer) }),
+      findMarkedPost(args, {
+        ...ctx.slackOpts,
+        signal: lookWindow(ctx, outer),
+      }),
     );
   } catch (error) {
     ctx.logger({

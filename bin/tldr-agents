@@ -128,6 +128,8 @@ verb	messaging	recovery retry	component	Retry stranded work on an explicitly sel
 usage	messaging	recovery retry	recovery retry --root <obligation_id> --generation <n> --target-endpoint <id> --target-process-generation <n> --key <k>
 verb	messaging	recovery switch	component	Switch work to an explicitly selected endpoint.
 usage	messaging	recovery switch	recovery switch --root <obligation_id> --generation <n> --target-endpoint <id> --target-process-generation <n> --key <k>
+verb	messaging	recovery mirror-replies	component	Admin: mirror past inbound replies to the Subspace routes that hold the thread; safe to re-run.
+usage	messaging	recovery mirror-replies	recovery mirror-replies [--dry-run]
 verb	messaging	doctor	registry	Check setup and connection; every failure names its own fix.
 usage	messaging	doctor	doctor
 verb	messaging	logs	registry	Print the end of the Tightbeam daemon log.

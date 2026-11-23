@@ -1,4 +1,3 @@
-import { rmSync } from "node:fs";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { SlackApiError, abortError } from "./slack_api.mjs";
@@ -19,6 +18,7 @@ import {
   postBudget,
   postDeadline,
   trackedFetch,
+  clearBackoff,
   writeBackoff,
   hasLeaseFields,
   messageText,
@@ -36,14 +36,15 @@ import {
   earlierRootTarget,
 } from "./slack_post_lookup.mjs";
 import { postInParts } from "./slack_post_parts.mjs";
-import { withThreadLock } from "./slack_thread_lock.mjs";
-import { clearThreadWorking } from "./slack_working.mjs";
+import { withThreadTurn } from "./slack_thread_lock.mjs";
+import { clearWorking } from "./slack_working_clear.mjs";
 import {
   UNSENT_OUTCOME,
   beforeWrite,
   complete,
   failureOutcome,
   release,
+  claimEchoed,
   releaseUnsent,
 } from "./tightbeam_slack_settle.mjs";
 
@@ -94,7 +95,7 @@ async function sendWithRecovery(ctx, message, target) {
   // Not awaited by postInParts: the receipt must not wait on Slack. clearWorking marks
   // the row terminal before its first await; the sweep re-clears if this is cut short.
   const onRoot = (root) =>
-    Promise.resolve(clearWorking(ctx, root)).catch((error) =>
+    Promise.resolve(clearWorking(ctx, message, root)).catch((error) =>
       ctx.logger({
         event: "slack_working_clear_crashed",
         status: "error",
@@ -127,17 +128,6 @@ async function sendWithRecovery(ctx, message, target) {
   }
 }
 
-// The post is out: a thread's working indicator is done. Never fails the delivery.
-// replayedTs: a replay passes its receipt's post ts, so a newer owner message is spared.
-const clearWorking = (ctx, { channelId, threadTs }, postedTs) =>
-  threadTs
-    ? clearThreadWorking(
-        ctx.slackOpts,
-        { channelId, threadTs, postedTs },
-        "replied",
-      )
-    : null;
-
 // A delivery re-offered after its post succeeded (complete failed, or a crash)
 // only needs completing: posting again would make a second Slack root (AC-10).
 async function post(ctx, claim) {
@@ -153,7 +143,10 @@ async function post(ctx, claim) {
       result: { channel: receipt.channelId, ts: receipt.ts },
     });
     const posted = recordPosted(ctx, claim, { ...receipt, late: true });
-    await clearWorking(ctx, receipt, receipt.ts);
+    await clearWorking(ctx, claim.message, {
+      ...receipt,
+      postedTs: receipt.ts,
+    });
     if (receipt.sent !== null) await resumeParts(ctx, claim, receipt);
     return posted;
   }
@@ -173,7 +166,7 @@ async function post(ctx, claim) {
     ));
   let started = false;
   // The post and the row's clear take their turn with a failure notice in this thread.
-  const turn = withThreadLock({ home: ctx.home, ...first }, () => {
+  const turn = withThreadTurn(claim, { home: ctx.home, ...first }, () => {
     // A turn that comes after the deadline must not write: its claim is already released.
     if (ctx.signal?.aborted) throw abortError("claim", ctx.signal);
     started = true;
@@ -244,7 +237,10 @@ async function handleFailure(ctx, claim, error) {
   }
   if (outcome === UNSENT_OUTCOME) return releaseUnsent(ctx, claim, error);
   const retryMs = error.retryAfterMs ?? DEFAULT_BACKOFF_MS;
-  if (slack) writeBackoff(ctx, retryMs);
+  // A user-route lane (tier 0-1) honors only a Slack 429 Retry-After: any other failure must not
+  // hold a notice or an answer (ac-jfv.74.1).
+  if (slack && (!(ctx.tier <= 1) || error.httpStatus === 429))
+    writeBackoff(ctx, retryMs);
   const bad = await release(ctx, claim);
   if (!slack) throw error;
   return (
@@ -279,7 +275,7 @@ async function deliverClaim(ctx, claim) {
   ctx.sent = false;
   try {
     const posted = await post(ctx, claim);
-    rmSync(ctx.backoffPath, { force: true });
+    clearBackoff(ctx);
     const bad = await timed(ctx, "complete_ms", () =>
       complete(ctx, claim, "delivered"),
     );
@@ -296,6 +292,7 @@ async function deliverClaim(ctx, claim) {
 }
 
 async function deliverOnce(ctx) {
+  ctx.startedAt = ctx.now();
   const gated = gate(ctx);
   if (gated) return gated;
   const started = Date.now();
@@ -304,9 +301,12 @@ async function deliverOnce(ctx) {
   const timings = () => ({ ...ctx.timings, total_ms: Date.now() - started });
   try {
     const claimStartedAt = Date.now();
-    const claimed = await timed(ctx, "claim_ms", () => claimDelivery(ctx));
+    const claimed = await timed(ctx, "claim_ms", () =>
+      claimEchoed(ctx, claimDelivery),
+    );
     if (claimed?.ok !== true) return { ...claimed, timings: timings() };
     const { claim } = claimed;
+    ctx.onClaimed?.();
     ctx.deadline.start(
       postBudget(ctx, leaseStart(claim, ctx.leaseMs, claimStartedAt)),
     );
@@ -340,6 +340,14 @@ export function createTightbeamSlackAdapter({
   postCallTimeoutMs,
   lookupSenderCwd,
   sleep: sleepOption,
+  // The lane's tier (ac-jfv.74.1): claims `--tier N` (none: all tiers). Tiers 0-1 are the user
+  // route: their own look and settle bounds (they size the post budget inside a short lease)
+  // and their own backoff file. onClaimed runs once the claim is in hand.
+  tier,
+  onClaimed,
+  lookupMs,
+  settleMs,
+  backoffPath = join(home ?? "", "slack", "outbound-backoff.json"),
 } = {}) {
   if (
     !home ||
@@ -367,7 +375,11 @@ export function createTightbeamSlackAdapter({
     postCallTimeoutMs,
     lookupSenderCwd,
     sleep,
-    backoffPath: join(home, "slack", "outbound-backoff.json"),
+    tier,
+    onClaimed,
+    lookupMs,
+    settleMs,
+    backoffPath,
   };
   // An aborted Slack call is retryable, so handleFailure releases the claim.
   ctx.slackOpts = {

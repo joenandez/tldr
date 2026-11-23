@@ -11,6 +11,7 @@
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
 import { acquireClaim, deliveryRetryDelayMs, issueReplyBindingToken, MAX_DELIVERY_CLAIM_ATTEMPTS, resolveLeaseMs, isUnsentOutcome } from './claims_shared.mjs';
+import { AGED_TIER2_MS, behindHeldOlder, candidateTiers, heldRouteDeliveries, settleAnsweredNotices } from './delivery_priority.mjs';
 import { advanceReplyWaitForDelivery, markStagedDeliveryFailedAttention } from '../lifecycle_transition.mjs';
 
 const DELIVERY_PROJECTION_SQL = `SELECT d.id AS id, d.message_id AS message_id, d.endpoint_id AS endpoint_id, e.created_by_app_id AS owner_app_id,
@@ -101,36 +102,134 @@ function offerKind(claim, now) {
   return Object.keys(holds).find((kind) => holds[kind]) ?? 'waiting';
 }
 
-function selectAutoClaimDelivery(context, { appId, endpointId, channelRouteId, now }) {
-  const candidates = context.db
-    .prepare(
-      `SELECT d.id AS id
+// One line per claim, at the boundary: which path, and why. Tier 0-1 picks and guard skips are
+// info; the routine tier 2 pick and an empty poll stay debug.
+function logSelection(context, { tier, selected }) {
+  const notable = selected && (selected.tier < 2 || selected.guardSkipped > 0 || selected.promotedFrom);
+  const log = notable ? context.logger?.info : context.logger?.debug; // an idle poll is the steady state
+  log?.call(context.logger, {
+    event: 'delivery_claim.selected',
+    params: { tier_filter: tier ?? null, offered: selected?.offered ?? 0 },
+    result: selected
+      ? {
+          delivery_id: selected.id,
+          tier: selected.tier,
+          kind: selected.kind,
+          aged: selected.aged,
+          guard_skipped: selected.guardSkipped,
+          promoted_from: selected.promotedFrom,
+        }
+      : { delivery_id: null },
+    status: 'ok',
+  });
+}
+
+const KIND_RANK = { fresh: 0, retry: 1, unsent: 2 };
+
+const CANDIDATES_SQL = `SELECT d.id AS id, d.created_at AS created_at, d.channel_route_id AS channel_route_id,
+              m.conversation_id AS conversation_id, m.origin AS origin, json_extract(m.metadata, '$.notice') AS notice
          FROM deliveries d
          JOIN endpoints e ON e.id = d.endpoint_id
+         JOIN messages m ON m.id = d.message_id
     LEFT JOIN claims c ON c.resource_type = 'delivery' AND c.resource_id = d.id AND c.state = 'claimed' AND c.lease_expires_at > ?
         WHERE e.created_by_app_id = ?
           AND d.state IN ('pending', 'claimed')
           AND (? IS NULL OR d.endpoint_id = ?)
           AND (? IS NULL OR d.channel_route_id = ?)
           AND c.id IS NULL
-        ORDER BY d.created_at ASC, d.id ASC`,
-    )
+        ORDER BY d.created_at ASC, d.id ASC`;
+
+/**
+ * Candidates in (created_at, id) order that may be offered now, each with its `kind`. An unsent
+ * abort costs no attempt and no wait, but a delivery that keeps aborting must not hold the queue,
+ * so unsent is offered last. An earlier failure never blocks a newer delivery (user decision,
+ * 2026-09-22): a retry waits out its backoff without holding anything, and exhausted deliveries
+ * fail terminally here.
+ */
+function offerableCandidates(context, { appId, endpointId, channelRouteId, now }) {
+  const candidates = context.db
+    .prepare(CANDIDATES_SQL)
     .all(now.toISOString(), appId, endpointId, endpointId, channelRouteId, channelRouteId);
   const latest = latestDeliveryClaims(context.db, candidates.map((candidate) => candidate.id));
-  // Offer order: never-claimed, then a retry whose backoff passed, then a delivery whose
-  // last claim was an unsent abort (least recently aborted first). An unsent abort costs no
-  // attempt and no wait, but a delivery that keeps aborting must not hold the queue.
-  let retry = null;
-  let unsent = null;
-  for (const { id } of candidates) {
-    const claim = latest.get(id);
+  const offered = [];
+  for (const candidate of candidates) {
+    const claim = latest.get(candidate.id);
     const kind = offerKind(claim, now);
-    if (kind === 'fresh') return id;
-    if (kind === 'exhausted') failExhaustedDelivery(context, { deliveryId: id, latestClaim: claim, now });
-    if (kind === 'retry' && retry === null) retry = id;
-    if (kind === 'unsent' && (unsent === null || claim.released_at < latest.get(unsent).released_at)) unsent = id;
+    if (kind === 'exhausted') failExhaustedDelivery(context, { deliveryId: candidate.id, latestClaim: claim, now });
+    else if (kind !== 'waiting') offered.push({ ...candidate, kind, abortedAt: kind === 'unsent' ? claim.released_at : '' });
   }
-  return retry ?? unsent;
+  return offered;
+}
+
+/**
+ * Orders offers: tier (0 notice, 1 answer to an unanswered user message, 2 the rest), then inside
+ * tier 2 aged work (older than 15 min) ahead of young work, then fresh, retry past backoff,
+ * least-recently-aborted unsent. A `tier` filter keeps that tier only, so one consumer per tier
+ * never sees another tier's rows and unsent is last only inside its own tier. The input is
+ * already (created_at, id) and Array.sort is stable, so ties keep that order.
+ */
+function rankOffers(context, offered, { tier, now }) {
+  const tiers = candidateTiers(context.db, offered);
+  const ageLimit = now.getTime() - AGED_TIER2_MS;
+  for (const row of offered) {
+    row.tier = tiers.get(row.id);
+    row.aged = row.tier === 2 && Date.parse(row.created_at) < ageLimit;
+  }
+  return offered.filter((row) => tier === undefined || row.tier === tier).sort(compareOffers);
+}
+
+// Tier, aged tier 2 first, kind (fresh, retry, unsent), least recently aborted.
+function compareOffers(a, b) {
+  const keys = [a.tier - b.tier, Number(b.aged) - Number(a.aged), KIND_RANK[a.kind] - KIND_RANK[b.kind]];
+  return keys.find((key) => key !== 0) ?? compareText(a.abortedAt, b.abortedAt);
+}
+const compareText = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * Auto-select: the first ranked offer that may go now. A tier 1-2 row on a channel route is first
+ * replaced by the oldest offered tier 1-2 row of its route and conversation (an older post still
+ * offerable goes before a newer answer; this ignores the `tier` filter, because thread order needs
+ * it and the exclusive claim settles a race between the two lanes). It is then skipped when it is
+ * behind a held older delivery. Tier 0 stands alone: no promotion, no guard, and an answered busy
+ * notice is superseded instead of offered. Returns { id, tier, kind, promotedFrom, ... } or null.
+ */
+function selectAutoClaimDelivery(context, { appId, endpointId, channelRouteId, tier, now }) {
+  const offered = offerableCandidates(context, { appId, endpointId, channelRouteId, now });
+  const ranked = offered.length > 0 ? settleAnsweredNotices(context, rankOffers(context, offered, { tier, now }), now) : [];
+  const held = ranked.some(isGuarded) ? heldRouteDeliveries(context.db, now) : [];
+  const targets = ranked.map((row) => ({ row, target: threadHead(offered, row) }));
+  const behindHeld = ({ target }) => isGuarded(target) && behindHeldOlder(held, target);
+  const chosen = targets.find((pick) => !behindHeld(pick));
+  if (!chosen) return null;
+  const guardSkipped = targets.slice(0, targets.indexOf(chosen)).filter(behindHeld).length;
+  const { row, target } = chosen;
+  return { ...target, guardSkipped, offered: offered.length, promotedFrom: target === row ? null : row.id };
+}
+
+const isGuarded = (row) => row.tier > 0 && Boolean(row.channel_route_id);
+
+// The row a pick stands for: the oldest offered tier 1-2 row of its route and conversation. `offered`
+// is in (created_at, id) order and holds `row` itself, so the first match is never missing.
+function threadHead(offered, row) {
+  if (!isGuarded(row)) return row;
+  const sameThread = (other) => other.channel_route_id === row.channel_route_id && other.conversation_id === row.conversation_id;
+  return offered.find((other) => other === row || (sameThread(other) && canLead(other)));
+}
+
+// An unsent abort is never promoted: a post that keeps aborting must not hold its thread (2026-09-22 rule).
+function canLead(other) {
+  return other.tier > 0 && other.kind !== 'unsent';
+}
+
+// `tier` picks among many deliveries; a targeted claim names one. Absent means every tier.
+function tierFilter(payload, deliveryId) {
+  const tier = payload && payload.tier;
+  if (tier === undefined) return undefined;
+  if (![0, 1, 2].includes(tier)) {
+    throw new TightbeamError('malformed_request', 'tier must be the integer 0, 1 or 2 when present', { field: 'tier' });
+  }
+  if (deliveryId) throw new TightbeamError('malformed_request', 'tier cannot be combined with delivery_id', { field: 'tier' });
+  return tier;
 }
 
 export const deliveryClaimOp = {
@@ -154,6 +253,7 @@ export const deliveryClaimOp = {
     if (acceptReplyBinding !== undefined && typeof acceptReplyBinding !== 'boolean') {
       throw new TightbeamError('malformed_request', 'accept_reply_binding must be a boolean when present', { field: 'accept_reply_binding' });
     }
+    const tier = tierFilter(payload, deliveryId);
     const leaseMs = resolveLeaseMs(payload.lease_ms);
     const now = new Date();
 
@@ -174,13 +274,15 @@ export const deliveryClaimOp = {
         // and a retry is offered only after its backoff. Deliveries with an
         // actively-held (unexpired) claim are never candidates, so a held
         // oldest row never turns into claim_held while newer rows wait.
-        const selectedId = selectAutoClaimDelivery(context, {
+        const selected = selectAutoClaimDelivery(context, {
           appId: connection.appId,
           endpointId: endpointId ?? null,
           channelRouteId: channelRouteId ?? null,
+          tier,
           now,
         });
-        delivery = selectedId ? selectDeliveryProjection(context.db, { deliveryId: selectedId, channelRouteId }) : null;
+        delivery = selected ? selectDeliveryProjection(context.db, { deliveryId: selected.id, channelRouteId }) : null;
+        logSelection(context, { tier, selected });
         // No pending delivery matches the caller's scope right now. Not
         // covered by a dedicated structured error in docs/protocol.md's
         // delivery.claim error list (permission_denied, claim_held only,
@@ -244,6 +346,7 @@ export const deliveryClaimOp = {
         token: claim.token,
         lease_expires_at: claim.leaseExpiresAt,
         message,
+        tier_filter: tier ?? null, // the tier this call applied: a consumer checks it against what it asked
       };
       if (delivery.route_reason !== null) {
         result.route_reason = delivery.route_reason;
@@ -255,7 +358,7 @@ export const deliveryClaimOp = {
     });
 
     if (outcome === null) {
-      throw new TightbeamError('claim_held', 'no pending delivery is currently available to claim');
+      throw new TightbeamError('claim_held', 'no pending delivery is currently available to claim', { tier_filter: tier ?? null });
     }
     return { result: outcome };
   },

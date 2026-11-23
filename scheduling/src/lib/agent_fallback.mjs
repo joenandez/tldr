@@ -1,3 +1,4 @@
+import { codexExecEvent } from "./holdable_failure.mjs";
 import { readIdentity } from "./identity.mjs";
 
 export {
@@ -337,7 +338,7 @@ export function classifyAgentRun(agent, result = {}) {
   let rawErrorClass = result.error ? "process_error" : null;
   let sessionId = null;
 
-  for (const event of events) {
+  for (let event of events) {
     if (agent === "claude") {
       if (!sessionId && event.session_id) sessionId = event.session_id;
       if (claudeSawToolCall(event)) sawModelToolCall = true;
@@ -364,6 +365,7 @@ export function classifyAgentRun(agent, result = {}) {
         failureSummary = summarizeError(event.result || event.error || event);
       }
     } else if (agent === "codex") {
+      event = codexExecEvent(event);
       if (!sessionId && event.thread_id) sessionId = event.thread_id;
       if (codexSawToolCall(event)) sawModelToolCall = true;
       if (event.type === "error" || event.type === "turn.failed") {

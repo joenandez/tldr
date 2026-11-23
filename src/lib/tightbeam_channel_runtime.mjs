@@ -5,6 +5,7 @@ import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { writeTextAtomic } from "./durable_file_io.mjs";
+import { execInGroup } from "./exec_in_group.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -222,6 +223,12 @@ export function defaultIdentityStore(home) {
 
 // commandPrefix carries the Tightbeam entrypoint when command is the
 // already-verified runtime node rather than the libexec/tightbeam launcher.
+// killGroup (with timeoutMs): the call runs as its own process group and the timeout kills the
+// whole group, so a hung CLI and the processes it started die together and the call returns at the
+// timeout, not when an orphan lets go of the pipe. Plain timeoutMs kills only the direct child.
+// inheritGroup (with timeoutMs): the call stays in the caller's process group, so the process that
+// kills the caller's group (the daemon, for the warm notice child) ends the call with it; a timeout
+// kills the CLI itself and returns at once (exec_in_group.mjs).
 export async function productionRun({
   command,
   commandPrefix = [],
@@ -229,29 +236,36 @@ export async function productionRun({
   credentials,
   args,
   timeoutMs,
+  killGroup = false,
+  inheritGroup = false,
 }) {
   const commandArgs = ["--json"];
   if (admin) commandArgs.unshift("--admin");
   if (credentials) commandArgs.unshift("--app-id", credentials.app_id);
   commandArgs.push(...args);
+  const grouped = (killGroup || inheritGroup) && timeoutMs > 0;
   try {
-    const { stdout } = await execFileAsync(
-      command,
-      [...commandPrefix, ...commandArgs],
-      {
-        encoding: "utf8",
-        maxBuffer: 64 * 1024,
-        // a timeout kills the child and falls to the generic failure below
-        timeout: timeoutMs,
-        env: {
-          PATH: process.env.PATH,
-          HOME: process.env.HOME,
-          TLDR_AGENT_HOME: process.env.TLDR_AGENT_HOME,
-          TIGHTBEAM_STATE_ROOT: process.env.TIGHTBEAM_STATE_ROOT,
-          TIGHTBEAM_APP_SECRET: credentials?.app_secret,
-        },
+    const options = {
+      env: {
+        PATH: process.env.PATH,
+        HOME: process.env.HOME,
+        TLDR_AGENT_HOME: process.env.TLDR_AGENT_HOME,
+        TIGHTBEAM_STATE_ROOT: process.env.TIGHTBEAM_STATE_ROOT,
+        TIGHTBEAM_APP_SECRET: credentials?.app_secret,
       },
-    );
+      timeoutMs,
+      detached: !inheritGroup,
+    };
+    const argv = [...commandPrefix, ...commandArgs];
+    const { stdout } = grouped
+      ? await execInGroup(command, argv, options)
+      : await execFileAsync(command, argv, {
+          encoding: "utf8",
+          maxBuffer: 64 * 1024,
+          // a timeout kills the child and falls to the generic failure below
+          timeout: timeoutMs,
+          env: options.env,
+        });
     return JSON.parse(stdout);
   } catch (error) {
     const output = `${error?.stderr ?? ""}\n${error?.stdout ?? ""}`;

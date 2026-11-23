@@ -1,11 +1,11 @@
 {
   "schema_version": 1,
-  "release": "0.3.0-rc.3",
+  "release": "0.3.0-rc.4",
   "product": "tldr-agents",
   "plugin_manifest": {
     "path": ".claude-plugin/plugin.json",
     "bytes": 680,
-    "sha256": "2075f85ae772a4c3a4d81332d7a33f92cb57d1b6fc8062b018e695a24aad53a4"
+    "sha256": "4298c82734f7612c645d779e6568f986fff79c8de28e145c6764a584376eab5d"
   },
   "node_license": {
     "path": "release/licenses/node-LICENSE",
@@ -21,13 +21,13 @@
       },
       "tldr_agent": {
         "path": "release/payloads/arm64/tldr-agent.tar.gz",
-        "bytes": 1691841,
-        "sha256": "3f1ebbb3767f00823fd9f211c34f068eb597b4a7d0cc0e09d449eb2fde04cc2b"
+        "bytes": 1769835,
+        "sha256": "9b0bb7f85f927d69314fed32aaf88f3c3fe7306a49076b8369d246a252588f4f"
       },
       "aegis": {
         "path": "release/payloads/arm64/TldrAgentAegis.pkg",
-        "bytes": 316410,
-        "sha256": "273d19a2b1739474a9e23da030080ee899c6478786b59ed9c11f63b96efa1923"
+        "bytes": 318021,
+        "sha256": "8b5dd3b053f9915eb6116a1823296b2631cc6fdcf29c4140e4b4c2e0ca08653c"
       }
     }
   }

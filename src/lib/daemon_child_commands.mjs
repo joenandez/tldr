@@ -178,12 +178,14 @@ export function runInboxPollChild({
   });
 }
 
+// answerOnly: the answer email lane's drain, tier 1 claims only (ac-jfv.74.1).
 export function runOutboundDrainChild({
   schedulerScriptPath,
   scope,
   daemonInstanceId,
   signal,
   timeoutMs,
+  answerOnly = false,
 } = {}) {
   return runHelmTasksJsonChild({
     schedulerScriptPath,
@@ -191,7 +193,11 @@ export function runOutboundDrainChild({
     daemonInstanceId,
     signal,
     timeoutMs,
-    args: ["__tldr-agent-channel-poll", "--mode", "outbound"],
+    args: [
+      "__tldr-agent-channel-poll",
+      "--mode",
+      answerOnly ? "answer" : "outbound",
+    ],
     // The runner reads its own deadline from env; merged over process.env.
     env: { HELM_DAEMON_OUTBOUND_TIMEOUT_MS: String(timeoutMs) },
   });

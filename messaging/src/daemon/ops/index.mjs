@@ -22,6 +22,7 @@ import { endpointListOp } from './endpoint_list.mjs';
 import { threadListOp } from './thread_list.mjs';
 import { threadHistoryOp } from './thread_history.mjs';
 import { channelRouteImpactOp, channelRouteListOp, channelRouteRegisterOp, channelRouteRetireOp } from './channel_route.mjs';
+import { recoveryMirrorRepliesOp } from './channel_reply_mirror.mjs';
 import { conversationCreateOp } from './conversation_create.mjs';
 import { conversationCloseOp } from './conversation_close.mjs';
 import { messageCommitOp } from './message_commit.mjs';
@@ -43,6 +44,7 @@ import { deliveryReleaseOp } from './delivery_release.mjs';
 import { inboxSubscribeOp } from './inbox_subscribe.mjs';
 import { hostSubscribeOp } from './host_subscribe.mjs';
 import { hostWakeResultOp } from './host_wake_result.mjs';
+import { hostMessageLookupOp } from './host_message_lookup.mjs';
 import { resumeListOp } from './resume_list.mjs';
 import { resumeClaimOp } from './resume_claim.mjs';
 import { resumeAssertActiveOp } from './resume_assert_active.mjs';
@@ -151,6 +153,7 @@ export function buildOpTable() {
   registerOp(table, recoveryRetryOp);
   registerOp(table, recoverySwitchOp);
   registerOp(table, recoveryTransferOp);
+  registerOp(table, recoveryMirrorRepliesOp);
   // The idempotent Stop decision (transitions.yaml STOP-REQUEST): engine-
   // owned block-or-allow behind a thin wrapper, agent scope gated on the
   // endpoint-administration grant the Stop actor's identity already rests on.
@@ -172,6 +175,7 @@ export function buildOpTable() {
   registerOp(table, inboxSubscribeOp);
   registerOp(table, hostSubscribeOp);
   registerOp(table, hostWakeResultOp);
+  registerOp(table, hostMessageLookupOp);
   registerOp(table, resumeListOp);
   registerOp(table, resumeClaimOp);
   registerOp(table, resumeAssertActiveOp);

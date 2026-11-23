@@ -1,4 +1,5 @@
 import {
+  tldrAgentEmailAnswerTimeout,
   tldrAgentOutboundTimeout,
   tldrAgentParentPhaseTimeout,
   tldrAgentPhaseTimeout,
@@ -79,7 +80,8 @@ export async function runDaemonMailSequence({
 }
 
 // The outbound lane: one drain child on its own timeout. It writes no poll
-// health, so an outbound result never stamps last_successful_poll_at.
+// health, so an outbound result never stamps last_successful_poll_at. answerOnly
+// is the answer email lane's drain (tier 1, ac-jfv.74.1): its own phase and short timeout.
 export async function runDaemonOutboundSequence({
   runPhase,
   scopes,
@@ -94,15 +96,19 @@ export async function runDaemonOutboundSequence({
   runOutboundDrain,
   pollOnly,
   readTldrAgentPollConfig,
+  answerOnly = false,
 }) {
-  const childTimeout = tldrAgentOutboundTimeout({ outboundTimeoutMs });
-  const parentTimeout = tldrAgentParentPhaseTimeout("outbound_drain", {
+  const phase = answerOnly ? "outbound_answer" : "outbound_drain";
+  const childTimeout = answerOnly
+    ? tldrAgentEmailAnswerTimeout()
+    : tldrAgentOutboundTimeout({ outboundTimeoutMs });
+  const parentTimeout = tldrAgentParentPhaseTimeout(phase, {
     phaseTimeoutMs: childTimeout,
   });
   const startedMs = nowMs();
   const phaseResults = [
     await runPhase(
-      "outbound_drain",
+      phase,
       ({ signal }) =>
         runOutboundDrainChildPhase({
           scopes,
@@ -117,6 +123,7 @@ export async function runDaemonOutboundSequence({
           runOutboundDrain,
           pollOnly,
           readTldrAgentPollConfig,
+          answerOnly,
         }),
       parentTimeout,
     ),
@@ -124,6 +131,6 @@ export async function runDaemonOutboundSequence({
   return {
     durationMs: Math.max(0, nowMs() - startedMs),
     phaseResults,
-    phaseTimeouts: { outbound_drain: parentTimeout },
+    phaseTimeouts: { [phase]: parentTimeout },
   };
 }

@@ -220,12 +220,23 @@ export function assertObservedDead(
   }
 }
 
+// A busy row replays only a token-bearing registration from a different
+// process: a delayed registration of an earlier relaunch must not fall through
+// to the different-owner restamp and replace the live owner. Anything else on
+// a busy row takes the ordinary path, as before.
+function staleRelaunchRegistration(endpoint, launchToken, ownerProcess) {
+  if (launchToken === null || ownerProcess === null) return false;
+  return ownerProcess.pid !== endpoint.owner_process_pid || ownerProcess.start_identity !== endpoint.owner_process_start_identity;
+}
+
 export function availabilityTakeoverReplay(
   db,
-  { endpoint, providerSessionId, launchToken },
+  { endpoint, providerSessionId, launchToken, ownerProcess = null },
 ) {
-  if (endpoint.state !== "idle" || launchToken !== endpoint.owner_launch_token)
-    return null;
+  const replayable =
+    endpoint.state === "idle" ||
+    (endpoint.state === "busy" && staleRelaunchRegistration(endpoint, launchToken, ownerProcess));
+  if (!replayable || launchToken !== endpoint.owner_launch_token) return null;
   return db
     .prepare(
       `SELECT r.id
@@ -252,4 +263,35 @@ export function availabilityTakeoverReplay(
       endpoint.process_generation,
       providerSessionId,
     );
+}
+
+// A takeover relaunch registers with the decided token, which the replay above
+// answers without the different-owner restamp. When the recorded owner is
+// already known gone (a killed earlier relaunch), the row would keep that dead
+// owner and its exit proof, so this launch's busy mark is never watched and is
+// stranded if it dies (jfv146). Restamp the registrant as owner and clear the
+// proof; generation, epoch, token, launch mode and state are untouched, so the
+// takeover predicates and the exact receipt still hold. Claude only: a Codex
+// owner capture can resolve to another TUI on a shared app-server (F34). A
+// recorded-exited owner cannot be stolen from.
+export function restampExitedOwnerOnTakeoverReplay(context, { existing, ownerProcess, canonicalize, now }) {
+  if (existing.state !== "idle" || ownerProcess === null || canonicalize(existing.runtime) !== "claude-code" || existing.owner_process_exited_at === null) return;
+  const old = [existing.owner_process_pid, existing.owner_process_start_identity, existing.owner_process_group_id, existing.owner_process_capture_source];
+  const next = [ownerProcess.pid, ownerProcess.start_identity, ownerProcess.process_group_id, ownerProcess.capture_source];
+  if (old.every((value, index) => value === next[index])) return;
+  const restamped = context.db.prepare(
+    `UPDATE endpoints
+        SET owner_process_pid = ?, owner_process_start_identity = ?, owner_process_group_id = ?, owner_process_capture_source = ?,
+            owner_process_generation = process_generation, owner_process_exited_at = NULL, updated_at = ?
+      WHERE id = ? AND state = 'idle' AND process_generation = ? AND owner_epoch = ? AND owner_launch_token IS ?
+        AND owner_process_pid IS ? AND owner_process_start_identity IS ? AND owner_process_group_id IS ? AND owner_process_capture_source IS ?
+        AND owner_process_exited_at IS NOT NULL`,
+  ).run(...next, now, existing.id, existing.process_generation, existing.owner_epoch, existing.owner_launch_token, ...old).changes === 1;
+  context.logger?.info({
+    event: "endpoint_owner_process_restamped",
+    endpoint_id: existing.id,
+    params: { reason: "takeover_replay_owner_exited", prior_state: existing.state, process_generation: existing.process_generation, headless_daemon_launch: true },
+    result: restamped ? "restamped" : "row_moved",
+    status: "ok",
+  });
 }

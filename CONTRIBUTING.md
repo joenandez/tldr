@@ -40,3 +40,25 @@ test lists live in `scheduling/tests/suites.json`. The unified runner
 the packed lane, then each component lane with its skip baseline and receipts.
 For Helm-specific contributor guidance, see
 [scheduling/CONTRIBUTING.md](scheduling/CONTRIBUTING.md).
+
+## Wake gate (required merge check)
+
+`npm run gate:p0` proves that a message still wakes an agent. It launches Codex
+and Claude through the shipped daemon, resumer, run host and CLI, judges every
+launch argv with the real `codex`/`claude` binaries, and runs the Academy-wrapped
+rows through real Academy. Only the model is stubbed.
+
+- Run it before you open or update a PR and paste its summary table in the PR.
+- `npm run quality:push` (the pre-push hook) runs it on every push, with no path
+  filter: an Academy or CLI change can break a wake with no diff here.
+- Hosted CI is paused and GitHub branch protection is unavailable on this plan,
+  so the pre-push hook is the enforcement. `git push --no-verify` is not allowed
+  for a PR that merges.
+- Needs real `codex`, `claude` and `academy`. Override with `TLDR_GATE_CODEX_BIN`,
+  `TLDR_GATE_CLAUDE_BIN` (non-script binaries) and `TLDR_GATE_ACADEMY_BIN`. A
+  missing binary fails the gate; `TLDR_GATE_ALLOW_MISSING_RUNTIME=1` prints
+  `SKIPPED` rows instead and is not a pass.
+- A failed row prints the child's `stderr_tail` from the world's `daemon.log`.
+- On a starved host `TLDR_GATE_WAKE_BOUND_MS` widens the 25 s `read_at` bound (the
+  summary prints the bound used). P0-5 (hosted Codex queue) needs `lsof` to answer
+  within the daemon's 10 s probe timeout; the preflight prints how long `lsof` took.

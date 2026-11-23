@@ -66,6 +66,7 @@ function placed({ rows, placeholders }, id, found) {
       endpoint_id: id,
       state: endpoint.state,
       state_since: Number.isFinite(updated) ? updated : null,
+      owner_process_exited_at: endpoint.owner_process_exited_at ?? null,
     });
   }
   return placeholders.set(id, endpoint.state ?? "unknown");

@@ -62,7 +62,7 @@ export function commandBaseName(command) {
 /** The process's full argument line, or null when ps cannot print it. */
 export function readProcessArgs(pid, execFileSync = runFile) {
   try {
-    const raw = execFileSync('ps', ['-o', 'args=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: psEnvironment() });
+    const raw = execFileSync('ps', ['-ww', '-o', 'args=', '-p', String(pid)], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: psEnvironment() });
     const line = String(raw).split('\n').find((text) => text.trim().length > 0);
     return line === undefined ? null : line.trim();
   } catch {
@@ -213,6 +213,45 @@ function sameDirectory(a, b) {
   return real(a) === real(b);
 }
 
+const RUN_HOST_ANCESTOR_MAX_HOPS = 8;
+
+/** The session a codex run host was launched for: `undefined` when it names none (a fresh spawn), null when it is not a codex run host. */
+function codexRunHostSession(args) {
+  const tokens = argTokens(args);
+  const script = tokens.findIndex((token) => /(^|\/)run_host\.mjs$/.test(token));
+  const separator = tokens.indexOf('--');
+  const flags = script === -1 ? [] : tokens.slice(script + 1, separator === -1 ? undefined : separator);
+  const value = (name) => (flags.includes(name) ? flags[flags.indexOf(name) + 1] : undefined);
+  if (script === -1 || value('--runtime') !== 'codex') return null;
+  return (value('--resume') ?? value('--session'))?.toLowerCase();
+}
+
+const observeOrNull = (pid, execFileSync) => {
+  try {
+    return observeProcessRow(pid, execFileSync);
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * never-wait Part 5: the run host spawns its OWN `codex app-server`, so the
+ * host (alive exactly as long as the run) owns the session. Proven by
+ * observation: the app-server's ancestry reaches a process whose arguments are
+ * a codex run host for this very session (or for none yet, the spawn route).
+ * A shared app-server is never started under a run host, so it never matches.
+ */
+function findRunHost(appServerPid, wanted, execFileSync) {
+  let row = observeOrNull(appServerPid, execFileSync);
+  for (let hop = 0; hop < RUN_HOST_ANCESTOR_MAX_HOPS && row !== null && row.ppid > 1; hop += 1) {
+    row = observeOrNull(row.ppid, execFileSync);
+    const args = row && readProcessArgs(row.pid, execFileSync);
+    const hosted = args ? codexRunHostSession(args) : null;
+    if (hosted === undefined || (hosted && hosted === wanted)) return row;
+  }
+  return null;
+}
+
 /**
  * The TUI that owns `sessionId`, among the clients of the managed
  * app-server `appServerPid`. Returns `{ owner, signal, ...}` for a proven
@@ -222,6 +261,9 @@ function sameDirectory(a, b) {
  */
 export function resolveAppServerClientOwner({ appServerPid, sessionId, cwd, captureSource, execFileSync = runFile }) {
   const unresolved = (reason, extra = {}) => ({ owner: null, reason, app_server_pid: appServerPid, ...extra });
+
+  const runHost = findRunHost(appServerPid, typeof sessionId === 'string' ? sessionId.toLowerCase() : null, execFileSync);
+  if (runHost !== null) return provenOwner(runHost, 'run_host_app_server', appServerPid, captureSource, { run_host_pid: runHost.pid });
 
   const clientPids = findAppServerClients(appServerPid, execFileSync);
   if (clientPids === null) return unresolved('client_discovery_failed');

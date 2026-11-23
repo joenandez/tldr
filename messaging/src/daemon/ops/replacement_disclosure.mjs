@@ -100,7 +100,7 @@ export function discloseReplacement(db, { appId, replacementRequestId, replaceme
       hash: payloadHash({ conversation_id: conversationId, body, obligation_effect: declaration }),
       origin: 'agent',
     });
-    insertEffectRow(db, { messageId, effect: declaration, obligationId: null, obligationGeneration: null, now: new Date().toISOString() });
+    insertEffectRow(db, { messageId, effect: declaration, obligationId: null, obligationGeneration: null, notice: 'replacement', now: new Date().toISOString() });
     const liveDeliveries = [];
     const presentations = [];
     for (const recipientEndpointId of counterpartEndpointIds(db, { appId, root, lineageIds })) {

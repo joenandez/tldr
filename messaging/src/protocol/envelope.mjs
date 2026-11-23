@@ -44,6 +44,8 @@ export const LISTENER_V1 = 'listener.v1';
 export const MESSAGING_REPLY_CAUSALITY_V1 = 'messaging.reply-causality.v1';
 export const MESSAGING_RECEIPT_V1 = 'messaging.receipt.v1';
 export const SESSION_HOSTS_V1 = 'session_hosts.v1';
+// host.message.lookup: a host reads its sessions' messages by id, read-only.
+export const SESSION_HOSTS_MESSAGE_LOOKUP_V1 = 'session_hosts.message_lookup.v1';
 export const RESUME_ASSERT_ACTIVE_V1 = 'resume.assert-active.v1';
 // The daemon captures a package-bound Copilot owner with its Academy permission
 // mode and wakes an exited owner only by exact managed resume under that mode.
@@ -79,6 +81,7 @@ export const BASELINE_CAPABILITIES = Object.freeze([
   MESSAGING_REPLY_CAUSALITY_V1,
   MESSAGING_RECEIPT_V1,
   SESSION_HOSTS_V1,
+  SESSION_HOSTS_MESSAGE_LOOKUP_V1,
   RESUME_ASSERT_ACTIVE_V1,
   RESUME_COPILOT_WAKE_V1,
   MESSAGING_SENDER_CWD,

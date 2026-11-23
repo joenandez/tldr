@@ -229,6 +229,7 @@ function noticeAgent(context, wake, work) {
     effect: declaration,
     obligationId: null,
     obligationGeneration: null,
+    notice: "scheduled_wake",
     now: new Date().toISOString(),
   });
   return createDeliveriesForRecipients(db, {

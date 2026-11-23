@@ -11,6 +11,7 @@ import { createHash } from 'node:crypto';
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { generateId } from '../../protocol/ids.mjs';
 import { isSafeSessionId, sessionPaths } from '../../protocol/session_paths.mjs';
+import { signalUserRouteDelivery } from '../../protocol/user_route_signal.mjs';
 import { ROUTE_ADMITTED_ROLE, isUniqueConstraintError } from './authority_scope.mjs';
 import { REPLY_BINDING_POLICY } from '../reply_listener_policy.mjs';
 import { activeListenerForEndpoint, createPendingPresentation, logListenerPresentationSkipped } from './listener_operations.mjs';
@@ -280,7 +281,7 @@ export function routeDelivery({ endpointState, launchMode = null, hasExactListen
 // Cases 1 and 2 both produce a resume request and are distinguished only
 // by this column, matching Helm's distinct resumed_pid_dead /
 // resume_alive_idle decisions.
-const RESUME_REASON_BY_ROUTE = { resume_dead: 'endpoint_dead', resume_idle: 'endpoint_idle' };
+export const RESUME_REASON_BY_ROUTE = { resume_dead: 'endpoint_dead', resume_idle: 'endpoint_idle' };
 
 /**
  * Refreshes the legacy per-session inbox watermark
@@ -364,7 +365,9 @@ export function refreshWatermarkForAdoptedSession(db, { stateRoot, endpointId, s
 export const DEFAULT_RESUME_STALE_AFTER_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
 export const DEFAULT_RESUME_STALE_AFTER_MS = DEFAULT_RESUME_STALE_AFTER_DAYS * DAY_MS;
-
+// 74.2: item 44 eligibility of unread `d` (one `?`: staleBefore), shared with the resumer's successor materialization and the owner-gone resume (read only inside functions: import cycle).
+export const ELIGIBLE_SUCCESSOR_DELIVERY_SQL = `d.state != 'failed' AND d.read_at IS NULL AND d.created_at >= ? AND NOT EXISTS (SELECT 1 FROM resume_requests prior WHERE prior.message_id = d.message_id)
+  AND NOT EXISTS (SELECT 1 FROM deliveries handled WHERE handled.message_id = d.message_id AND handled.id != d.id AND handled.read_at IS NOT NULL)`;
 /**
  * `TIGHTBEAM_RESUME_STALE_AFTER_DAYS` is a window parameter, like
  * TIGHTBEAM_RESUME_LEASE_MS, not a mode: a positive integer number of days.
@@ -972,6 +975,7 @@ export function createDeliveriesForChannelRoutes(db, {
       );
     }
   }
+  if (liveDeliveries.length > 0) signalUserRouteDelivery(db); // the urgent lane polls this file's mtime
   return { liveDeliveries };
 }
 
@@ -1080,7 +1084,7 @@ export function insertMessage(db, { conversationId, appId, senderPrincipalId, ki
  * idempotent replay vs. collision by comparing payload_hash. Never a
  * pre-check-then-insert race: the insert is always attempted first.
  */
-export function withIdempotency(db, { appId, idempotencyKey, hash }, writeFn) {
+export function withIdempotency(db, { appId, idempotencyKey, hash, accepted = [hash] }, writeFn) {
   try {
     return { ...writeFn(), idempotent_replay: false };
   } catch (err) {
@@ -1088,7 +1092,7 @@ export function withIdempotency(db, { appId, idempotencyKey, hash }, writeFn) {
     const existing = db
       .prepare('SELECT id, conversation_id, payload_hash FROM messages WHERE app_id = ? AND idempotency_key = ?')
       .get(appId, idempotencyKey);
-    if (existing && existing.payload_hash === hash) {
+    if (existing && accepted.includes(existing.payload_hash)) {
       return { message_id: existing.id, conversation_id: existing.conversation_id, idempotent_replay: true };
     }
     throw new TightbeamError('idempotency_collision', `idempotency_key "${idempotencyKey}" was already used with a different payload`, {

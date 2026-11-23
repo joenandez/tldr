@@ -31,11 +31,12 @@ export const BUILTIN_RUNTIMES = Object.freeze({
     origin: 'builtin',
     resumeStrategy: 'daemon',
     command: 'claude',
-    // The resume vector ends without a positional prompt, so `-p` reads
-    // the brief from stdin; the spawn vector carries it as the last
-    // argument. Both are the source's shape, not a choice made here.
-    resumeArgsTemplate: Object.freeze(['--resume', '{sessionId}', '--dangerously-skip-permissions', '-p', '--verbose', '--output-format', 'stream-json']),
-    spawnArgsTemplate: Object.freeze(['-p', '--verbose', '--output-format', 'stream-json', '--dangerously-skip-permissions', '{prompt}']),
+    // Neither vector carries a positional prompt: the resumer runs Claude
+    // under the run host (cli/run_host.mjs), which writes the brief as
+    // a stream-json user line and keeps stdin open for later prompts. A
+    // spawn names the session id the resumer mints for it.
+    resumeArgsTemplate: Object.freeze(['--resume', '{sessionId}', '--dangerously-skip-permissions', '-p', '--verbose', '--output-format', 'stream-json', '--input-format', 'stream-json']),
+    spawnArgsTemplate: Object.freeze(['-p', '--verbose', '--output-format', 'stream-json', '--input-format', 'stream-json', '--dangerously-skip-permissions', '--session-id', '{sessionId}']),
     identity: Object.freeze({
       sessionEnvVars: Object.freeze(['CLAUDE_SESSION_ID', 'CLAUDE_CODE_SESSION_ID']),
       envMarkers: Object.freeze(['CLAUDECODE', 'CLAUDE_CODE_SESSION_ID', 'CLAUDE_SESSION_ID']),
@@ -52,10 +53,12 @@ export const BUILTIN_RUNTIMES = Object.freeze({
     origin: 'builtin',
     resumeStrategy: 'daemon',
     command: 'codex',
-    // The resume vector's trailing `-` is codex's "read the prompt from
-    // stdin"; the spawn vector carries it as the last argument.
-    resumeArgsTemplate: Object.freeze(['exec', '--json', 'resume', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '{sessionId}', '-']),
-    spawnArgsTemplate: Object.freeze(['--ask-for-approval', 'never', 'exec', '--json', '--skip-git-repo-check', '--dangerously-bypass-approvals-and-sandbox', '{prompt}']),
+    // The resumer runs Codex under the run host (cli/run_host.mjs),
+    // which drives `codex app-server` over JSON-RPC: the thread to resume
+    // and the launch policy are run host flags, and the brief arrives on
+    // stdin, so neither vector carries a slot.
+    resumeArgsTemplate: Object.freeze(['app-server']),
+    spawnArgsTemplate: Object.freeze(['app-server']),
     // F34: a thread the managed app-server hosts (its TUI exited or died; the
     // app-server keeps the writer lock) cannot be resumed by a second `codex
     // exec`. `codex queue` hands the brief to that app-server instead, which

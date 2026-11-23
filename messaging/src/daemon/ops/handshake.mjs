@@ -4,7 +4,7 @@
 // nonce) and binds the connection's scope/app_id for its lifetime.
 
 import { TightbeamError, BASELINE_CAPABILITIES } from '../../protocol/envelope.mjs';
-import { verifySecret, verifyAndConsumeAdminNonce } from '../auth.mjs';
+import { verifySecretCached, verifyAndConsumeAdminNonce } from '../auth.mjs';
 import { pendingReplyGuard } from '../agent_wait_context.mjs';
 
 // F2: exported so registry.mjs's dispatch() can re-read this connection's
@@ -75,7 +75,7 @@ function handleAppCredential(context, payload, connection, envelope) {
   const row = context.db.prepare('SELECT id, secret_hash, status FROM applications WHERE id = ?').get(appId);
   // Unknown app_id and a bad secret return the same error so a caller
   // cannot use handshake to probe which app_ids exist.
-  if (!row || row.status !== 'active' || !verifySecret(secret, row.secret_hash)) {
+  if (!row || row.status !== 'active' || !verifySecretCached(secret, row.secret_hash)) {
     throw new TightbeamError('identity_unverified', 'app credential could not be verified');
   }
 

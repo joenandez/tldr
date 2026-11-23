@@ -1,3 +1,4 @@
+import { slackTsToIso } from "./provider_received_at.mjs";
 import {
   hasProcessedEvent,
   lookupChannelAgent,
@@ -50,16 +51,20 @@ const isTopLevel = ({ ts, thread_ts: rootTs }) => !rootTs || rootTs === ts;
 
 function send(channel, route, text) {
   const id = `slack:${route.channelId}:${route.ts}`;
+  const receivedAt = slackTsToIso(route.ts);
+  const arrival = receivedAt ? { provider_received_at: receivedAt } : {};
   if (route.kind === "reply")
     return channel.publishSlackReply({
       reply_binding: route.replyBinding,
       body: text,
       external_event_id: id,
+      ...arrival,
     });
   return channel.commitSlackMessage({
     conversation_id: route.conversationId,
     body: text,
     idempotency_key: id,
+    ...arrival,
     ...(route.targetEndpointId && {
       target_endpoint_id: route.targetEndpointId,
     }),

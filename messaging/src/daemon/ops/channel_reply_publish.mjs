@@ -7,8 +7,10 @@ import { createHash } from 'node:crypto';
 
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
-import { createDeliveriesForChannelRoutes, createDerivedInboundDelivery, insertMessage, newestLineageEndpointId, payloadHash, pushLiveDeliveryEvents, refreshSessionWatermark, validateBody } from './message_shared.mjs';
+import { replayHashes, withoutProviderReceivedAt } from './replay_identity.mjs';
+import { createDerivedInboundDelivery, insertMessage, newestLineageEndpointId, payloadHash, pushLiveDeliveryEvents, refreshSessionWatermark, validateBody } from './message_shared.mjs';
 import { activeListenerForEndpoint, createPendingPresentation, pendingReplyWaitForBinding, publishPresentation } from './listener_operations.mjs';
+import { mirrorToHolderRoutes } from './channel_reply_mirror.mjs';
 import { replyContinuityDiagnostic } from '../reply_continuity_diagnostics.mjs';
 import { applyOpen } from '../lifecycle_transition.mjs';
 
@@ -65,8 +67,14 @@ export function validateBoundReplyRequest(payload) {
     body: payload.body,
     external_event_id: payload.external_event_id,
     provider_metadata: payload.provider_metadata,
-    payload_hash: payloadHash({ body: payload.body, provider_metadata: payload.provider_metadata }),
+    ...replayKeys(payload),
   };
+}
+
+// The stored hash (the current rule) and every hash an older daemon may have stored for the same request.
+function replayKeys({ body, provider_metadata: raw }) {
+  const accepted = replayHashes((provider_metadata) => payloadHash({ body, provider_metadata }), { current: withoutProviderReceivedAt(raw), raw });
+  return { payload_hash: accepted[0], replay_hashes: accepted };
 }
 
 function digestToken(token) {
@@ -118,12 +126,12 @@ function routeToNewestLineage(db, binding) {
   return { ...binding, ...routed };
 }
 
-function findReplay(db, { bindingId, externalEventId, payloadHashValue }) {
+function findReplay(db, { bindingId, externalEventId, replayHashValues }) {
   const row = db
     .prepare('SELECT payload_hash, result_payload FROM reply_binding_events WHERE binding_id = ? AND external_event_id = ?')
     .get(bindingId, externalEventId);
   if (!row) return null;
-  if (row.payload_hash !== payloadHashValue) {
+  if (!replayHashValues.includes(row.payload_hash)) {
     throw new TightbeamError('idempotency_collision', `external_event_id "${externalEventId}" was already used with a different payload`, {
       field: 'external_event_id',
     });
@@ -181,31 +189,6 @@ function openRequestHolder(db, conversationId) {
   ).get(conversationId) ?? null;
 }
 
-// Mirror the user's reply into the Subspace inbox thread. No reply target and no
-// route reason: the mirror creates no reply binding, obligation, or ack.
-// shortcut: mirror target is the 'subspace' selector by name; upgrade to a route capability when another app needs user-message mirroring.
-function mirrorToSubspaceRoutes(db, { binding, messageId, conversationId }) {
-  const routes = db
-    .prepare(
-      `SELECT r.id, r.app_id, r.principal_id, r.endpoint_id, r.capabilities, e.state AS endpoint_state
-         FROM channel_routes r
-         JOIN applications a ON a.id = r.app_id
-         JOIN endpoints e ON e.id = r.endpoint_id
-        WHERE r.state = 'active' AND r.selector = 'subspace' AND r.id <> ?
-          AND a.status = 'active' AND e.state IN ('idle', 'busy')`,
-    )
-    .all(binding.channel_route_id)
-    .filter((route) => {
-      try {
-        return JSON.parse(route.capabilities).includes('send');
-      } catch {
-        return false;
-      }
-    });
-  if (routes.length > 0) createDeliveriesForChannelRoutes(db, { conversationId, messageId, routes });
-  return routes.length;
-}
-
 export const channelReplyPublishOp = {
   name: 'channel.reply.publish',
   allowedScopes: ['agent'],
@@ -219,7 +202,7 @@ export const channelReplyPublishOp = {
       const replay = findReplay(context.db, {
         bindingId: binding.id,
         externalEventId: request.external_event_id,
-        payloadHashValue: request.payload_hash,
+        replayHashValues: request.replay_hashes,
       });
       if (replay) {
         return { result: { ...replay, idempotent_replay: true }, presentation: null, live: false };
@@ -309,7 +292,7 @@ export const channelReplyPublishOp = {
         deliveryId: delivery.delivery_id,
         logger: context.logger,
       });
-      const mirrorCount = mirrorToSubspaceRoutes(context.db, { binding, messageId, conversationId: binding.conversation_id });
+      const mirrorCount = mirrorToHolderRoutes(context.db, { binding, messageId, conversationId: binding.conversation_id });
       const result = {
         message_id: messageId,
         conversation_id: binding.conversation_id,

@@ -246,8 +246,7 @@ export const emailTransport = {
         rejected: true,
         reason: "broker_authorization_required",
       };
-    const messageId = payload.messageId;
-    const threadId = payload.threadId;
+    const { messageId, threadId } = payload;
     const body = selectInboundEmailBody(payload).latestReplyBody;
     const usable = typeof body === "string" && body.trim().length > 0;
     const count = attachments(payload);
@@ -297,6 +296,7 @@ export const emailTransport = {
       binding,
       provider_message_id: messageId,
       provider_thread_id: threadId,
+      provider_received_at: payload.timestamp,
       body,
     });
     return published?.ok === true

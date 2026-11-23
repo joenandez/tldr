@@ -89,6 +89,7 @@
 import { applyMigrations, listAppliedMigrations } from './migrations.mjs';
 import { reconcileTachyonArmingFromAudit } from './tachyon_arming.mjs';
 import { applyScheduledWakesMigration } from './scheduled_wakes.mjs';
+import { ensurePerformanceIndexes } from './performance_indexes.mjs';
 
 export const SCHEMA_VERSION = 30;
 
@@ -1608,7 +1609,7 @@ export const MIGRATIONS = [
  * closed with migration_incompatible.
  */
 export function openSchema(db) {
-  return applyMigrations(db, MIGRATIONS);
+  return ensurePerformanceIndexes(db, applyMigrations(db, MIGRATIONS));
 }
 
 /**

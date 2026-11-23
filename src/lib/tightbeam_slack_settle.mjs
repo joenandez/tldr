@@ -1,4 +1,10 @@
 import { SlackApiError, abortError } from "./slack_api.mjs";
+import { writeBackoff } from "./slack_delivery_claim.mjs";
+import {
+  TIER_ECHO_BACKOFF_MS,
+  echoesTier,
+  tierEchoWarning,
+} from "./tier_echo.mjs";
 
 // The delivery.release outcome tightbeam excludes from attempt counting and backoff.
 export const UNSENT_OUTCOME = "aborted_unsent";
@@ -16,7 +22,13 @@ export function failureOutcome(ctx, error) {
 // Returns null on success, else a failure result (logged, never thrown).
 async function settle({ ctx, claim, call, event, extra }) {
   const { delivery_id, token } = claim;
-  const result = await ctx.channel[call]({ delivery_id, token, ...extra });
+  // The user-route lanes bound their settle call shorter than the normal 30 s (ac-jfv.74.1).
+  const result = await ctx.channel[call]({
+    delivery_id,
+    token,
+    ...extra,
+    ...(ctx.settleMs ? { timeoutMs: ctx.settleMs } : {}),
+  });
   if (result?.ok === true) return null;
   ctx.logger({
     event,
@@ -24,7 +36,13 @@ async function settle({ ctx, claim, call, event, extra }) {
     params: { delivery_id },
     result: { code: result?.code ?? null },
   });
-  return { ok: false, delivery_id, error: result?.code ?? event };
+  // held_until: the claim stays leased until then (retry_wake), however the settle call ended.
+  return {
+    ok: false,
+    delivery_id,
+    error: result?.code ?? event,
+    held_until: claim.lease_expires_at,
+  };
 }
 
 export const complete = (ctx, claim, outcome) =>
@@ -90,4 +108,23 @@ export function beforeWrite(ctx, wait, stillWaiting = () => true) {
       .then(resolve, reject)
       .finally(() => signal.removeEventListener("abort", onAbort));
   });
+}
+
+// The claim did not echo the lane's tier (tier_echo.mjs): nothing was sent, so the release says so
+// (the attempt does not count), the lane's own backoff file holds the next claims for one period,
+// and the warn is logged here only, so once per period rather than per poll.
+export async function releaseUnechoed(ctx, claim) {
+  const bad = await release(ctx, claim, { outcome: UNSENT_OUTCOME });
+  writeBackoff(ctx, TIER_ECHO_BACKOFF_MS);
+  ctx.logger(tierEchoWarning(ctx.tier, claim));
+  return bad ?? { ok: false, code: "tier_filter_not_echoed", released: true };
+}
+
+// The claim, kept only when it echoes the lane's tier; otherwise it is released unsent and the
+// result is the failure the adapter hands back.
+export async function claimEchoed(ctx, claimDelivery) {
+  const claimed = await claimDelivery(ctx);
+  return claimed?.ok === true && !echoesTier(ctx.tier, claimed.claim)
+    ? releaseUnechoed(ctx, claimed.claim)
+    : claimed;
 }

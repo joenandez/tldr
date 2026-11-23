@@ -68,8 +68,13 @@ export const PROVIDER_SPECS = Object.freeze({
       ],
     ),
   },
+  // Config overrides, the one form both `codex app-server` (the hosted
+  // adapter, never-wait 5.2) and `codex exec` (Academy's Codex variant) accept.
   codex: {
-    model: MODEL_FLAG(CODEX_MODELS, "gpt-6.1-sol"),
+    model: freeForm(CODEX_MODELS, "gpt-6.1-sol", (value) => [
+      "-c",
+      `model=${JSON.stringify(value)}`,
+    ]),
     // `minimal` is in no current model's list but stays accepted: 1.3 stored it.
     reasoning_effort: enumerated(
       ["minimal", "low", "medium", "high", "xhigh", "max"],
@@ -79,8 +84,13 @@ export const PROVIDER_SPECS = Object.freeze({
       ["read-only", "workspace-write", "danger-full-access", "yolo"],
       (value) =>
         value === "yolo"
-          ? ["--dangerously-bypass-approvals-and-sandbox"]
-          : ["--sandbox", value],
+          ? [
+              "-c",
+              'approval_policy="never"',
+              "-c",
+              'sandbox_mode="danger-full-access"',
+            ]
+          : ["-c", `sandbox_mode=${JSON.stringify(value)}`],
     ),
   },
   cursor: {},

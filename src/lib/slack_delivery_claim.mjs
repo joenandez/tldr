@@ -1,4 +1,10 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { dirname } from "node:path";
 import { abortError } from "./slack_api.mjs";
 import {
@@ -66,17 +72,17 @@ export function postDeadline(outer, postTimeoutMs) {
 // inside the claim's lease (ac-jfv.59 r7). The lease is counted from the commit, which comes
 // after claimStartedAt, so this bound is safe however late the claim CLI answered.
 export function postBudget(
-  { postTimeoutMs, leaseMs },
+  {
+    postTimeoutMs,
+    leaseMs,
+    lookupMs = TLDR_AGENT_SLACK_LOOKUP_MS,
+    settleMs = TLDR_AGENT_SLACK_SETTLE_MS,
+  },
   claimStartedAt,
   now = Date.now(),
 ) {
   if (!leaseMs) return postTimeoutMs;
-  const leaseLeft =
-    claimStartedAt +
-    leaseMs -
-    TLDR_AGENT_SLACK_LOOKUP_MS -
-    2 * TLDR_AGENT_SLACK_SETTLE_MS -
-    now;
+  const leaseLeft = claimStartedAt + leaseMs - lookupMs - 2 * settleMs - now;
   return Math.min(postTimeoutMs, leaseLeft);
 }
 
@@ -121,7 +127,10 @@ export function messageText(message) {
 // The claim runs before the post deadline starts and is not cut by it: an abandoned claim would
 // hold its delivery for its whole lease. Its CLI is killed only at the lease, if it hangs.
 export const claimDelivery = (ctx) =>
-  ctx.channel.claimSlackDelivery({ leaseMs: ctx.leaseMs });
+  ctx.channel.claimSlackDelivery({
+    leaseMs: ctx.leaseMs,
+    ...(ctx.tier === undefined ? {} : { tier: ctx.tier }),
+  });
 
 function backoffUntil(ctx) {
   try {
@@ -133,9 +142,22 @@ function backoffUntil(ctx) {
   }
 }
 
+// Read-merge-write with no await between, so two ticks of one lane (the notice lane's sends overlap)
+// never shorten a standing backoff: the later notBefore wins. Temp + rename keeps a reader from
+// seeing a half-written file.
 export function writeBackoff(ctx, ms) {
   mkdirSync(dirname(ctx.backoffPath), { recursive: true });
-  writeFileSync(ctx.backoffPath, JSON.stringify({ notBefore: ctx.now() + ms }));
+  const notBefore = Math.max(backoffUntil(ctx), ctx.now() + ms);
+  const temp = `${ctx.backoffPath}.${process.pid}.tmp`;
+  writeFileSync(temp, JSON.stringify({ notBefore }));
+  renameSync(temp, ctx.backoffPath);
+}
+
+// A success clears the backoff it was gated by. One a concurrent tick wrote after this tick
+// passed its gate (notBefore past this tick's start) stays: that 429 is news to this tick.
+export function clearBackoff(ctx) {
+  if (backoffUntil(ctx) <= (ctx.startedAt ?? Infinity))
+    rmSync(ctx.backoffPath, { force: true });
 }
 
 // An aborted daemon phase or an active backoff claims nothing.

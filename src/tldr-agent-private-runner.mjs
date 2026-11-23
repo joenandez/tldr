@@ -7,22 +7,25 @@ import { createHash } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  MAX_OUTBOUND_DELIVERIES_PER_POLL,
+  OUTBOUND_SEND_BUDGET_MS,
+  drainOutboundDeliveries,
+} from "./lib/outbound_drain.mjs";
 import { fail, output, parseArgs } from "./lib/json_io.mjs";
 import { resolveDaemonCommandScope } from "./lib/tldr_agent_daemon_scope.mjs";
 import { tldrAgentPhaseTimeout } from "./lib/tldr_agent_daemon_phase_timeouts.mjs";
 
+export { MAX_OUTBOUND_DELIVERIES_PER_POLL, OUTBOUND_SEND_BUDGET_MS };
+
 const CHANNEL_POLL_VERB = "__tldr-agent-channel-poll";
 
-// A single poison delivery must never occupy the whole tick: drain every
-// claimable delivery (bounded) instead of stopping after the first one.
-export const MAX_OUTBOUND_DELIVERIES_PER_POLL = 10;
-
-// Worst-case time one claimed send needs (the 25 s Aegis outbound socket
-// timeout plus the Tightbeam CLI calls); the drain claims again only when at
-// least this much of the outbound deadline remains.
-export const OUTBOUND_SEND_BUDGET_MS = 40000;
 const DEFAULT_OUTBOUND_TIMEOUT_MS = 120000;
-const MODES = new Set(["outbound", "inbound"]);
+// outbound: the ordinary drain, tier 2 only. answer: the answer lane's drain (ac-jfv.74.1), tier 1
+// only, no inbox. (Tier 0 notices have their own warm child, email_notice_child.mjs.) No mode:
+// every tier and the inbox, for a one-shot run.
+const MODES = new Set(["outbound", "inbound", "answer"]);
+const MODE_TIER = { outbound: 2, answer: 1 };
 
 // With the inbound result, the failed tick keeps both sides' counts and causes
 // (the same { inbound, outbound } details an inbound failure reports).
@@ -66,62 +69,6 @@ function outboundErrorCode(rawCode) {
   return rawCode === "invalid_claimed_delivery"
     ? "tightbeam_invalid_claimed_delivery"
     : "tightbeam_delivery_failed";
-}
-
-async function drainOutboundDeliveries({
-  adapter,
-  onReplyBindingRecorded,
-  deadlineMs = null,
-}) {
-  const counts = { attempted: 0, delivered: 0, failed: 0 };
-  let released = 0;
-  let stoppedForDeadline = false;
-  let lastFailure = null;
-  let thrown = null;
-  for (
-    let attempt = 0;
-    attempt < MAX_OUTBOUND_DELIVERIES_PER_POLL;
-    attempt += 1
-  ) {
-    if (
-      deadlineMs !== null &&
-      deadlineMs - Date.now() < OUTBOUND_SEND_BUDGET_MS
-    ) {
-      stoppedForDeadline = true;
-      break;
-    }
-    let outcome;
-    try {
-      // eslint-disable-next-line no-await-in-loop
-      outcome = await adapter.deliverOnce({
-        afterReplyBindingRecorded: onReplyBindingRecorded,
-      });
-    } catch (error) {
-      thrown = error;
-      break;
-    }
-    if (outcome?.ok !== true && outcome?.code === "claim_unavailable") break;
-    counts.attempted += 1;
-    if (outcome?.ok === true) counts.delivered += 1;
-    // Released to Tightbeam for its backoff retry: not a failure.
-    else if (outcome?.released === true) released += 1;
-    else {
-      counts.failed += 1;
-      lastFailure = outcome;
-      // Item 49: a failed claim (not an empty queue) is an outbound failure,
-      // and claiming again in the same tick would only repeat it.
-      if (outcome?.code === "claim_failed") break;
-    }
-  }
-  return {
-    counts: {
-      ...counts,
-      ...(released ? { released } : {}),
-      ...(stoppedForDeadline ? { stopped_for_deadline: true } : {}),
-    },
-    lastFailure,
-    thrown,
-  };
 }
 
 function withScope(scope, data = {}) {
@@ -168,14 +115,16 @@ export async function pollChannel({
   if (mode !== undefined && !MODES.has(mode)) {
     throw Object.assign(new Error(`Unknown channel poll mode: ${mode}`), {
       code: "invalid_mode",
-      details: { remediation: "Use --mode outbound or --mode inbound." },
+      details: {
+        remediation: "Use --mode outbound, --mode inbound or --mode answer.",
+      },
     });
   }
   const doOutbound = mode !== "inbound";
-  const doInbound = mode !== "outbound";
+  const doInbound = mode !== "outbound" && mode !== "answer";
   const tickDeadlineMs =
     deadlineMs === undefined
-      ? mode === "outbound"
+      ? mode === "outbound" || mode === "answer"
         ? outboundTickDeadlineMs()
         : pollTickDeadlineMs()
       : deadlineMs;
@@ -211,6 +160,7 @@ export async function pollChannel({
     ? await drainOutboundDeliveries({
         adapter,
         deadlineMs: tickDeadlineMs,
+        tier: MODE_TIER[mode],
         onReplyBindingRecorded: ({ claim }) => {
           // The poll receipt proves that a delivery claim produced an opaque
           // binding without exporting the bearer token outside the adapter.
@@ -231,7 +181,9 @@ export async function pollChannel({
         },
       })
     : undefined;
-  const { counts, lastFailure, thrown } = drained || {};
+  const { counts: tickCounts, lastFailure, thrown, timings } = drained || {};
+  // Only the answer lane's tick reports timings (its daemon event logs them).
+  const counts = mode === "answer" ? { ...tickCounts, timings } : tickCounts;
   const outbound = !drained
     ? undefined
     : thrown

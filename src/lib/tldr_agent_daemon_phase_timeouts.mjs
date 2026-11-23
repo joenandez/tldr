@@ -83,6 +83,45 @@ export const tldrAgentSlackClaimLease = (postTimeoutMs) =>
   tldrAgentSlackOutboundPhaseTimeout(postTimeoutMs) +
   TLDR_AGENT_SLACK_SETTLE_MS;
 
+// The answer Slack lane (tier 1, answers to the user; ac-jfv.74.1): one tick at a time, a short
+// lease and its own backoff file. A lost claim returns in `leaseMs`, the post is cut at
+// `postTimeoutMs`, and post + look + two settle calls end inside the lease (postBudget), so the
+// post keeps its whole 10 s. A `complete` that misses its bound only leaves the delivery to be
+// re-offered: the outbound_post receipt then completes it without a second post. A settle call is
+// the claim's CLI path: claim measured up to 4.2 s and a notice complete cut at 4.0 s at load
+// 120-130 (P0-18, P0-19), so settleMs is 8 s and the lease 30 s (10 + 2 + 2 x 8 = 28).
+export const TLDR_AGENT_SLACK_ANSWER = Object.freeze({
+  leaseMs: 30_000,
+  postTimeoutMs: 10_000,
+  lookupMs: 2000,
+  settleMs: 8000,
+});
+
+// The notice Slack lane (tier 0, busy and resume_failed notices): a notice is due 120 s after the
+// user's message, plus <= 1 s sweep and <= 1 s watermark poll, and must reach the user inside
+// 2:15 (135 s). That leaves 13 s for claim + send: the post is cut at 8 s and the claim CLI is
+// killed at the lease, so claim (~2 s measured at load 100+) + post fit with margin. Post + look
+// + two settle calls end inside the lease (postBudget), so the post keeps its whole 8 s (8 + 2 +
+// 2 x 8 = 26 of 30; settleMs as for the answer lane).
+export const TLDR_AGENT_SLACK_NOTICE = Object.freeze({
+  leaseMs: 30_000,
+  postTimeoutMs: 8000,
+  lookupMs: 2000,
+  settleMs: 8000,
+});
+
+// Claim (its CLI is killed at the lease) + post + look + one settle call, as the normal phase.
+const slackLanePhaseTimeout = ({
+  leaseMs,
+  postTimeoutMs,
+  lookupMs,
+  settleMs,
+}) => leaseMs + postTimeoutMs + lookupMs + settleMs;
+export const tldrAgentSlackAnswerPhaseTimeout = () =>
+  slackLanePhaseTimeout(TLDR_AGENT_SLACK_ANSWER);
+export const tldrAgentSlackNoticePhaseTimeout = () =>
+  slackLanePhaseTimeout(TLDR_AGENT_SLACK_NOTICE);
+
 export function tldrAgentParentPhaseTimeout(
   name,
   {
@@ -114,3 +153,43 @@ export async function runSequentialTldrAgentMailPhases({
   }
   return results;
 }
+
+// The answer EMAIL lane (tier 1; ac-jfv.74.1) drains the answers to the user in its own short
+// child, one tick at a time. One drain is claim + one send + complete. The Aegis send is bounded
+// at 25 s and the complete is a Tightbeam CLI call, so a send and its complete (40 s) are what the
+// drain must have left before it claims again. A child cut off mid-send is safe: the delivery's
+// receipt and provider key stop a second send.
+export const TLDR_AGENT_EMAIL_ANSWER = Object.freeze({
+  claimMs: 30_000,
+  sendMs: 25_000,
+  completeMs: 15_000,
+});
+
+export const tldrAgentEmailAnswerTimeout = () =>
+  TLDR_AGENT_EMAIL_ANSWER.claimMs +
+  TLDR_AGENT_EMAIL_ANSWER.sendMs +
+  TLDR_AGENT_EMAIL_ANSWER.completeMs;
+
+// The notice EMAIL lane (tier 0) keeps one warm child (email_notice_warm_child.mjs), so a wake is
+// one claim CLI call plus the send. Budget as for Slack: 13 s for claim + send inside 2:15. Every
+// CLI call the child makes is killed at `cliMs`, and the send is cut at `sendMs` (up to 4 sends at
+// once). `claimMs` is the claim stage, preflight aside: a handshake on a loaded daemon is ~33 ms
+// of scrypt, so 10 s is a hung call. The Tightbeam lease is its 60 s default: claim + send +
+// complete (or release) must fit it. `tickMs` stops new claims in a long drain; `killMs` is the
+// parent's hard stop of a wedged child, after the tick's last claim could still send and settle.
+export const TIGHTBEAM_DEFAULT_LEASE_MS = 60_000;
+export const TLDR_AGENT_EMAIL_NOTICE = Object.freeze({
+  cliMs: 10_000,
+  sendMs: 8000,
+  tickMs: 30_000,
+  restartBaseMs: 1000,
+  restartMaxMs: 30_000,
+  graceMs: 2000,
+});
+// One claimed notice: its claim CLI, its send, its settle CLI (complete or release).
+export const tldrAgentEmailNoticeDeliveryMs = () =>
+  TLDR_AGENT_EMAIL_NOTICE.cliMs +
+  TLDR_AGENT_EMAIL_NOTICE.sendMs +
+  TLDR_AGENT_EMAIL_NOTICE.cliMs;
+export const tldrAgentEmailNoticeKillMs = () =>
+  TLDR_AGENT_EMAIL_NOTICE.tickMs + tldrAgentEmailNoticeDeliveryMs();

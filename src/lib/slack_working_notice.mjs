@@ -39,14 +39,23 @@ export function launchState(deliveries, list) {
     unread: [...real, ...deliveries.filter(adopted)].some(isUnread),
     unreadAny: deliveries.some(isUnread),
     unknown: states.includes("unknown"),
+    busy: deliveries.some((d) =>
+      list.rows.some(
+        (s) =>
+          s.endpoint_id === d.endpoint_id &&
+          s.state === "busy" &&
+          !s.owner_process_exited_at,
+      ),
+    ),
   };
 }
 
 // The reason an aged wait ends, else null: a wait that may still be starting (or
-// cannot be told) lasts to the durable bound; any other ends at the age cap.
+// cannot be told), or whose recipient is busy under a live owner, lasts to the
+// durable bound; any other ends at the age cap.
 export function agedReason(age, state, maxAgeMs) {
   if (age < maxAgeMs) return null;
-  const waiting = state.starting || state.unknown;
+  const waiting = state.starting || state.unknown || state.busy;
   return waiting && age < STARTING_MAX_AGE_MS ? null : "age_cap";
 }
 

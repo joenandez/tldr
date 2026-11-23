@@ -35,7 +35,9 @@ import {
   renameSync,
   writeFileSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { randomBytes } from "node:crypto";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const RECORD_VERSION = "1.0";
 
@@ -156,5 +158,51 @@ export function sessionBoundaryLaunch({ command, args = [] }) {
   return {
     command: "/bin/sh",
     args: ["-c", BOUNDARY_SCRIPT, command, ...args],
+  };
+}
+
+// never-wait 4.1: the run host owns a Helm Claude run's stdin and binds
+// <state-root>/sessions/<session>/in.sock, so the daemon can push mail into the
+// live run. It is the launched command, so sessionBoundaryLaunch (and any other
+// launch wrapper) wraps it and records the agent's own exit code, which the
+// host passes on. Launched by path, never imported (architecture contract).
+const RUN_HOST = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  "../../../messaging/src/cli/run_host.mjs",
+);
+
+/**
+ * adapter.prepare(request); a claude launch moves under the run host, with
+ * the minted session id as its --session and the prompt on its stdin. Every
+ * run-host launch gets a fresh TIGHTBEAM_LAUNCH_TOKEN: the run's SessionStart
+ * registers it as the endpoint's owner, and the host accepts a pushed prompt
+ * only with it (never-wait C1), as the resumer does (resumer.mjs childEnv).
+ */
+export function hostedLaunch(adapter, request) {
+  const prepared = adapter.prepare(request);
+  const launch =
+    adapter.name === "claude"
+      ? {
+          ...prepared,
+          argv: [
+            process.execPath,
+            RUN_HOST,
+            "--runtime",
+            "claude",
+            "--session",
+            prepared.session_id,
+            "--",
+            ...prepared.argv,
+          ],
+          stdin: request.prompt,
+        }
+      : prepared;
+  if (!launch.argv.includes(RUN_HOST)) return launch;
+  return {
+    ...launch,
+    env: {
+      ...launch.env,
+      TIGHTBEAM_LAUNCH_TOKEN: randomBytes(16).toString("hex"),
+    },
   };
 }

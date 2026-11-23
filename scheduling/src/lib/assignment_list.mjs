@@ -151,10 +151,9 @@ export function localAssignmentRow(job) {
 // Global row: same facts plus the owning scope, with the dispatch status named
 // for what it is so a cross-scope reader cannot mistake it for a work outcome.
 //
-// `last_run_at`, `created_at` and `provider` come from the same record: a
-// cross-scope reader that wants them otherwise has to call the per-assignment
-// read once per assignment, and one that cannot has only publication order to
-// stand in for recency, which it is not.
+// `last_run_at`, `created_at`, `provider` and `provider_config` (as `assignments
+// show` publishes it) come from the same record: a cross-scope reader otherwise
+// calls the per-assignment read once per assignment, or guesses from order.
 function globalAssignmentRow(job, scope) {
   return {
     id: job.id,
@@ -167,6 +166,7 @@ function globalAssignmentRow(job, scope) {
     last_run_at: assignmentLastRunAt(job),
     created_at: assignmentCreatedAt(job),
     provider: assignmentProvider(job),
+    provider_config: assignmentProviderConfig(job),
     last_dispatch_status: job.state?.last_status || null,
     scope_id: scope.scope_id,
     cwd: scope.cwd,

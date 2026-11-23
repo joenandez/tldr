@@ -11,6 +11,7 @@ import { admitParkExpiryRetirement, admitProviderAdmissionTimeoutRetirement } fr
 import { refreshSessionWatermark } from './ops/message_shared.mjs';
 import { observeRetirementProcess, runEndpointRetirementExecutor, runOwnerProcessReconciliation } from './retirement_executor.mjs';
 import { endUnsupportedTachyonListeners, isTachyonArmedForGeneration } from './tachyon_arming.mjs';
+import { endOwnerGoneListeners, expireReplyWait, isBackgroundWaitOwned, isOwnerGone, logBackgroundWaitOwnerLoss } from './listener_owner_loss.mjs';
 import { liveResumeChildFor } from './resumer.mjs';
 import { maybeRequestHostWake } from './session_host.mjs';
 import { closedWorkNoticeSql, endpointHasWakingUnreadSql } from './lifecycle_transition.mjs';
@@ -28,10 +29,6 @@ function endListener(db, listener, reason, now) {
   return db
     .prepare("UPDATE listeners SET state = 'ended', terminal_reason = ?, updated_at = ?, ended_at = ? WHERE id = ? AND state IN ('parked', 'attached', 'waking')")
     .run(reason, now, now, listener.id).changes === 1;
-}
-
-function expireReplyWait(db, waitId, now) {
-  db.prepare("UPDATE reply_waits SET state = 'expired', terminal_reason = 'park_deadline', updated_at = ?, closed_at = ? WHERE id = ? AND state IN ('pending_delivery', 'eligible')").run(now, now, waitId);
 }
 
 function reparkListener(db, listener, now) {
@@ -330,24 +327,6 @@ function pruneAdmissionDeferrals(context, candidateIds) {
   }
 }
 
-function isBackgroundWaitOwned(listener) {
-  return Boolean(listener.background_wait_at)
-    && listener.endpoint_process_generation === listener.process_generation
-    && listener.owner_process_exited_at === null;
-}
-
-function logBackgroundWaitOwnerLoss(context, listener) {
-  context.logger?.info?.({
-    event: 'listener.background_wait_owner_lost',
-    params: { listener_id: listener.id, endpoint_id: listener.endpoint_id, process_generation: listener.process_generation },
-    result: {
-      endpoint_process_generation: listener.endpoint_process_generation,
-      owner_exited: listener.owner_process_exited_at !== null,
-    },
-    status: 'ended',
-  });
-}
-
 /**
  * Reconcile one bounded snapshot. Startup treats every active listener as
  * socketless. Runtime only changes rows whose durable deadline has elapsed
@@ -363,12 +342,16 @@ export function runListenerReconciliation(context, { now = new Date(), startup =
   withTransaction(context.db, () => {
     const listeners = context.db
       .prepare(`SELECT l.*, rw.state AS reply_wait_state, e.tachyon_armed_process_generation,
-                       e.process_generation AS endpoint_process_generation, e.owner_process_exited_at
+                       e.process_generation AS endpoint_process_generation, e.owner_process_exited_at, e.state AS endpoint_state, e.launch_mode AS endpoint_launch_mode
                   FROM listeners l JOIN endpoints e ON e.id = l.endpoint_id
                   LEFT JOIN reply_waits rw ON rw.id = l.reply_wait_id
                  WHERE l.state IN ('parked', 'attached', 'waking') ORDER BY l.created_at ASC, l.id ASC`)
       .all();
     for (const listener of listeners) {
+      if (isOwnerGone(listener)) {
+        summary.ended += endOwnerGoneListeners(context, listener, timestamp);
+        continue;
+      }
       // A background-wait listener is never armed (headless sessions cannot
       // be), so only its current, still-owned generation skips this sweep;
       // deadline, busy-turn and owner-loss endings still bound it.
@@ -406,7 +389,7 @@ export function runListenerReconciliation(context, { now = new Date(), startup =
       }
 
       if (parkExpired) {
-        expireReplyWait(context.db, listener.reply_wait_id, timestamp);
+        expireReplyWait(context.db, { waitId: listener.reply_wait_id, now: timestamp });
         const retirement = admitParkExpiryRetirement(context.db, {
           listenerId: listener.id,
           listenerGeneration: listener.listener_generation,

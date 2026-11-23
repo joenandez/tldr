@@ -15,6 +15,7 @@
 // omitted unless asked for, because a closed session never returns.
 
 import { TightbeamError } from '../../protocol/envelope.mjs';
+import { normalizeStartIdentity } from '../owner_process_contract.mjs';
 import { isTachyonArmedForGeneration } from '../tachyon_arming.mjs';
 import { expandStoredRuntimeIds, runtimeContract } from './resume_shared.mjs';
 
@@ -72,7 +73,27 @@ function parsePayload(payload) {
   };
 }
 
-function projection(row) {
+// ac-jfv.116: what the reconciler's last pass saw of this owner (daemon memory;
+// a fact about one exact owner: same pid, start identity and generation, so a
+// replaced process drops it) and, for a busy owner, what it is doing. A held
+// background Stop comes from the listener row. Null when nothing is known.
+function seenOwner(context, row) {
+  const seen = context.ownerActivity?.get(row.id);
+  const key = [row.owner_process_pid, normalizeStartIdentity(row.owner_process_start_identity), row.process_generation];
+  const sameOwner = seen && [seen.owner_process_pid, seen.owner_process_start_identity, seen.process_generation].every((value, i) => value === key[i]);
+  return sameOwner && !row.owner_process_exited_at && row.owner_process_generation === row.process_generation ? seen : null;
+}
+
+function ownerActivity(context, row) {
+  const seen = seenOwner(context, row);
+  // Activity is a fact about an observed live owner; without that observation it is unknown.
+  const held = seen && row.state === 'idle' && row.background_wait_since;
+  const activity = seen && row.state === 'busy' ? seen.activity : held ? 'waiting_on_background' : null;
+  const since = seen && row.state === 'busy' ? seen.waiting_since : held ? row.background_wait_since : null;
+  return { owner_observed_alive: seen ? true : null, owner_activity: activity, owner_waiting_since: since };
+}
+
+function projection(context, row) {
   return {
     endpoint_id: row.id,
     principal_id: row.principal_id,
@@ -86,6 +107,7 @@ function projection(row) {
     owner_process_pid: row.owner_process_pid ?? null,
     owner_process_exited_at: row.owner_process_exited_at ?? null,
     tachyon_armed: isTachyonArmedForGeneration(row, row.process_generation),
+    ...ownerActivity(context, row),
     superseded_by_endpoint_id: row.superseded_by_endpoint_id ?? null,
     created_at: row.created_at,
     updated_at: row.updated_at,
@@ -149,13 +171,16 @@ export const endpointListOp = {
     const rows = context.db
       .prepare(
         `SELECT id, principal_id, authority_name, runtime, provider_session_id, state, launch_mode,
-                authority_reference, academy_agent_name, owner_process_pid, owner_process_exited_at, process_generation,
+                authority_reference, academy_agent_name, owner_process_pid, owner_process_exited_at, owner_process_start_identity, owner_process_generation, process_generation,
                 tachyon_armed_process_generation, created_at, updated_at, closed_at,
                 (SELECT original.replacement_endpoint_id FROM resume_requests original
                   WHERE original.endpoint_id = endpoints.id
                     AND original.state = 'failed' AND original.recovery_mode = 'exact_resume'
                     AND original.replacement_endpoint_id IS NOT NULL
-                  LIMIT 1) AS superseded_by_endpoint_id
+                  LIMIT 1) AS superseded_by_endpoint_id,
+                (SELECT MIN(held.background_wait_at) FROM listeners held
+                  WHERE held.endpoint_id = endpoints.id AND held.process_generation = endpoints.process_generation
+                    AND held.state IN ('parked', 'attached', 'waking') AND held.background_wait_at IS NOT NULL) AS background_wait_since
            FROM endpoints
           WHERE ${where.join(' AND ')}
           ORDER BY ${filters.orderBy} DESC, id DESC
@@ -163,6 +188,6 @@ export const endpointListOp = {
       )
       .all(...params, filters.limit + 1);
     const truncated = rows.length > filters.limit;
-    return { result: { endpoints: rows.slice(0, filters.limit).map(projection), truncated } };
+    return { result: { endpoints: rows.slice(0, filters.limit).map((row) => projection(context, row)), truncated } };
   },
 };

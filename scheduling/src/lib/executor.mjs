@@ -30,7 +30,7 @@ import {
 import { writeAgentRunSession } from "./agent_run_session.mjs";
 import { completionDeadlineAt } from "./run_deadline.mjs";
 import { effectiveCompletionDelivery } from "./assignment_completion_delivery.mjs";
-import { sessionBoundaryLaunch } from "./run_session_outcome.mjs";
+import { hostedLaunch, sessionBoundaryLaunch } from "./run_session_outcome.mjs";
 import { exitBeforeSessionResult } from "./provider_skip_event.mjs";
 import {
   deriveMemoryAfterRun,
@@ -1717,7 +1717,7 @@ export async function executeJob(job, opts) {
       assignment,
     });
     const enrichedJob = { ...job, cwd };
-    const prepared = adapter.prepare({
+    const prepared = hostedLaunch(adapter, {
       job: enrichedJob,
       run: { job_id: job.id, run_id: opts.runId || "" },
       prompt,
@@ -1815,7 +1815,7 @@ export async function executeJob(job, opts) {
           stderrPath: opts.logPaths?.stderr || null,
         })
       : prompt;
-    const fallbackPrepared = fallbackAdapter.prepare({
+    const fallbackPrepared = hostedLaunch(fallbackAdapter, {
       job: enrichedJob,
       run: { job_id: job.id, run_id: opts.runId || "" },
       prompt: fallbackPrompt,

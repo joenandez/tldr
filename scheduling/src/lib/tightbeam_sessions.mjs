@@ -100,6 +100,7 @@ export function sessionFromEndpoint(row) {
     launch_mode: row.launch_mode || null,
     pid: Number.isInteger(row.owner_process_pid) ? row.owner_process_pid : null,
     endpoint_id: row.endpoint_id || null,
+    owner_process_exited_at: row.owner_process_exited_at || null,
     principal_id: row.principal_id || null,
     source: "tightbeam",
   };

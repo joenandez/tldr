@@ -22,13 +22,13 @@ import { receiveOrderBy } from './message_shared.mjs';
 // envelope and every non-body field of every included message.
 const BODY_BYTE_BUDGET = 768 * 1024;
 
-function computeDeliveryState(row) {
+export function computeDeliveryState(row) {
   if (row.acknowledged_at) return 'acknowledged';
   if (row.read_at) return 'read';
   return row.state;
 }
 
-function conversationSubject(metadata) {
+export function conversationSubject(metadata) {
   try {
     const subject = JSON.parse(metadata ?? '{}')?.subject;
     return typeof subject === 'string' && subject.trim().length > 0 ? subject : null;
@@ -151,14 +151,14 @@ export const inboxListOp = {
     // Aggregate mode (no endpoint_id filter) may see the same message once
     // per one of the principal's endpoints; collapse to one entry per
     // message, preferring the most-complete delivery_state observed.
-    const rank = { pending: 0, claimed: 1, delivered: 2, failed: 2, expired: 2, read: 3, acknowledged: 4 };
+    const rank = { pending: 0, claimed: 1, delivered: 2, failed: 2, expired: 2, superseded: 2, read: 3, acknowledged: 4 };
     const byMessage = new Map();
     // Unread means receivable by one of these endpoints: message.receive skips
     // failed deliveries and read ones are done, so for an unread listing those
     // rows are dropped BEFORE collapsing. Otherwise a failed or read copy on a
     // sibling endpoint would outrank a still-pending copy and hide a message
     // the pending endpoint can receive (re-check 8).
-    const NOT_UNREAD = new Set(['read', 'acknowledged', 'failed']);
+    const NOT_UNREAD = new Set(['read', 'acknowledged', 'failed', 'superseded']);
     for (const row of rows) {
       const state = computeDeliveryState(row);
       if (unreadOnly && NOT_UNREAD.has(state)) continue;

@@ -30,6 +30,7 @@ import {
   ownerProcessTupleIssue,
   sameOwnerProcessTuple,
 } from './owner_process_contract.mjs';
+import { observeOwnerActivity, parseProcessSnapshot } from './owner_activity.mjs';
 import { acquireClaim, releaseClaim, verifyClaimToken } from './ops/claims_shared.mjs';
 
 const TYPE = 'endpoint_retirement';
@@ -60,24 +61,20 @@ export function observeRetirementProcess(pid) {
 }
 
 /**
- * Every process in one `ps` call, as Map<pid, { pid, startIdentity }>, or
- * `{ unavailable: true }`. One snapshot per reconciliation pass keeps the
- * cost flat in the number of watched endpoints.
+ * Every process in one `ps` call, as Map<pid, { pid, startIdentity, ppid,
+ * command }>, or `{ unavailable: true }`. One snapshot per reconciliation
+ * pass keeps the cost flat in the number of watched endpoints.
  */
 export function snapshotProcesses() {
   let raw;
   try {
-    raw = String(execFileSync('ps', ['-A', '-o', 'pid=', '-o', 'lstart='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: psEnvironment(), maxBuffer: 16 * 1024 * 1024 }));
+    // command last: the only column that may hold spaces.
+    raw = String(execFileSync('ps', ['-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'lstart=', '-o', 'command='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: psEnvironment(), maxBuffer: 16 * 1024 * 1024 }));
   } catch {
     return { unavailable: true };
   }
-  const processes = new Map();
-  for (const line of raw.split('\n')) {
-    const match = /^\s*(\d+)\s+(.+?)\s*$/.exec(line);
-    if (match) processes.set(Number(match[1]), { pid: Number(match[1]), startIdentity: normalizeStartIdentity(match[2]) });
-  }
-  if (processes.size === 0) return { unavailable: true };
-  return processes;
+  const processes = parseProcessSnapshot(raw);
+  return processes.size === 0 ? { unavailable: true } : processes;
 }
 
 // lsof lives in /usr/sbin, which a daemon started from launchd or a GUI does
@@ -339,6 +336,7 @@ export function runOwnerProcessReconciliation(context, { now = new Date(), proce
   const watched = db.prepare(WATCHED_ENDPOINTS).all()
     .filter((row) => ownerProcessTupleIssue(row, { runtime: row.runtime, processGeneration: row.process_generation }) === null);
   summary.watched = watched.length;
+  const ownerActivity = (context.ownerActivity = new Map()); // ac-jfv.116: owners seen alive, and what busy ones do; rebuilt each pass
   if (watched.length === 0) return summary;
 
   const snapshot = processes.snapshot();
@@ -350,8 +348,10 @@ export function runOwnerProcessReconciliation(context, { now = new Date(), proce
 
   const exitedAt = now.toISOString();
   for (const row of watched) {
-    if (ownerProcessLiveness(row, snapshot.get(row.owner_process_pid) ?? null) !== 'gone') {
+    const liveness = ownerProcessLiveness(row, snapshot.get(row.owner_process_pid) ?? null);
+    if (liveness !== 'gone') {
       summary.alive += 1;
+      if (liveness === 'alive') ownerActivity.set(row.id, observeOwnerActivity(snapshot, row, exitedAt));
       continue;
     }
     const nonInteractive = row.launch_mode === 'non_interactive';

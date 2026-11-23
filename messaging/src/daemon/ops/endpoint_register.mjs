@@ -96,8 +96,9 @@ import { authorityIsAllowed, isUniqueConstraintError } from './authority_scope.m
 import { pushLiveDeliveryEvents, refreshWatermarkForAdoptedSession } from './message_shared.mjs';
 import { publishPresentation } from './listener_operations.mjs';
 import { discloseReplacement } from './replacement_disclosure.mjs';
-import { assertObservedDead, availabilityTakeoverReplay, expandStoredRuntimeIds, runtimeContract, runtimeIdEquals } from './resume_shared.mjs';
+import { assertObservedDead, availabilityTakeoverReplay, expandStoredRuntimeIds, restampExitedOwnerOnTakeoverReplay, runtimeContract, runtimeIdEquals } from './resume_shared.mjs';
 import { clearUnprovenPermissionMode, isCopilotWakeRuntime, normalizeAcademyAgentName, normalizeAcademyPermissionMode } from '../copilot_wake.mjs';
+import { dropLaunchTokenOnReopen, tokenHeldByOtherSession } from './launch_token_claims.mjs';
 import { MAX_OWNER_START_IDENTITY_LENGTH, MAX_PROCESS_ID, normalizeStartIdentity, ownerCaptureSourceForRuntime } from '../owner_process_contract.mjs';
 
 const LAUNCH_MODES = new Set(['interactive', 'non_interactive']);
@@ -367,7 +368,7 @@ export const endpointRegisterOp = {
     const providerSessionId = payload.provider_session_id ?? null;
     assertObservedDead(context.db, { payload, authorityName, providerSessionId, appId: connection.appId });
     const authorityReference = payload.authority_reference ?? null;
-    const launchToken = payload.launch_token ?? null;
+    let launchToken = payload.launch_token ?? null;
     const placeholderHint = payload.placeholder_endpoint_id || null;
     const academyAgentName = normalizeAcademyAgentName(payload.academy_agent_name);
     const hostName = payload.host_name ?? null;
@@ -387,7 +388,11 @@ export const endpointRegisterOp = {
     const storedRuntime = canonicalize(runtime) ?? runtime;
     const copilotWake = isCopilotWakeRuntime(context.runtimeRegistry, storedRuntime);
     const academyPermissionMode = normalizeAcademyPermissionMode(payload, { wakeRuntime: copilotWake, academyAgentName });
-    const ownerProcess = normalizeOwnerProcess(payload.owner_process, ownerCaptureSourceForRuntime(storedRuntime, copilotWake), providerSessionId);
+    let ownerProcess = normalizeOwnerProcess(payload.owner_process, ownerCaptureSourceForRuntime(storedRuntime, copilotWake), providerSessionId);
+    // A launch token names one hosted session (see launch_token_claims.mjs).
+    if (tokenHeldByOtherSession(context, { launchToken, providerSessionId, runtime: storedRuntime, canonicalize })) {
+      launchToken = null; // the owner stays: the run host really is alive and owns this thread's process tree
+    }
     const initialState = providerSessionId === null ? 'dead' : 'idle';
     const endpointId = generateId('endpoint');
     const now = new Date().toISOString();
@@ -555,7 +560,7 @@ export const endpointRegisterOp = {
         .prepare(
           `SELECT id, principal_id, authority_name, authority_reference, runtime, state, created_by_app_id, academy_agent_name,
                   process_generation, owner_epoch, owner_launch_token,
-                  owner_process_pid, owner_process_start_identity, owner_process_group_id, owner_process_capture_source
+                  owner_process_pid, owner_process_start_identity, owner_process_group_id, owner_process_capture_source, owner_process_exited_at
              FROM endpoints WHERE authority_name = ? AND provider_session_id = ?`,
         )
         .get(authorityName, providerSessionId);
@@ -598,11 +603,12 @@ export const endpointRegisterOp = {
           },
         };
       }
-      if (availabilityTakeoverReplay(context.db, { endpoint: existing, providerSessionId, launchToken })) {
+      if (availabilityTakeoverReplay(context.db, { endpoint: existing, providerSessionId, launchToken, ownerProcess })) {
+        restampExitedOwnerOnTakeoverReplay(context, { existing, ownerProcess, canonicalize, now });
         return {
           result: {
             endpoint_id: existing.id,
-            state: 'idle',
+            state: existing.state,
             process_generation: existing.process_generation,
             idempotent_replay: true,
           },
@@ -720,6 +726,8 @@ export const endpointRegisterOp = {
           result: restamped ? 'restamped' : 'row_moved',
           status: 'ok',
         });
+      } else if (launchToken === null && ownerProcess === null) {
+        dropLaunchTokenOnReopen(context, existing, { launchMode, now });
       } else if (launchMode !== null && launchToken === null) {
         context.db.prepare('UPDATE endpoints SET launch_mode = ?, updated_at = ? WHERE id = ?').run(launchMode, now, existing.id);
       }
