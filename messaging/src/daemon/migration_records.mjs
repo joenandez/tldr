@@ -70,6 +70,8 @@ export const NON_EXPORTED_TABLES = Object.freeze({
     'bounded dispatch/resume leases held by one specific live client process; a lease has no meaning once replayed into a different daemon, and re-claiming is exactly what a resumed consumer does anyway',
   schema_migrations:
     "this daemon's own forward-migration bookkeeping for THIS state root, not migrated application content; the target root records its own",
+  endpoint_host_bindings:
+    'append-only host.message.lookup visibility history, rebuilt from endpoints.host_name by its triggers and the start-up backfill (src/daemon/performance_indexes.mjs); a moved state root keeps only each endpoint\'s current host',
   import_manifests:
     "the target root's own import provenance and idempotency ledger; carrying a source root's manifests would make the target claim imports it never applied",
 });

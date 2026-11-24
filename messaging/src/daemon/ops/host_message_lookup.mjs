@@ -32,21 +32,29 @@ function validatedIds(payload) {
   return ids;
 }
 
-// Every endpoint bound to the host, plus each one's lineage predecessors, in
-// one query. Same walk as predecessorEndpointIds (thread_list.mjs): follow
-// resume_requests.replacement_endpoint_id backwards, only through endpoints
-// created by the hosted endpoint's app. UNION dedups, so a cycle terminates.
+// Every endpoint ever bound to the host (endpoint_host_bindings, so a headless
+// resume clearing endpoints.host_name does not hide its messages), plus the
+// lineage on both sides, in one query. Same walk as predecessorEndpointIds
+// (thread_list.mjs): follow resume_requests.replacement_endpoint_id backwards
+// to predecessors, and forwards to recovery replacements (the daemon creates
+// one with no host_name), only through endpoints created by the hosted
+// endpoint's app. UNION dedups, so a cycle terminates.
 function authorizedEndpointIds(db, hostName) {
   if (typeof hostName !== "string") return new Set();
   const rows = db
     .prepare(
       `WITH RECURSIVE lineage(id, app_id) AS (
-         SELECT id, created_by_app_id FROM endpoints WHERE host_name = ?
+         SELECT e.id, e.created_by_app_id FROM endpoint_host_bindings b JOIN endpoints e ON e.id = b.endpoint_id WHERE b.host_name = ?
          UNION
          SELECT rr.endpoint_id, lineage.app_id
            FROM resume_requests rr
            JOIN lineage ON rr.replacement_endpoint_id = lineage.id
            JOIN endpoints e ON e.id = rr.endpoint_id AND e.created_by_app_id = lineage.app_id
+         UNION
+         SELECT rr.replacement_endpoint_id, lineage.app_id
+           FROM resume_requests rr
+           JOIN lineage ON rr.endpoint_id = lineage.id
+           JOIN endpoints e ON e.id = rr.replacement_endpoint_id AND e.created_by_app_id = lineage.app_id
        )
        SELECT DISTINCT id FROM lineage`,
     )

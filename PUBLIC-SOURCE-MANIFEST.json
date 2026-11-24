@@ -2,17 +2,17 @@
   "schema_version": 1,
   "package": {
     "name": "@joenandez/tldr",
-    "version": "0.3.0-rc.4"
+    "version": "0.3.0-rc.5"
   },
   "source": {
     "repository": "tldr-internal",
-    "commit": "0b2983c79ada70ae40ef88e3953dc444d1923d3b"
+    "commit": "9b60fcb5b0ba9bd6b3b78b9ff4b094e6ef17d735"
   },
   "files": [
     {
       "path": ".agents/plugins/marketplace.json",
       "source": ".agents/plugins/marketplace.json",
-      "sha256": "1af0ef428d46ebb574232e19622bfbb105e043a680b15623b846799be649a721",
+      "sha256": "093851d06dba7acf044a68d28a846151e16c60fe9d3858366bd69177a7dc97f0",
       "bytes": 270,
       "mode": "644"
     },
@@ -26,14 +26,14 @@
     {
       "path": ".claude-plugin/marketplace.json",
       "source": ".claude-plugin/marketplace.json",
-      "sha256": "627cba69bd879a2ec1e68d1c243f765283b5f7678a7c3c9ff0445857fbea70be",
+      "sha256": "e0ba141c9c37ce7399f6982a325ce99b390f6789e8b0dd96d597dfe24cb0533a",
       "bytes": 595,
       "mode": "644"
     },
     {
       "path": ".claude-plugin/plugin.json",
       "source": ".claude-plugin/plugin.json",
-      "sha256": "4298c82734f7612c645d779e6568f986fff79c8de28e145c6764a584376eab5d",
+      "sha256": "08ce507f3d37cc3069dbef3d25efb4348de7c4a548a71d88b617b9fb89e3e4e7",
       "bytes": 680,
       "mode": "644"
     },
@@ -47,14 +47,14 @@
     {
       "path": ".codex-plugin/plugin.json",
       "source": ".codex-plugin/plugin.json",
-      "sha256": "2f86f4ea021eea7de3895cce52922f62431bd118009a590858a85605d35f0033",
+      "sha256": "9e5f19b283a23973f58b87f1420573a5e8411ad319bd02e029969f4c4d020f5e",
       "bytes": 201,
       "mode": "644"
     },
     {
       "path": ".copilot-plugin/.claude-plugin/plugin.json",
       "source": ".copilot-plugin/.claude-plugin/plugin.json",
-      "sha256": "778473cc549fd958fbe6969fd24b5ee0a08c04727ae577cbec22f4f118eeb963",
+      "sha256": "67a127ab77b87a687227d0b6fc8b485b1c18f6ba08bc32f41209acde21f30d9f",
       "bytes": 236,
       "mode": "644"
     },
@@ -586,8 +586,8 @@
     {
       "path": "messaging/src/daemon/migration_records.mjs",
       "source": "messaging/src/daemon/migration_records.mjs",
-      "sha256": "62c26188b61d2b44e48a5732f81a02f778d10f780b80fd9306071f68851eea5b",
-      "bytes": 65369,
+      "sha256": "8e21762e775db87c3302002b7ee064365b3ee875f4da1780c8d3023ca5f65f9d",
+      "bytes": 65627,
       "mode": "644"
     },
     {
@@ -768,8 +768,8 @@
     {
       "path": "messaging/src/daemon/ops/host_message_lookup.mjs",
       "source": "messaging/src/daemon/ops/host_message_lookup.mjs",
-      "sha256": "6564b0a6437b897dc7f5098b47bf268caa24e991a4837e81739230911a444a4d",
-      "bytes": 8441,
+      "sha256": "cab2477784449110fca0f039f044b1fd13b2e67096a5070291c0ca98bb0c60ef",
+      "bytes": 8982,
       "mode": "644"
     },
     {
@@ -1118,8 +1118,8 @@
     {
       "path": "messaging/src/daemon/performance_indexes.mjs",
       "source": "messaging/src/daemon/performance_indexes.mjs",
-      "sha256": "75e42ace64d1b9cd8fbc1fff3e5b2ad9691a737a806acfbeedec4253064571fc",
-      "bytes": 967,
+      "sha256": "b13b6e33db813e54cbb738eaba2888bb9c1d1e645528fb0e969b0e1f027b1b2b",
+      "bytes": 2625,
       "mode": "644"
     },
     {
@@ -1377,14 +1377,14 @@
     {
       "path": "package-lock.json",
       "source": "package-lock.json",
-      "sha256": "b08268d5088afc3e2717716de62d629e3fb56a8b11b954d038e15e746bf75c78",
+      "sha256": "19288cd2f9097927094ebc178a9f954bf2f833fb8c32914d4225f85263d16412",
       "bytes": 63133,
       "mode": "644"
     },
     {
       "path": "package.json",
       "source": "package.json",
-      "sha256": "6ab295ca6322daec5a9e7718f19c1e8a63520748e280599958fae5c01c3068bc",
+      "sha256": "bc3d619820cb3e93be2165ee53402d28153e31063005f3782a99841b84ca2b12",
       "bytes": 36896,
       "mode": "644"
     },
@@ -1398,7 +1398,7 @@
     {
       "path": "release/activation-manifest.json",
       "source": "release/activation-manifest.json",
-      "sha256": "8ae624118ba0e4734b72502dd5c356ece3760b24eaf776ef5d39e2989c9bb8c1",
+      "sha256": "52938f8f0f17042df9d6db2a0c3ac0945a0c10b9e22df2299e397163b770a140",
       "bytes": 1061,
       "mode": "644"
     },
@@ -1419,8 +1419,8 @@
     {
       "path": "release/payloads/arm64/tldr-agent.tar.gz",
       "source": "release/payloads/arm64/tldr-agent.tar.gz",
-      "sha256": "9b0bb7f85f927d69314fed32aaf88f3c3fe7306a49076b8369d246a252588f4f",
-      "bytes": 1769835,
+      "sha256": "725781e013b2509ef89ed31039439bbf3aff67e757a9bce50b23b7e6e1f4a02f",
+      "bytes": 1771902,
       "mode": "644"
     },
     {
@@ -1433,7 +1433,7 @@
     {
       "path": "release/starport-release.json",
       "source": "release/starport-release.json",
-      "sha256": "2508508683900e135b3c4b5128f611ed6947cb43414c31cbc8f29eee3a9e4778",
+      "sha256": "4fbc969ce3fdab99dfab7c6f84246201cdaa118ddad2601cd0eec080dbc7af99",
       "bytes": 1575,
       "mode": "644"
     },
