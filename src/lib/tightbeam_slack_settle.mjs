@@ -19,15 +19,35 @@ export function failureOutcome(ctx, error) {
   return permanent ? "failed" : "released";
 }
 
+// The bound of one settle call. The user-route lanes bound it shorter than the normal 30 s
+// (ac-jfv.74.1). On those lanes a complete runs to the lease end: Tightbeam accepts it until then
+// (claim_expired after), and a killed complete leaves a posted reply undelivered (ac-jfv.81).
+// Trade-off: the next answer waits up to the rest of the lease (~20 s), not 8 s. The end is read
+// from lease_expires_at, capped at the lane's lease length so a bad value does not stretch it;
+// this host's clock against Tightbeam's can skew it, so a complete may still run past the real
+// lease end or be cut short of it. With less lease left than settleMs the complete is bound by
+// what is left (it is refused after, and the re-offer completes it from the receipt). A lease
+// that is over, missing or invalid (NaN) leaves the settle bound. The outbound lane (no settleMs)
+// keeps the CLI's 30 s default.
+function settleBound(ctx, claim, untilLease) {
+  if (!untilLease || ctx.settleMs === undefined) return ctx.settleMs;
+  const leaseLeft = Math.min(
+    Date.parse(claim.lease_expires_at) - Date.now(),
+    ctx.leaseMs ?? 0,
+  );
+  return leaseLeft > 0 ? leaseLeft : ctx.settleMs;
+}
+
 // Returns null on success, else a failure result (logged, never thrown).
-async function settle({ ctx, claim, call, event, extra }) {
+async function settle({ ctx, claim, call, event, extra, untilLease }) {
   const { delivery_id, token } = claim;
-  // The user-route lanes bound their settle call shorter than the normal 30 s (ac-jfv.74.1).
+  ctx.onSettling?.(); // the post is done: this task no longer holds a send slot
+  const timeoutMs = settleBound(ctx, claim, untilLease);
   const result = await ctx.channel[call]({
     delivery_id,
     token,
     ...extra,
-    ...(ctx.settleMs ? { timeoutMs: ctx.settleMs } : {}),
+    ...(timeoutMs ? { timeoutMs } : {}),
   });
   if (result?.ok === true) return null;
   ctx.logger({
@@ -52,6 +72,7 @@ export const complete = (ctx, claim, outcome) =>
     call: "completeSlackDelivery",
     event: "slack_delivery_complete_failed",
     extra: { outcome },
+    untilLease: true,
   });
 
 export const release = (ctx, claim, extra) =>

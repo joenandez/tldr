@@ -8,8 +8,11 @@ import { pendingOfferDelegationId, requesterCancelNotice, returnedWorkNotice, re
 import { heldWork } from './thread_list.mjs';
 import { markExactDeliveryRead } from './message_read.mjs';
 import { admitLiveSessionReceipt, exactLiveSessionReceipt, logReceiptAdmitted, noReceiptRefusal } from './message_receive_live.mjs';
-import { receiveOrderBy, receivedBeforeSql, refreshSessionWatermark } from './message_shared.mjs';
+import { publishSessionNotice } from './session_notice.mjs';
 import { admitLinkedPresentation, recordCurrentOwnerReceipt } from './message_receive_current_owner.mjs';
+import { reclaimLiveTakeover } from './takeover_reclaim.mjs';
+import { answeredRefusal, refusalReason } from './receive_refusal.mjs';
+import { admissionHead, earlierAdmittedExistsSql } from './delivery_admission.mjs';
 
 function malformed(field) {
   throw new TightbeamError('malformed_request', `${field} is required and must be a non-empty string`, { field });
@@ -83,19 +86,15 @@ function exactAvailabilitySuccessorReceipt(db, input, appId) {
             )) OR (d.read_at IS NOT NULL AND r.state = 'completed'
               AND r.admitted_process_generation = e.process_generation
               AND r.admitted_provider_session_id IS e.provider_session_id))
-        AND NOT EXISTS (
-          SELECT 1 FROM deliveries earlier
-           WHERE earlier.endpoint_id = e.id AND earlier.state != 'failed' AND earlier.read_at IS NULL
-             AND (earlier.created_at < d.created_at OR (earlier.created_at = d.created_at AND earlier.id < d.id))
-        )
+        AND NOT ${earlierAdmittedExistsSql('d', 'earlier', "earlier.endpoint_id = e.id AND earlier.state != 'failed' AND earlier.read_at IS NULL")}
       LIMIT 1`,
   ).get(input.message_id, input.endpoint_id, input.process_generation, input.provider_session_id, appId);
 }
 
 // A successor has no live old listener to acknowledge: that listener belongs
 // to the process whose exit the retirement executor already proved. Its
-// replacement instead presents only the IDs in the bodyless exact-session
-// brief. Receipt is admitted only when the current registered process is the
+// replacement instead presents the IDs in the exact-session brief (a user
+// message's body rides the run host's stdin only, and never marks it read). Receipt is admitted only when the current registered process is the
 // immediate generation after that exact terminated retirement and a claimed
 // (or already completed) exact-session resume request still names it.
 //
@@ -134,15 +133,7 @@ function exactSuccessorReceipt(db, input, appId) {
           AND e.created_by_app_id = ?
           AND (
             d.read_at IS NOT NULL
-            OR NOT EXISTS (
-              SELECT 1 FROM deliveries earlier
-               WHERE earlier.endpoint_id = e.id
-                 AND earlier.state != 'failed' AND earlier.read_at IS NULL
-                 AND (
-                   earlier.created_at < d.created_at
-                   OR (earlier.created_at = d.created_at AND earlier.id < d.id)
-                 )
-            )
+            OR NOT ${earlierAdmittedExistsSql('d', 'earlier', "earlier.endpoint_id = e.id AND earlier.state != 'failed' AND earlier.read_at IS NULL")}
           )
           AND NOT EXISTS (
             SELECT 1 FROM listeners newer_listener
@@ -157,7 +148,7 @@ function exactSuccessorReceipt(db, input, appId) {
     .get(input.message_id, input.endpoint_id, input.process_generation, input.provider_session_id, appId);
 }
 
-// Ordinary daemon recovery uses the same bodyless exact-message brief as a
+// Ordinary daemon recovery uses the same exact-message brief as a
 // terminated successor, but has no retired listener to prove. Its authority
 // comes from the active recovery request instead: only the current
 // owner of that exact endpoint/session may receive the message that exact
@@ -209,37 +200,36 @@ function exactOrdinaryReceipt(db, input, appId) {
 // message unread behind an older unread one, the refusal names that older
 // message, the one it must receive first. Read-only.
 function olderUnreadAhead(db, input, appId) {
-  return db
+  const own = db
     .prepare(
-      `SELECT earlier.message_id
-         FROM endpoints e
+      `SELECT d.id FROM endpoints e
          JOIN deliveries d ON d.endpoint_id = e.id AND d.message_id = ? AND d.state != 'failed' AND d.read_at IS NULL
-         JOIN deliveries earlier
-           ON earlier.endpoint_id = e.id AND earlier.state != 'failed' AND earlier.read_at IS NULL
-          AND ${receivedBeforeSql('earlier', 'd')}
         WHERE e.id = ? AND e.process_generation = ? AND e.provider_session_id = ? AND e.created_by_app_id = ?
-        ORDER BY ${receiveOrderBy('earlier')}
         LIMIT 1`,
     )
-    .get(input.message_id, input.endpoint_id, input.process_generation, input.provider_session_id, appId)?.message_id ?? null;
+    .get(input.message_id, input.endpoint_id, input.process_generation, input.provider_session_id, appId);
+  if (!own) return null;
+  const head = admissionHead(db, input.endpoint_id);
+  return head && head.id !== own.id ? head.message_id : null;
 }
 
 function receiveRefusal(context, input, appId) {
-  const oldestMessageId = olderUnreadAhead(context.db, input, appId);
+  const endpoint = context.db.prepare('SELECT state, process_generation, created_by_app_id, provider_session_id FROM endpoints WHERE id = ?').get(input.endpoint_id);
+  // A takeover-fenced endpoint can receive nothing, so it never names an older message to read first.
+  const oldestMessageId = endpoint?.state === 'takeover_pending' ? null : olderUnreadAhead(context.db, input, appId);
   const message = 'message.receive is not granted for this exact listener presentation';
   if (!oldestMessageId) {
-    const endpoint = context.db.prepare('SELECT state, process_generation, created_by_app_id, provider_session_id FROM endpoints WHERE id = ?').get(input.endpoint_id);
-    const reason = !endpoint ? 'endpoint_unknown'
-      : endpoint.state === 'takeover_pending' ? 'endpoint_takeover_pending'
-        : endpoint.process_generation !== input.process_generation ? 'process_generation_stale'
-          : 'no_receipt_path';
+    const reason = refusalReason(context.db, input, endpoint);
     context.logger?.warn?.({
       event: 'message_receive_refused',
       params: { message_id: input.message_id, endpoint_id: input.endpoint_id },
       result: { reason, endpoint_state: endpoint?.state ?? null },
       status: 'refused',
     });
-    return noReceiptRefusal({ endpoint, appId, providerSessionId: input.provider_session_id, messageId: input.message_id, message });
+    // Only the endpoint's own application and session learn why (as for dead).
+    const own = endpoint?.created_by_app_id === appId && endpoint?.provider_session_id === input.provider_session_id;
+    return (own ? answeredRefusal(reason, input.message_id) : null)
+      ?? noReceiptRefusal({ endpoint, appId, providerSessionId: input.provider_session_id, messageId: input.message_id, message });
   }
   context.logger?.info?.({
     event: 'message_receive_refused',
@@ -294,6 +284,9 @@ export const messageReceiveOp = {
     const input = request(payload);
     let receiptPath = null;
     const outcome = withTransaction(context.db, () => {
+      // The endpoint's own live process asking proves a decided takeover's
+      // predecessor is alive; until a successor launched it takes custody back.
+      reclaimLiveTakeover(context.db, input, { appId: connection.appId, via: 'message.receive', logger: context.logger });
       // v22 delivery admission is authoritative even when a parked Stop
       // presentation exists.  The presentation is transport compatibility,
       // updated only after the delivery CAS wins; legacy presentations with
@@ -475,7 +468,7 @@ export const messageReceiveOp = {
     });
     logReceiptAdmitted(context.logger, input, { path: receiptPath, idempotent_replay: outcome.result.idempotent_replay });
     if (outcome.wake) {
-      refreshSessionWatermark({
+      publishSessionNotice(context.db, {
         stateRoot: context.stateRoot,
         sessionId: outcome.wake.sessionId,
         deliveryId: outcome.wake.deliveryId,

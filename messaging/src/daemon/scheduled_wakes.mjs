@@ -98,6 +98,7 @@ export function dueWakes(db, now) {
     .all(now);
 }
 
+export const SCHEDULED_WAKE_ROUTE_REASON = "scheduled.wake";
 export const wakeMessageKey = (wakeId) => `scheduled-wake:${wakeId}`;
 
 export function markFired(db, wakeId, { firedAt, rewakeAt }) {
@@ -127,15 +128,26 @@ export function launchFailed(db, wake) {
 }
 
 // Fired wakes whose 1 h check is due, or whose wake launch already failed for good.
+// ac-4p2j0: a holder resumed after a crash (holder_death.mjs) gets an hour from
+// taking its cut-off or limit note (limit_note.mjs) before the silence check; while the note is unread
+// (a usage limit can hold that launch for hours) the requester is not told.
+// Keys 1..3 = MAX_HOLDER_RETRIES (holder_failed_notice.mjs; an import would cycle).
+const RETRY_SUSPENDS_SQL = `NOT EXISTS (
+  SELECT 1 FROM messages m JOIN deliveries d ON d.message_id = m.id AND d.endpoint_id = w.endpoint_id
+   WHERE m.app_id IN (SELECT id FROM applications) AND (m.idempotency_key IN ('holder-retry:' || w.attempt_id || ':1', 'holder-retry:' || w.attempt_id || ':2', 'holder-retry:' || w.attempt_id || ':3')
+          OR (m.idempotency_key >= 'holder-limit:' || w.attempt_id || ':' AND m.idempotency_key < 'holder-limit:' || w.attempt_id || ';'))
+     AND (d.read_at IS NULL OR d.read_at > ?))`;
+
 export function dueRewakes(db, now) {
+  const hourAgo = new Date(Date.parse(now) - 60 * 60 * 1000).toISOString();
   return db
     .prepare(
       `SELECT w.* FROM scheduled_wakes w
         WHERE w.fired_at IS NOT NULL AND w.notified_at IS NULL AND w.cancelled_at IS NULL
-          AND (w.rewake_at <= ? OR ${LAUNCH_FAILED_SQL})
+          AND (w.rewake_at <= ? OR ${LAUNCH_FAILED_SQL}) AND ${RETRY_SUSPENDS_SQL}
         ORDER BY w.rewake_at, w.wake_id`,
     )
-    .all(now);
+    .all(now, hourAgo);
 }
 
 // An unread scheduled-wake delivery: lets the stale-window check spare the endpoint.

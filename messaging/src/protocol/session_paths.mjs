@@ -12,6 +12,12 @@
 //     endpoint.json        the session's registered identity (a cache)
 //     pending-bg/          one empty file per open Codex background item:
 //                          bash-<tool_use_id>, agent-<agent_id>
+//     inbox.notices.jsonl  one notice line per presented delivery (bodyless, but a user message's capped body)
+//     messaging-used       empty 0600 marker: this session has used messaging
+//     notice-shown.jsonl   shown/claim ledger for notices
+//     ack.gate/            the ack-first gate's lock-free state (protocol/ack_gate.mjs): armed/<id>,
+//                          escaped/<id>, refusals/<id>/<ms>-<pid>-<rand>; each file is only created or unlinked
+//     ack-gate.log         one JSON line per gate open or fail-open (append only)
 //     in.sock              the live run's prompt socket (cli/run_host.mjs)
 //     in.pid               {pid, ino}: the host serving in.sock, for the spawn guard
 //     run_host.log         the run host's own log
@@ -21,6 +27,7 @@
 // injection roles. Tightbeam retains their paths only for compatibility;
 // durable deliveries are never stored there.
 
+import fs from 'node:fs';
 import path from 'node:path';
 
 // A session id becomes a directory name, so it is constrained to
@@ -58,7 +65,24 @@ export function sessionPaths(stateRoot, sessionId) {
     endpoint: path.join(dir, 'endpoint.json'),
     recovery: path.join(dir, 'recovery-context.json'),
     pendingBg: path.join(dir, 'pending-bg'),
+    notices: path.join(dir, 'inbox.notices.jsonl'),
+    messagingUsed: path.join(dir, 'messaging-used'),
+    shown: path.join(dir, 'notice-shown.jsonl'),
     inputSocket: path.join(dir, 'in.sock'),
     inputPid: path.join(dir, 'in.pid'),
+    ackGateDir: path.join(dir, 'ack.gate'),
+    ackGateLog: path.join(dir, 'ack-gate.log'),
   };
+}
+
+/**
+ * Best-effort: records that this session has used messaging. An absent file
+ * means a direct session, so a failed write only logs and never throws.
+ */
+export function markMessagingUsed(paths, { logger = () => {} } = {}) {
+  try {
+    fs.closeSync(fs.openSync(paths.messagingUsed, 'a', 0o600));
+  } catch (error) {
+    logger({ event: 'messaging_used_mark_failed', params: { path: paths?.messagingUsed }, result: { error: error?.code || error?.message }, status: 'warn' });
+  }
 }

@@ -101,9 +101,10 @@ function delegationHead({ effect, declaration, parties, db }) {
 function replacementHead(db, { appId, threadId, declaration }) {
   const replacementId = declaration?.sender_endpoint_id;
   const predecessorIds = typeof replacementId === 'string' ? predecessorEndpointIds(db, appId, replacementId) : [];
-  const link = predecessorIds.length === 0 ? null : participationLinks(db, appId, predecessorIds).find((entry) => entry.conversation_id === threadId);
-  // A thread adopted only through a moved delivery keeps no predecessor link.
-  const predecessorId = link?.endpoint_id ?? (predecessorIds.length === 0 ? null : db.prepare('SELECT endpoint_id FROM resume_requests WHERE replacement_endpoint_id = ? LIMIT 1').get(replacementId)?.endpoint_id);
+  const linked = new Set(predecessorIds.length === 0 ? [] : participationLinks(db, appId, predecessorIds).filter((entry) => entry.conversation_id === threadId).map((entry) => entry.endpoint_id));
+  // Nearest linked predecessor by lineage order, as disclosure chose it. A thread
+  // adopted only through a moved delivery keeps no predecessor link.
+  const predecessorId = predecessorIds.find((id) => linked.has(id)) ?? (predecessorIds.length === 0 ? null : db.prepare('SELECT endpoint_id FROM resume_requests WHERE replacement_endpoint_id = ? LIMIT 1').get(replacementId)?.endpoint_id);
   return [
     `${sessionOf(db, predecessorId)?.label ?? 'a session'} could not be resumed`,
     `replacement ${sessionOf(db, replacementId)?.id8 ?? 'a session'} adopted this thread`,
@@ -293,7 +294,8 @@ export function notificationContext(db, messageId, { deliveryId = null } = {}) {
     ...(session?.from_cwd ? { from_cwd: session.from_cwd } : {}),
     subject: typeof subject === 'string' && subject.trim().length > 0 ? subject : '(no subject)',
     thread_id: row.conversation_id,
-    reply_required: fromUser || REPLY_REQUIRED_EFFECTS.has(row.effect),
+    // A requester's reply-required reply to its delegate is a `none` that asks (ac-jfv.158).
+    reply_required: fromUser || REPLY_REQUIRED_EFFECTS.has(row.effect) || (row.effect === 'none' && parseJson(row.metadata)?.reply_expected === true),
   };
   const delivery = noticeDelivery(db, messageId, deliveryId);
   const returned = delivery ? null : returnedWorkNotice(db, { messageId, deliveryId });

@@ -25,11 +25,16 @@
 
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
-import { releaseClaim, verifyClaimToken } from './claims_shared.mjs';
+import { CONSUMER_FAILED, releaseClaim, verifyClaimToken } from './claims_shared.mjs';
 import { ensureStagedDeliveryCoverage } from '../held_request_stop.mjs';
 import { acceptProviderAcknowledgement, advanceReplyWaitForDelivery, closeStagedDeliveryConfirmedChain, markStagedDeliveryFailedAttention } from '../lifecycle_transition.mjs';
 
 const OUTCOME_TO_CLAIM_OUTCOME = { delivered: 'completed', failed: 'failed' };
+// A failed copy with one of these reasons was skipped by policy, not lost: another channel
+// delivered the message (ac-jfv.55). The delivery row stays 'failed' for every state reader; its
+// failure_cause is SKIPPED_CLAIM_PREFIX + reason (ac-jfv.239), and the claim outcome says the same.
+export const SKIP_REASONS = new Set(['email_reply_parent_missing']);
+export const SKIPPED_CLAIM_PREFIX = 'skipped:';
 
 export const deliveryCompleteOp = {
   name: 'delivery.complete',
@@ -45,9 +50,16 @@ export const deliveryCompleteOp = {
     if (outcomeValue !== 'delivered' && outcomeValue !== 'failed') {
       throw new TightbeamError('malformed_request', 'outcome must be "delivered" or "failed"', { field: 'outcome' });
     }
+    const reason = payload.reason;
+    if (reason !== undefined && (outcomeValue !== 'failed' || !SKIP_REASONS.has(reason))) {
+      throw new TightbeamError('malformed_request', `reason must be one of ${[...SKIP_REASONS].join(', ')} with outcome "failed"`, { field: 'reason' });
+    }
 
     const now = new Date();
-    const claimOutcome = OUTCOME_TO_CLAIM_OUTCOME[outcomeValue];
+    const claimOutcome = reason === undefined ? OUTCOME_TO_CLAIM_OUTCOME[outcomeValue] : `${SKIPPED_CLAIM_PREFIX}${reason}`;
+    // The row's durable cause (ac-jfv.239): none on a delivered copy.
+    const failureCause = outcomeValue === 'delivered' ? null : reason === undefined ? CONSUMER_FAILED : claimOutcome;
+    const resultFields = reason === undefined ? {} : { reason };
 
     const startedAt = Date.now();
     const outcome = withTransaction(context.db, () => {
@@ -57,24 +69,26 @@ export const deliveryCompleteOp = {
         if (row.outcome !== claimOutcome) {
           throw new TightbeamError('claim_expired', 'this claim was already completed with a different outcome');
         }
-        return { delivery_id: deliveryId, state: outcomeValue, outcome: outcomeValue };
+        return { delivery_id: deliveryId, state: outcomeValue, outcome: outcomeValue, ...resultFields };
       }
 
       releaseClaim(context.db, { row, outcome: claimOutcome, now });
-      context.db.prepare('UPDATE deliveries SET state = ?, updated_at = ? WHERE id = ?').run(outcomeValue, now.toISOString(), deliveryId);
+      context.db.prepare('UPDATE deliveries SET state = ?, failure_cause = ?, updated_at = ? WHERE id = ?').run(outcomeValue, failureCause, now.toISOString(), deliveryId);
       advanceReplyWaitForDelivery(context.db, { deliveryId, outcome: outcomeValue, now });
 
       // The single forward-graph exception (INV-07): only the exact staged
       // delivered receipt closes work; a failed one leaves it open and
       // actionable. Both helpers are inert for every ordinary delivery row.
-      if (outcomeValue === 'delivered') {
-        const acknowledgement = acceptProviderAcknowledgement(context.db, { deliveryId, now });
+      // A copy skipped by policy (a reason) resolves its route like a delivered one: the staged root
+      // closes once the other copies are delivered, which the closure itself requires (ac-jfv.55).
+      if (outcomeValue === 'delivered' || reason !== undefined) {
+        const acknowledgement = outcomeValue === 'delivered' ? acceptProviderAcknowledgement(context.db, { deliveryId, now }) : null;
         const closure = closeStagedDeliveryConfirmedChain(context.db, { deliveryId, now });
         // Another route failed earlier and this was the last one in flight: the request is held again (invariant D).
         if (!closure) ensureStagedDeliveryCoverage(context.db, { deliveryId, now, logger: context.logger });
         context.logger?.info({
           event: closure ? 'delivery_staged_closure_committed' : acknowledgement ? 'delivery_acknowledgement_accepted' : 'delivery_complete_transport_only',
-          params: { delivery_id: deliveryId, ...(acknowledgement ?? {}), ...(closure ?? {}) },
+          params: { delivery_id: deliveryId, ...resultFields, ...(acknowledgement ?? {}), ...(closure ?? {}) },
           result: closure ? 'staged_chain_closed' : acknowledgement ? 'acknowledgement_accepted_root_open' : 'transport_only',
           status: 'ok',
           latency_ms: Date.now() - startedAt,
@@ -90,7 +104,7 @@ export const deliveryCompleteOp = {
         });
       }
 
-      return { delivery_id: deliveryId, state: outcomeValue, outcome: outcomeValue };
+      return { delivery_id: deliveryId, state: outcomeValue, outcome: outcomeValue, ...resultFields };
     });
 
     return { result: outcome };

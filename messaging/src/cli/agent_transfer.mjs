@@ -27,6 +27,7 @@ export async function runTransfer(
   try {
     selectCustodiedWork(chain, session, command.workId);
   } catch (error) {
+    if (error?.code === "work_closed") throw error; // its closer and time, not the transfer rule
     custodyError = error;
   }
   const target = await resolveAgent(client, session, command.to, {

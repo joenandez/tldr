@@ -754,12 +754,18 @@ export function resolveRuntime({ payload = {}, env = process.env, explicit, regi
   return resolveByEvidence(records, (record) => record.identity.envMarkers, (marker) => Boolean(env[marker]));
 }
 
-/** The session's working directory — the evidence a resume needs. */
-export function resolveWorkingDirectory({ payload = {}, env = process.env } = {}) {
-  for (const candidate of [payload.cwd, env.CLAUDE_PROJECT_DIR]) {
-    if (typeof candidate === 'string' && candidate.length > 0) return candidate;
+/** The working directory as the runtime spells it; claims before fb0617a4 used this. */
+export const rawWorkingDirectory = ({ payload = {}, env = process.env } = {}) =>
+  [payload.cwd, env.CLAUDE_PROJECT_DIR].find((candidate) => typeof candidate === 'string' && candidate.length > 0) ?? process.cwd();
+
+/** The session's working directory (the evidence a resume needs), canonical: /tmp/x and /private/tmp/x are one claim. */
+export function resolveWorkingDirectory(source) {
+  const raw = rawWorkingDirectory(source);
+  try {
+    return fs.realpathSync(raw);
+  } catch {
+    return raw; // gone or unreadable: keep the raw spelling
   }
-  return process.cwd();
 }
 
 /**

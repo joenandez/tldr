@@ -10,7 +10,6 @@
 // what a conditional update or a re-read compares afterwards, so an owner
 // that registered during the observation is a changed owner.
 
-import { observeRetirementProcess } from './retirement_executor.mjs';
 import {
   OWNER_PROCESS_FIELDS,
   ownerProcessLiveness,
@@ -32,22 +31,28 @@ export function sameOwnerFence(a, b) {
 
 /**
  * Observes the recorded owner now. Returns `{ liveness, reason }` where
- * liveness is `gone` | `alive` | `unavailable` | `unknown`:
+ * liveness is `gone` | `alive` | `pending` | `unavailable` | `unknown`:
  *   gone         the recorded PID is absent or reused (fresh `ps` answer)
  *   alive        the same PID with the same start identity is running
+ *   pending      no process snapshot fresh enough yet (never a decision)
  *   unavailable  `ps` could not answer, or threw
  *   unknown      no owner tuple, or one that is incomplete/invalid for the
  *                endpoint's runtime and generation (no liveness evidence)
- * `observeProcess` is a parameter so tests drive every answer.
+ * `observeProcess(pid, owner)` is a parameter (callers pass the process
+ * table's synchronous reader, process_table.mjs) so tests drive every answer.
  */
-export function observeOwnerLiveness(owner, observeProcess = observeRetirementProcess) {
+export function observeOwnerLiveness(owner, observeProcess) {
   if (!owner) return { liveness: 'unknown', reason: 'endpoint_missing' };
   if (ownerProcessTupleIsAbsent(owner)) return { liveness: 'unknown', reason: 'no_owner_tuple' };
   if (ownerProcessTupleIssue(owner, { runtime: owner.runtime, processGeneration: owner.process_generation }) !== null) {
     return { liveness: 'unknown', reason: 'invalid_owner_tuple' };
   }
   try {
-    return { liveness: ownerProcessLiveness(owner, observeProcess(owner.owner_process_pid)), reason: null };
+    const observed = observeProcess(owner.owner_process_pid, owner);
+    // A promise here would read as `gone` (no pid on it): deciders never await.
+    if (typeof observed?.then === 'function') return { liveness: 'unavailable', reason: 'observation_error', error: 'observer must be synchronous' };
+    const liveness = ownerProcessLiveness(owner, observed);
+    return { liveness, reason: liveness === 'pending' ? 'owner_observation_pending' : null };
   } catch (error) {
     return { liveness: 'unavailable', reason: 'observation_error', error: error.message };
   }

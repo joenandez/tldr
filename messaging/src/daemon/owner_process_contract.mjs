@@ -59,7 +59,9 @@ export function normalizeStartIdentity(value) {
  * non-detached child (a Subspace app-server) shares its parent's group.
  */
 export function ownerProcessLiveness(row, observed) {
-  if (observed?.unavailable) return 'unavailable';
+  // `pending`: no process snapshot fresh enough yet (process_table.mjs); neither alive nor gone.
+  const undecided = observed?.unavailable ? 'unavailable' : observed?.pending ? 'pending' : null;
+  if (undecided) return undecided;
   if (!observed) return 'gone';
   return observed.pid === row.owner_process_pid && normalizeStartIdentity(observed.startIdentity) === normalizeStartIdentity(row.owner_process_start_identity)
     ? 'alive'

@@ -1,3 +1,5 @@
+import { decideReplyParent } from "./tightbeam_email_reply_parent.mjs";
+
 function outboundKey(deliveryId) {
   return `tldr-tightbeam-delivery-${deliveryId}`;
 }
@@ -42,6 +44,27 @@ function validClaim(claim) {
     typeof claim.message?.conversation_id === "string" &&
     typeof claim.message?.body === "string"
   );
+}
+
+async function completeDelivered(channel, claim) {
+  const completed = await channel.completeEmailDelivery({
+    delivery_id: claim.delivery_id,
+    token: claim.token,
+    outcome: "delivered",
+  });
+  if (completed?.ok !== true) {
+    return {
+      ok: false,
+      delivery_id: claim.delivery_id,
+      error: completed?.code || "complete_failed",
+      retryable: true,
+    };
+  }
+  return {
+    ok: true,
+    delivery_id: claim.delivery_id,
+    message_id: claim.message_id,
+  };
 }
 
 export function createTightbeamEmailAdapter({ channel, send } = {}) {
@@ -96,29 +119,12 @@ export function createTightbeamEmailAdapter({ channel, send } = {}) {
     const accepted = await channel.findProviderAcceptanceByDelivery?.(
       claim.delivery_id,
     );
-    if (accepted) {
-      const completed = await channel.completeEmailDelivery({
-        delivery_id: claim.delivery_id,
-        token: claim.token,
-        outcome: "delivered",
-      });
-      if (completed?.ok !== true) {
-        return {
-          ok: false,
-          delivery_id: claim.delivery_id,
-          error: completed?.code || "complete_failed",
-          retryable: true,
-        };
-      }
-      return {
-        ok: true,
-        delivery_id: claim.delivery_id,
-        message_id: claim.message_id,
-      };
-    }
-    const providerThread = await channel.findProviderThreadByConversation(
-      claim.message.conversation_id,
+    if (accepted) return completeDelivered(channel, claim);
+    const { result: skipped, providerThread } = await decideReplyParent(
+      channel,
+      claim,
     );
+    if (skipped) return skipped;
     const row = canonicalEmailRow(claim, providerThread);
     let provider;
     try {
@@ -177,24 +183,7 @@ export function createTightbeamEmailAdapter({ channel, send } = {}) {
     await afterProviderAccepted?.({ claim, provider });
     await channel.recordProviderAcceptance({ delivery: claim, provider });
     await afterProviderRecorded?.({ claim, provider });
-    const completed = await channel.completeEmailDelivery({
-      delivery_id: claim.delivery_id,
-      token: claim.token,
-      outcome: "delivered",
-    });
-    if (completed?.ok !== true) {
-      return {
-        ok: false,
-        delivery_id: claim.delivery_id,
-        error: completed?.code || "complete_failed",
-        retryable: true,
-      };
-    }
-    return {
-      ok: true,
-      delivery_id: claim.delivery_id,
-      message_id: claim.message_id,
-    };
+    return completeDelivered(channel, claim);
   }
 
   return Object.freeze({ deliverOnce });

@@ -39,6 +39,7 @@ import { withTransaction } from './db.mjs';
 import { REPLY_BINDING_POLICY } from './reply_listener_policy.mjs';
 import { replyContinuityDiagnostic } from './reply_continuity_diagnostics.mjs';
 import { createPendingPresentation, publishPresentation } from './ops/listener_operations.mjs';
+import { markEndpointIdle } from './ops/endpoint_state_set.mjs';
 import { isUniqueConstraintError, requireInboundAuthor } from './ops/authority_scope.mjs';
 import { callerActionForPendingOffer, pendingReplyExpectations, untrackedOffers } from './pending_reply_expectations.mjs';
 import { explicitWaitGuard, validateWaitOutcome } from './explicit_wait_guard.mjs';
@@ -55,7 +56,6 @@ import {
   offerRecipientEndpointIds,
   payloadHash,
   pushLiveDeliveryEvents,
-  refreshSessionWatermark,
   requireParticipant,
   requirePrincipal,
   resolveOrCreateDirectConversation,
@@ -66,6 +66,12 @@ import {
   validateIdempotencyKey,
   withIdempotency,
 } from './ops/message_shared.mjs';
+import { publishRoutedDelivery } from './ops/session_notice.mjs';
+import { refuseAbandonedRoot, resolvedCopySql, routeExistingMessage, skipAbandonedOpener } from './ops/claims_shared.mjs';
+import { takeoverFenced } from './ops/takeover_reclaim.mjs';
+import { admissionPointer } from './ops/delivery_admission.mjs';
+import { ownedRecipient, startThread } from './ops/thread_owners.mjs';
+import { refuseNonOwner } from './ops/thread_owner_refusal.mjs';
 import { validateConversationMetadata } from './ops/conversation_create.mjs';
 import { validateCommitMetadata } from './ops/reserved_notice.mjs';
 import { identityMetadata, replayHashes } from './ops/replay_identity.mjs';
@@ -73,7 +79,9 @@ import { createChannelDeliveries, requireOriginRoute } from './ops/origin_route.
 import { tightbeamCommandName } from '../cli/package_context.mjs';
 import { resolveOriginRouteId } from './origin_route_resolution.mjs';
 import { applyWakeEffects, readUpdateFields } from './update_wakes.mjs';
+import { commitIdempotencyKey, findIdempotentReplay } from './action_id_replay.mjs';
 import { DELIVERY_FAILED_ATTENTION_SOURCE as STAGED_FAILED_SOURCE, ensureHeldCoverage, ensureStagedFailureCoverage, hasActiveStagedResolution, heldRequestStop } from './held_request_stop.mjs';
+import { CALLER_LAUNCH_FIELD, readCallerLaunch, refuseUnlessOwnerLaunch } from './launch_owner_fence.mjs';
 
 const COMPLETION_MODES = ['message_committed', 'delivery_confirmed'];
 const TERMINAL_OUTCOMES = ['success', 'failure', 'blocked'];
@@ -823,7 +831,7 @@ function openDescendantHolderEndpoints(db, { nodeId, excludeEndpointId }) {
     .map((row) => row.endpoint_id);
 }
 
-function supersedeOpenDescendants(db, { closingNodeId, source, now }) {
+export function supersedeOpenDescendants(db, { closingNodeId, source, now }) {
   db.prepare(
     `WITH RECURSIVE descendants(id) AS (
        SELECT id FROM obligations WHERE parent_id = ?
@@ -974,6 +982,9 @@ function immutableOriginForRoot(db, rootId) {
     .get(rootId) ?? null;
 }
 
+// A requester's cancel of a root opened from an inbound channel stages through its delivery; any other cancel closes at once.
+export const channelOriginOfRoot = (db, node) => { const origin = node.role === 'root' ? immutableOriginForRoot(db, node.id) : null; return origin?.route_id ? origin : null; };
+
 function stageDeliveryConfirmedTerminal(db, { node, messageId, effect, now, origin }) {
   if (hasActiveStagedResolution(db, node.id)) {
     throw new TightbeamError('obligation_conflict', `root "${node.id}" already has a terminal resolution staged for delivery confirmation; it closes only through that exact delivery`, {
@@ -1010,18 +1021,17 @@ export function closeStagedDeliveryConfirmedChain(db, { deliveryId, now }) {
   if (!root || root.status !== 'open') {
     return null;
   }
-  // A selected external-channel fanout is the notification evidence itself:
-  // every selected route must deliver before the root closes. Channel routes
-  // are deliberately not conversation participants, so they cannot satisfy
-  // the ordinary requester-endpoint check below.
+  // A selected external-channel fanout is the notification evidence itself: every selected route must deliver before the root
+  // closes; a copy skipped (ac-jfv.55) or with no consumer or route (ac-jfv.243) counts beside a delivered one (resolvedCopySql).
+  // Channel routes are deliberately not conversation participants, so they cannot satisfy the check below.
   if (delivery.channel_route_id !== null) {
-    const unresolved = db
+    const copies = db
       .prepare(
-        `SELECT COUNT(*) AS n FROM deliveries
-          WHERE message_id = ? AND route_reason = ? AND source_obligation_id = ? AND state <> 'delivered'`,
+        `SELECT SUM(d.state = 'delivered') AS delivered, SUM(d.state <> 'delivered' AND NOT ${resolvedCopySql('d')}) AS unresolved
+           FROM deliveries d WHERE d.message_id = ? AND d.route_reason = ? AND d.source_obligation_id = ?`,
       )
-      .get(delivery.message_id, DELIVERY_CONFIRMED_ROUTE_REASON, root.id).n;
-    if (unresolved > 0) return null;
+      .get(delivery.message_id, DELIVERY_CONFIRMED_ROUTE_REASON, root.id);
+    if (copies.unresolved > 0 || !(copies.delivered > 0)) return null;
   } else {
     // Recipient-exact, re-derived here rather than trusted from the row: the
   // typed route is written by the staging transaction, but only the opening
@@ -1164,10 +1174,8 @@ function applyCloseCancelled(db, ctxFields) {
   requireActingEndpoint(db, { appId, senderPrincipalId, senderEndpointId: effect.sender_endpoint_id, processGeneration: effect.process_generation });
   authorizeCancel(db, { node, senderEndpointId: effect.sender_endpoint_id, logger });
 
-  const origin = node.role === 'root' ? immutableOriginForRoot(db, node.id) : null;
-  if (node.role === 'root' && origin?.route_id) {
-    return stageDeliveryConfirmedTerminal(db, { node, messageId, effect, now, origin });
-  }
+  const origin = channelOriginOfRoot(db, node);
+  if (origin) return stageDeliveryConfirmedTerminal(db, { node, messageId, effect, now, origin });
 
   const cancelled = db
     .prepare("UPDATE obligations SET status = 'closed', resolution = 'cancelled', resolution_reason = ?, resolution_source = ?, updated_at = ? WHERE id = ? AND status = 'open'")
@@ -1230,16 +1238,7 @@ const APPLY_BY_TYPE = {
 // ---------------------------------------------------------------------
 // Idempotent replay.
 
-function findIdempotentReplay(db, { appId, idempotencyKey, hashes }) {
-  const existing = db.prepare('SELECT id, conversation_id, payload_hash FROM messages WHERE app_id = ? AND idempotency_key = ?').get(appId, idempotencyKey);
-  if (!existing) return null;
-  if (!hashes.includes(existing.payload_hash)) {
-    throw new TightbeamError('idempotency_collision', `idempotency_key "${idempotencyKey}" was already used with a different payload`, { field: 'idempotency_key' });
-  }
-  return existing;
-}
-
-function reconstructResult(db, { messageId, conversationId, idempotentReplay }) {
+export function reconstructResult(db, { messageId, conversationId, idempotentReplay }) {
   const effectRow = db.prepare('SELECT effect, effect_payload, obligation_id, obligation_generation FROM message_effects WHERE message_id = ?').get(messageId);
   if (!effectRow) {
     // Unreachable for keys this engine issued (identity equality proved the
@@ -1620,22 +1619,11 @@ function conversationSubjectForUnreadAdmission(db, conversationId) {
   }
 }
 
-/**
- * The final outbound admission fence lives inside the message transaction:
- * a concurrent inbound delivery either wins and blocks this commit before it
- * writes, or this commit wins and the later delivery remains unread.
- */
-function rejectUnreadForActingEndpoint(db, { appId, senderPrincipalId, conversationId, effect, sendBranch }) {
-  if (sendBranch !== 'agent' || typeof effect.sender_endpoint_id !== 'string') return;
-  requireActingEndpoint(db, {
-    appId,
-    senderPrincipalId,
-    senderEndpointId: effect.sender_endpoint_id,
-    processGeneration: effect.process_generation,
-  });
-  const rows = db
+/** Unread rows on this thread that block `endpointId`'s sends, newest first. */
+export function unreadBlockingSends(db, { endpointId, conversationId }) {
+  return takeoverFenced(db, endpointId) ? [] : db
     .prepare(
-      `SELECT m.id AS message_id, sender.display_name AS sender_display_name
+      `SELECT m.id AS message_id, sender.display_name AS sender_display_name, d.created_at AS delivered_at, d.id AS delivery_id, ${closedWorkNoticeSql('d')} AS asks_nothing
          FROM deliveries d
          JOIN messages m ON m.id = d.message_id
          LEFT JOIN principals sender ON sender.id = m.sender_principal_id
@@ -1650,12 +1638,25 @@ function rejectUnreadForActingEndpoint(db, { appId, senderPrincipalId, conversat
     // row (e.g. a recovery route a later retry retired) can never be
     // presented, so it is never unread mail (as recovery.context's unread
     // projection already holds).
-    .all(effect.sender_endpoint_id, conversationId, DELEGATION_NOTICE_ROUTE_REASON, REPLACEMENT_NOTICE_ROUTE_REASON);
+    .all(endpointId, conversationId, DELEGATION_NOTICE_ROUTE_REASON, REPLACEMENT_NOTICE_ROUTE_REASON);
+}
+
+/**
+ * The final outbound admission fence lives inside the message transaction:
+ * a concurrent inbound delivery either wins and blocks this commit before it
+ * writes, or this commit wins and the later delivery remains unread.
+ */
+function rejectUnreadForActingEndpoint(db, { appId, senderPrincipalId, conversationId, effect, sendBranch, logger }) {
+  if (sendBranch !== 'agent' || typeof effect.sender_endpoint_id !== 'string') return;
+  requireActingEndpoint(db, { appId, senderPrincipalId, senderEndpointId: effect.sender_endpoint_id, processGeneration: effect.process_generation });
+  refuseNonOwner(db, { conversationId, effect, sendBranch, requireCustody, logger });
+  const rows = unreadBlockingSends(db, { endpointId: effect.sender_endpoint_id, conversationId });
   if (rows.length === 0) return;
   const latest = rows[0];
   throw new TightbeamError('blocked_unread', 'an unread message must be read before sending on this thread', {
     conversation_id: conversationId,
     latest_unread_message_id: latest.message_id,
+    oldest_unread_message_id: admissionPointer(rows).message_id, // what receive admits first (ac-kf9rt R9, ac-jfv.171)
     subject: conversationSubjectForUnreadAdmission(db, conversationId),
     sender_display_name: latest.sender_display_name ?? 'the sender',
     unread_count: rows.length,
@@ -1760,7 +1761,7 @@ export function commitMessageWithEffect(context, connection, request) {
   }
   validateBody(request.body);
   validateIdempotencyKey(request.idempotency_key);
-  validateCommitMetadata(request.metadata);
+  validateCommitMetadata(request.metadata, request.idempotency_key);
   const effect = validateEffect(request.obligation_effect);
 
   const hasConversationId = typeof request.conversation_id === 'string' && request.conversation_id.length > 0;
@@ -1822,13 +1823,14 @@ export function commitMessageWithEffect(context, connection, request) {
     ...(requestedRecipientEndpointId === undefined || requestedRecipientEndpointId === null ? {} : { recipient_endpoint_id: requestedRecipientEndpointId }),
   }), { current: identityMetadata(request.metadata), raw: request.metadata ?? null });
 
-  const preChecked = findIdempotentReplay(context.db, { appId: connection.appId, idempotencyKey: request.idempotency_key, hashes: accepted });
+  const idempotencyKey = commitIdempotencyKey(context.db, { appId: connection.appId, request, effect, senderPrincipalId });
+  const preChecked = findIdempotentReplay(context.db, { appId: connection.appId, idempotencyKey, hashes: accepted, byAction: request.action_id === undefined ? null : { request, effect } });
   if (preChecked) {
-    return { result: reconstructResult(context.db, { messageId: preChecked.id, conversationId: preChecked.conversation_id, idempotentReplay: true }) };
+    return { result: { ...reconstructResult(context.db, { messageId: preChecked.id, conversationId: preChecked.conversation_id, idempotentReplay: true }), ...(preChecked.argsDiffer ? { replay_args_differ: true } : {}) } };
   }
 
   const startedAt = Date.now();
-  const outcome = withIdempotency(context.db, { appId: connection.appId, idempotencyKey: request.idempotency_key, hash: accepted[0], accepted }, () =>
+  const outcome = withIdempotency(context.db, { appId: connection.appId, idempotencyKey, hash: accepted[0], accepted }, () =>
     withTransaction(context.db, () => {
       let conversationId;
       if (hasConversationId) {
@@ -1898,10 +1900,13 @@ export function commitMessageWithEffect(context, connection, request) {
         conversationId,
         effect,
         sendBranch,
+        logger: context.logger,
       });
 
       const now = new Date().toISOString();
-      stampOwnerIfUnset(context.db, conversationId, senderPrincipalId);
+      if (stampOwnerIfUnset(context.db, conversationId, senderPrincipalId)) startThread(context.db, { conversationId, sendBranch, effect, targetEndpointId: inboundTargetEndpointId ?? exactRecipientEndpointId, logger: context.logger });
+      // The owner the post reaches is settled before the audit, so the route, the replay and the delivery agree.
+      const ownerRecipientEndpointId = ownedRecipient(context.db, { conversationId, sendBranch, effect, namedEndpointId: exactRecipientEndpointId, logger: context.logger }) ?? exactRecipientEndpointId;
       const messageId = insertMessage(context.db, {
         conversationId,
         appId: connection.appId,
@@ -1909,7 +1914,7 @@ export function commitMessageWithEffect(context, connection, request) {
         kind: 'commit',
         body: request.body,
         metadata: request.metadata,
-        idempotencyKey: request.idempotency_key,
+        idempotencyKey,
         hash: accepted[0],
         origin: sendBranch,
         originChannelRouteId,
@@ -1928,7 +1933,7 @@ export function commitMessageWithEffect(context, connection, request) {
           effect,
           now,
           recipientEndpointId: exactRecipientEndpointId,
-          exactRoute: exactRecipientEndpointId === null ? null : routeOf(requestedRecipientEndpointId, exactRecipientEndpointId),
+          exactRoute: ownerRecipientEndpointId === null ? null : routeOf(requestedRecipientEndpointId ?? null, ownerRecipientEndpointId),
         }) ?? {};
       applyWakeEffects(context.db, { effect, now });
 
@@ -1983,7 +1988,7 @@ export function commitMessageWithEffect(context, connection, request) {
           messageId,
           senderPrincipalId,
           senderEndpointId: effect.sender_endpoint_id ?? null,
-          recipientEndpointId: inboundTargetEndpointId ?? exactRecipientEndpointId,
+          recipientEndpointId: inboundTargetEndpointId ?? ownerRecipientEndpointId,
           routeReason: stagedRootId !== null ? DELIVERY_CONFIRMED_ROUTE_REASON : noticeEndpointIds.length > 0 ? CANCEL_NOTICE_ROUTE_REASON : null,
           sourceObligationId: stagedRootId ?? (noticeEndpointIds.length > 0 ? cancelNotice.sourceObligationId : null),
           routeReasonPrincipalId: writerResult.stageConfirmationRecipientPrincipalId ?? null,
@@ -1991,6 +1996,8 @@ export function commitMessageWithEffect(context, connection, request) {
           typedRouteIsClosedWorkNotice: noticeEndpointIds.length > 0,
           everyCopyIsClosedWorkNotice: cancelNotice?.requesterCancel === true,
           endpointBindings: resolveEndpointBindings(context.db, { effect, inReplyToMessageId, now, noticeEndpointIds }),
+          narrowUnbound: sendBranch === 'agent',
+          hostWakes: effect.type !== 'none', // session_host.mjs: a bare none never host-wakes
           resumeStaleAfterMs: context.resumeStaleAfterMs,
           stateRoot: context.stateRoot,
           logger: context.logger,
@@ -2229,6 +2236,8 @@ function findCommandReplay(db, { appId, operation, idempotencyKey, hash }) {
  * admission route exists per command.
  */
 function createRecoveryRoute(db, { root, openingMessageId, target, operation, stateRoot, logger, now }) {
+  // ac-jfv.161: custody may move; an opener abandoned on a dead holder is never delivered late
+  if (skipAbandonedOpener(db, { messageId: openingMessageId, target, rootId: root.id, operation, logger })) return [];
   const staleDeliveries = db.prepare("SELECT id FROM deliveries WHERE message_id = ? AND endpoint_id = ? AND state IN ('pending', 'claimed')").all(openingMessageId, target.id);
   for (const delivery of staleDeliveries) {
     db.prepare("UPDATE deliveries SET state = 'failed', updated_at = ? WHERE id = ?").run(now, delivery.id);
@@ -2252,11 +2261,8 @@ function createRecoveryRoute(db, { root, openingMessageId, target, operation, st
   // selected endpoint process is alive or owns this recovery delivery.
   const route = routeDelivery({ endpointState: target.state, launchMode: target.launch_mode, hasExactListener: false });
   // The closed-endpoint guard above means 'skip' is unreachable here.
-  const deliveryId = generateId('delivery');
-  db.prepare(
-    "INSERT INTO deliveries (id, message_id, endpoint_id, state, route_reason, source_obligation_id, created_at, updated_at) VALUES (?, ?, ?, 'pending', ?, ?, ?, ?)",
-  ).run(deliveryId, openingMessageId, target.id, operation, root.id, now, now);
-  refreshSessionWatermark({ stateRoot, sessionId: target.provider_session_id, deliveryId, logger });
+  const deliveryId = routeExistingMessage(db, { messageId: openingMessageId, endpointId: target.id, routeReason: operation, sourceObligationId: root.id, now });
+  publishRoutedDelivery(db, route, { stateRoot, sessionId: target.provider_session_id, deliveryId, logger });
   if (route === 'resume_dead' || route === 'resume_idle') {
     // The shared writer keeps the superseded-endpoint guard on this path too.
     maybeCreateResumeRequest(db, {
@@ -2351,7 +2357,7 @@ function strandedRootsOf(db, { appId, admittedRootId, predecessorIds }) {
              WHERE attempt.parent_id = root.id AND attempt.role = 'attempt'
                AND attempt.custodian_endpoint_id IN (SELECT value FROM json_each(?))
                AND (attempt.status = 'open'
-                 OR (attempt.resolution = 'failed'
+                 OR (attempt.resolution = 'failed' AND attempt.resolution_reason IS NOT 'dead_holder_abandoned'
                    AND attempt.generation = (SELECT MAX(newest.generation) FROM obligations newest WHERE newest.parent_id = root.id AND newest.role = 'attempt')
                    AND NOT EXISTS (SELECT 1 FROM obligations live WHERE live.parent_id = root.id AND live.role = 'attempt' AND live.status = 'open'))))
         ORDER BY root.created_at ASC, root.id ASC`,
@@ -2415,6 +2421,7 @@ export function runRecoveryCommand(context, connection, rawRequest, operation, {
         });
       }
       const target = requireAuthorizedRecoveryTarget(context.db, { appId: connection.appId, root, request, logger: context.logger });
+      refuseAbandonedRoot(context, { root, target });
 
       const predecessorIds = lineagePredecessorIds(context.db, target.id);
       const priorOpenAttempt = context.db.prepare("SELECT id, custodian_endpoint_id FROM obligations WHERE parent_id = ? AND role = 'attempt' AND status = 'open'").get(root.id);
@@ -2579,7 +2586,7 @@ const STOP_BLOCK_CAP = 3;
 // {...request, park:true} would admit as the original command and forbidden
 // concepts would be accepted-and-ignored. The same strict extra-field
 // convention validateEffect enforces per effect family.
-const SESSION_STOP_FIELDS = ['endpoint_id', 'process_generation', 'idempotency_key', 'background_wait', 'wait_mode', 'wait_outcome'];
+const SESSION_STOP_FIELDS = ['endpoint_id', 'process_generation', 'idempotency_key', 'background_wait', 'wait_mode', 'wait_outcome', CALLER_LAUNCH_FIELD];
 
 function validateStopWaitOutcome(request) {
   const outcome = request.wait_outcome === undefined ? null : validateWaitOutcome(request.wait_outcome);
@@ -2612,6 +2619,7 @@ function validateSessionStopRequest(request) {
     background_wait: request.background_wait === true,
     wait_mode: request.wait_mode ?? null,
     wait_outcome: waitOutcome,
+    caller_launch: readCallerLaunch(request),
   };
 }
 
@@ -2688,13 +2696,6 @@ function recordBlockAttention(db, { rootId, now, listenerGeneration = null }) {
   return true;
 }
 
-// A takeover_pending row changes owner only by adoption or exhausted release.
-function markEndpointIdle(db, { endpointId, processGeneration, now }) {
-  return db
-    .prepare("UPDATE endpoints SET state = 'idle', updated_at = ? WHERE id = ? AND process_generation IS ? AND state NOT IN ('retiring', 'takeover_pending')")
-    .run(now, endpointId, processGeneration).changes === 1;
-}
-
 function activeListenerForStop(db, { endpointId, processGeneration }) {
   return db
     .prepare(
@@ -2707,9 +2708,9 @@ function activeListenerForStop(db, { endpointId, processGeneration }) {
 }
 
 export function oldestUnreadDeliveryForStop(db, { endpointId, processGeneration, excludeRouteReasons = [] }) {
-  return db
+  return takeoverFenced(db, endpointId) ? undefined : db
     .prepare(
-      `SELECT d.id AS delivery_id, d.message_id
+      `SELECT d.id AS delivery_id, d.message_id, EXISTS (SELECT 1 FROM messages m WHERE m.id = d.message_id AND m.origin = 'inbound' AND m.origin_channel_route_id IS NOT NULL) AND COALESCE(d.route_reason, '') NOT IN ('${DELEGATION_NOTICE_ROUTE_REASON}', '${REPLACEMENT_NOTICE_ROUTE_REASON}', '${CANCEL_NOTICE_ROUTE_REASON}') AS from_user
          FROM deliveries d
         WHERE d.endpoint_id = ? AND d.state != 'failed' AND d.read_at IS NULL
           AND NOT EXISTS (
@@ -2840,10 +2841,8 @@ function isBackgroundWaitPark(endpoint, processGeneration, backgroundWait) {
   return backgroundWait && endpoint.launch_mode === 'non_interactive' && Number.isInteger(processGeneration);
 }
 
-// A session never stops with an unread message. The headless and
-// unarmed allow paths first look for one and block so the model receives it.
-// Blocks are counted from the stop ledger per delivery (no new state); after
-// STOP_BLOCK_CAP the Stop is allowed rather than wedge a session whose receipt keeps failing.
+// A session never stops with an unread message: the headless and unarmed allow paths block so the model receives it.
+// Blocks are counted per delivery from the stop ledger; after STOP_BLOCK_CAP the Stop is allowed rather than wedge a session whose receipt keeps failing.
 function unreadStopBlock(db, { endpoint, processGeneration, trace }) {
   const delivery = oldestUnreadDeliveryForStop(db, { endpointId: endpoint.id, processGeneration });
   if (!delivery) return null;
@@ -2859,25 +2858,27 @@ function unreadStopBlock(db, { endpoint, processGeneration, trace }) {
     decision: 'block',
     obligation_ids: [],
     unread_delivery_id: delivery.delivery_id,
+    unread_message_id: delivery.message_id,
+    unread_from_user: delivery.from_user === 1, // the ack gate arms only for a user's own message, not a typed notice
     reason:
       `[tightbeam] Cannot stop: you have an unread message (${delivery.message_id}).\n` +
       `Receive command: ${tightbeamCommandName()} agent receive --message ${delivery.message_id}`,
   };
 }
 
-function explicitWaitStop(db, { appId, endpoint, processGeneration, request, now, trace, obligationIds = [] }) {
+function explicitWaitStop(db, { appId, endpoint, processGeneration, request, now, trace, obligationIds = [], notice = null }) {
   if (request.wait_mode !== 'explicit' || endpoint.state === 'retiring' || !Number.isInteger(processGeneration)) return null;
   const headless = endpoint.launch_mode === 'non_interactive' || isHeadlessDaemonProcess(endpoint); // the resumer restarts it when a reply lands
   const result = unreadStopBlock(db, { endpoint, processGeneration, trace }) ?? explicitWaitGuard(db, { appId, endpoint, processGeneration, request, trace, pending: headless ? [] : pendingReplyExpectations(db, endpoint, now), callerAction: callerActionForPendingOffer(db, endpoint, endpoint.principal_id) }, tightbeamCommandName());
   if (result) trace.reason ??= result.decision === 'allow' ? 'explicit_allow' : 'pending_reply';
   if (result?.decision !== 'allow') return result;
-  trace.ended_listeners = endUnsupportedTachyonListeners(db, { endpointId: endpoint.id, processGeneration, now, ...(headless ? { reason: 'background_wait_ended' } : {}) });
+  trace.ended_listeners = endUnsupportedTachyonListeners(db, { endpointId: endpoint.id, processGeneration, now, notice, ...(headless ? { reason: 'background_wait_ended' } : {}) });
   markEndpointIdle(db, { endpointId: endpoint.id, processGeneration, now });
   return { ...result, obligation_ids: obligationIds };
 }
 
 // `trace` collects the decision branch for the post-commit session_stop_decided log.
-function parkEligibleEndpoint(db, { endpoint, processGeneration, now, obligationIds = [], backgroundWait = false, trace = {} }) {
+function parkEligibleEndpoint(db, { endpoint, processGeneration, now, obligationIds = [], backgroundWait = false, trace = {}, notice = null }) {
   if (endpoint.state === 'retiring') return { decision: 'allow', obligation_ids: obligationIds };
   const backgroundPark = isBackgroundWaitPark(endpoint, processGeneration, backgroundWait);
   const stopAllowedByMode = !backgroundPark && (endpoint.launch_mode === 'non_interactive' || isHeadlessDaemonProcess(endpoint) || !Number.isInteger(processGeneration) || !isTachyonArmedForGeneration(endpoint, processGeneration));
@@ -2888,13 +2889,13 @@ function parkEligibleEndpoint(db, { endpoint, processGeneration, now, obligation
   if (!backgroundPark && (endpoint.launch_mode === 'non_interactive' || isHeadlessDaemonProcess(endpoint) || !Number.isInteger(processGeneration))) {
     // A headless Stop with no background work left releases any earlier
     // background-wait listener so its wake-listen / hold exits with the run.
-    trace.ended_listeners = Number.isInteger(processGeneration) ? endUnsupportedTachyonListeners(db, { endpointId: endpoint.id, processGeneration, now, reason: 'background_wait_ended' }) : 0;
+    trace.ended_listeners = Number.isInteger(processGeneration) ? endUnsupportedTachyonListeners(db, { endpointId: endpoint.id, processGeneration, now, notice, reason: 'background_wait_ended' }) : 0;
     trace.reason = 'headless_allow';
     markEndpointIdle(db, { endpointId: endpoint.id, processGeneration, now });
     return { decision: 'allow', obligation_ids: obligationIds };
   }
   if (!backgroundPark && !isTachyonArmedForGeneration(endpoint, processGeneration)) {
-    trace.ended_listeners = endUnsupportedTachyonListeners(db, { endpointId: endpoint.id, processGeneration, now });
+    trace.ended_listeners = endUnsupportedTachyonListeners(db, { endpointId: endpoint.id, processGeneration, now, notice });
     trace.reason = 'unarmed_allow';
     markEndpointIdle(db, { endpointId: endpoint.id, processGeneration, now });
     return { decision: 'allow', obligation_ids: obligationIds };
@@ -2950,6 +2951,7 @@ function runSessionStop(context, connection, rawRequest) {
         endpointId: request.endpoint_id,
         processGeneration: request.process_generation,
       });
+      refuseUnlessOwnerLaunch(context, { endpointId: endpoint.id, callerLaunch: request.caller_launch, op: 'session.stop' });
       launchMode = endpoint.launch_mode ?? null;
       const untracked = untrackedOffers(context.db, endpoint.id);
       const now = new Date().toISOString();
@@ -2957,7 +2959,7 @@ function runSessionStop(context, connection, rawRequest) {
       const held = () => heldRequestStop(context.db, { endpoint, now, trace, cap: STOP_BLOCK_CAP, rootOf: chainRootOf, recordBlock: recordBlockAttention, unreadFirst: () => Number.isInteger(request.process_generation) && !!unreadStopBlock(context.db, { endpoint, processGeneration: request.process_generation, trace: {} }), logger: context.logger });
       let resultPayload;
       if (untracked.length === 0) {
-        resultPayload = held() ?? explicitWaitStop(context.db, { appId: connection.appId, endpoint, processGeneration: request.process_generation, request, now, trace }) ?? parkEligibleEndpoint(context.db, { endpoint, processGeneration: request.process_generation, now, backgroundWait: request.background_wait, trace });
+        resultPayload = held() ?? explicitWaitStop(context.db, { appId: connection.appId, endpoint, processGeneration: request.process_generation, request, now, trace, notice: context }) ?? parkEligibleEndpoint(context.db, { endpoint, processGeneration: request.process_generation, now, backgroundWait: request.background_wait, trace, notice: context });
         replyDiagnosticOutcomes.push(
           resultPayload.decision === 'park'
             ? 'parked'
@@ -2981,13 +2983,13 @@ function runSessionStop(context, connection, rawRequest) {
           for (const entry of counts) {
             context.db.prepare('UPDATE root_attention SET last_block_at = ?, updated_at = ? WHERE root_obligation_id = ?').run(now, now, entry.rootId);
           }
-          resultPayload = held() ?? explicitWaitStop(context.db, { appId: connection.appId, endpoint, processGeneration: request.process_generation, request, now, trace, obligationIds: untracked.map((offer) => offer.id) }) ?? parkEligibleEndpoint(context.db, {
+          resultPayload = held() ?? explicitWaitStop(context.db, { appId: connection.appId, endpoint, processGeneration: request.process_generation, request, now, trace, obligationIds: untracked.map((offer) => offer.id), notice: context }) ?? parkEligibleEndpoint(context.db, {
             endpoint,
             processGeneration: request.process_generation,
             now,
             obligationIds: untracked.map((offer) => offer.id),
             backgroundWait: request.background_wait,
-            trace,
+            trace, notice: context,
           });
         } else {
           for (const entry of counts) {

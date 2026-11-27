@@ -41,12 +41,16 @@ function summarize(results, timings) {
   const claimed = results.filter((result) => !isIdle(result));
   const delivered = claimed.filter((r) => r?.ok === true).length;
   const released = claimed.filter((r) => r?.released === true).length;
-  const failures = claimed.filter((r) => r?.ok !== true && !r?.released);
+  const skipped = claimed.filter((r) => r?.skipped === true).length;
+  const failures = claimed.filter(
+    (r) => r?.ok !== true && !r?.released && !r?.skipped,
+  );
   const counts = {
     attempted: claimed.length,
     delivered,
     failed: failures.length,
     ...(released ? { released } : {}),
+    ...(skipped ? { skipped } : {}),
   };
   const thrown = failures.find((r) => r?.thrown)?.thrown;
   const last = failures.at(-1);
@@ -63,7 +67,7 @@ function summarize(results, timings) {
   };
 }
 
-// One notice tick (tier 0): claims until claim_held and sends each claimed notice in its own task,
+// One notice tick (tier 0): claims until a claim holds nothing and sends each claimed notice in its own task,
 // at most `limit` at once (notice_pump.mjs). `deadlineMs` stops new claims. claim_ms and send_ms
 // are the slowest claim and the slowest send of the tick; total_ms the tick.
 export async function drainNotices({ adapter, deadlineMs = null, limit = 4 }) {

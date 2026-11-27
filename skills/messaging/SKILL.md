@@ -21,18 +21,16 @@ matching `CLAUDE_PLUGIN_ROOT` or `PLUGIN_ROOT` can provide that parent
 directory when set. Check the resolved launcher is executable.
 Never use bare `tldr-agents` or `tightbeam` from PATH or the standalone
 `~/.tightbeam/install` copy; any of them could select a different product
-build. Set this variable to the resolved absolute path in each shell that runs
-a recipe:
-
-```sh
-TLDR_BIN="<absolute installed plugin root>/bin/tldr-agents"
-```
+build. Every recipe below writes the launcher as
+`<absolute installed plugin root>/bin/tldr-agents`: write the resolved
+absolute path there, never a shell variable (the ACK gate refuses a command
+that starts with `$`). Wrap the path in double quotes only when it contains a
+space.
 
 Hook notifications print recipes with this plugin's launcher already
-resolved (`<absolute installed plugin root>/bin/tldr-agents messaging agent …`);
-run them as printed. The notification that resumes or starts a session may name
-the bare `tldr-agents messaging agent …`; run that as
-`"$TLDR_BIN" messaging agent …` with the same arguments.
+resolved; run them as printed. The notification that resumes or starts a
+session may name the bare `tldr-agents messaging agent …`; run that with the
+resolved launcher path in place of `tldr-agents` and the same arguments.
 
 ## Write message bodies
 
@@ -46,21 +44,23 @@ shell-quoting damage.
 ## Reply to a received user message
 
 Every message received from the user through an external channel already
-creates an obligation to respond. The notification does not include the
-message body. Do not create a request for it; reply to the received message
+creates an obligation to respond. The notification shows the user's message
+body under `Body:`, each line quoted with `> `, up to 2,000 characters; a longer
+body ends with its exact receive command. Agent messages and Copilot notices
+are bodyless. Do not create a request for it; reply to the received message
 directly with its notification message ID when you already know what to say,
 or first receive the exact notification message ID with
 `agent receive --message <message-id>` to inspect the body:
 
 ```sh
-"$TLDR_BIN" messaging agent reply --message <message-id> --body "<reply>" --wait-delivery 30s
+<absolute installed plugin root>/bin/tldr-agents messaging agent reply --message <message-id> --body "<reply>" --wait-delivery 30s
 ```
 
 Only exact receipt returns the body. It validates this endpoint/session and is
 safe to retry by the same owner:
 
 ```sh
-"$TLDR_BIN" messaging agent receive --message <message-id>
+<absolute installed plugin root>/bin/tldr-agents messaging agent receive --message <message-id>
 ```
 
 This posts your reply on the original conversation and channel, and the same
@@ -90,6 +90,9 @@ On `Delivery partial`, the delivered channels have the reply: do not resend. If 
 `next_action` is returned, a channel is still pending: wait on it.
 An unavailable check is not evidence of failed delivery.
 
+A refused tool call that quotes a user message means that message is waiting
+for your first reply: read it if asked, then reply, ack, or park before other work.
+
 Send the user two messages per request: one first reply and one final answer.
 Send nothing in between, such as "workers started" or "still working", unless
 the user asks, you need a decision, you are blocked, or a time you gave will
@@ -98,13 +101,19 @@ slip. Each message reaches every channel, so each extra one is an extra email.
 If work continues, acknowledge without completing the request:
 
 ```sh
-"$TLDR_BIN" messaging agent ack --work <work-id> --body "I am investigating this now."
+<absolute installed plugin root>/bin/tldr-agents messaging agent ack --work <work-id> --body "I am investigating this now."
 ```
 
-When an acknowledgement is overdue, the tool gate blocks every other tool call
-until you send it. It admits only these exact commands, with the resolved
-launcher path written out (no variable, no quotes around the path) and a body in
-plain double quotes containing no `"`, `$`, backtick, or backslash:
+While a user message waits for your first reply, the tool gate refuses every
+tool call except the commands that answer it (`reply`, `ack`, `update`,
+`complete`, `cancel`, `decline`, park with `delegate --at`, and the low-level
+`ack` a receive result shows) and those that read it (`receive`, `inbox`) or
+take an offer (`accept`, which does not answer it). Write them as this skill
+shows: the resolved launcher path (no variable), nothing chained, and no `$`
+or backtick outside single quotes (write `\$` for a literal dollar in double
+quotes). A multiline body is safest as `--body "$(cat <<'EOF'` ... `EOF` `)"`
+or `--body-file <path>`. Everything else (`send`, `delegate --to`, `drafts`,
+...) waits until you have answered. For example, these pass:
 
 ```text
 <absolute installed plugin root>/bin/tldr-agents messaging agent ack --work <work-id> --body "I am investigating this now."
@@ -117,7 +126,7 @@ result. A simple test acknowledgement
 can itself be completed.
 
 ```sh
-"$TLDR_BIN" messaging agent complete --work <work-id> --body "<final result>"
+<absolute installed plugin root>/bin/tldr-agents messaging agent complete --work <work-id> --body "<final result>"
 ```
 
 To park the request and report later, run `delegate --at` with the time and a
@@ -131,7 +140,7 @@ costs another message: you must park again or complete, and a session that
 stays silent past its time gets a "has not reported back" notice to the user.
 
 ```sh
-"$TLDR_BIN" messaging agent delegate --work <work-id> --at 1h --body "Running the migration; I will report back in an hour"
+<absolute installed plugin root>/bin/tldr-agents messaging agent delegate --work <work-id> --at 1h --body "Running the migration; I will report back in an hour"
 ```
 
 After the request is closed, `reply --message <message-id>` and
@@ -181,27 +190,27 @@ are shown, the output says so; narrow it with `--runtime`. A session's state is
 once the turn ends, even if background work is still running:
 
 ```sh
-"$TLDR_BIN" messaging agent sessions
-"$TLDR_BIN" messaging agent sessions --here
-"$TLDR_BIN" messaging agent sessions --runtime codex --state idle
+<absolute installed plugin root>/bin/tldr-agents messaging agent sessions
+<absolute installed plugin root>/bin/tldr-agents messaging agent sessions --here
+<absolute installed plugin root>/bin/tldr-agents messaging agent sessions --runtime codex --state idle
 ```
 
 When an agent needs to respond or do something, use `request`:
 
 ```sh
-"$TLDR_BIN" messaging agent request --to session:<session-id> --subject "Review" --reason "Need independent review" --body "Please review this" --completion-mode message_committed
-"$TLDR_BIN" messaging agent request --to agent:codex:/work/acme --subject "Review" --reason "Need independent review" --body "Please review this" --completion-mode message_committed
-"$TLDR_BIN" messaging agent request --to new:codex:/work/acme --subject "Run the suite" --reason "Start a helper" --body "Please run the test suite" --completion-mode message_committed
+<absolute installed plugin root>/bin/tldr-agents messaging agent request --to session:<session-id> --subject "Review" --reason "Need independent review" --body "Please review this" --completion-mode message_committed
+<absolute installed plugin root>/bin/tldr-agents messaging agent request --to agent:codex:/work/acme --subject "Review" --reason "Need independent review" --body "Please review this" --completion-mode message_committed
+<absolute installed plugin root>/bin/tldr-agents messaging agent request --to new:codex:/work/acme --subject "Run the suite" --reason "Start a helper" --body "Please run the test suite" --completion-mode message_committed
 ```
 
 A request opens tracked work and returns a work ID. Use that ID to report
 progress, finish, cancel, or inspect the request:
 
 ```sh
-"$TLDR_BIN" messaging agent update --work <work-id> --body "Reviewing now"
-"$TLDR_BIN" messaging agent complete --work <work-id> --body "Review complete"
-"$TLDR_BIN" messaging agent cancel --work <work-id> --reason "Cannot reproduce"
-"$TLDR_BIN" messaging agent status --work <work-id>
+<absolute installed plugin root>/bin/tldr-agents messaging agent update --work <work-id> --body "Reviewing now"
+<absolute installed plugin root>/bin/tldr-agents messaging agent complete --work <work-id> --body "Review complete"
+<absolute installed plugin root>/bin/tldr-agents messaging agent cancel --work <work-id> --reason "Cannot reproduce"
+<absolute installed plugin root>/bin/tldr-agents messaging agent status --work <work-id>
 ```
 
 When another agent asks you for something, the request is tracked work you now
@@ -216,8 +225,8 @@ To hand work you hold to another exact session, delegate it. You still owe
 the requester the final response:
 
 ```sh
-"$TLDR_BIN" messaging agent delegate --work <work-id> --to session:<session-id> --body "Please take the review"
-"$TLDR_BIN" messaging agent delegate --work <work-id> --to new:codex:/work/acme --body "Please take the review"
+<absolute installed plugin root>/bin/tldr-agents messaging agent delegate --work <work-id> --to session:<session-id> --body "Please take the review"
+<absolute installed plugin root>/bin/tldr-agents messaging agent delegate --work <work-id> --to new:codex:/work/acme --body "Please take the review"
 ```
 
 To move work you hold to one of your own live sessions, transfer it with
@@ -228,7 +237,7 @@ keeps that debt; `transfer` moves it. A transfer is refused while a delegation
 you made on that work is still open; transfer after it is completed or declined.
 
 ```sh
-"$TLDR_BIN" messaging agent transfer --work <work-id> --to session:<session-id> --body "Yours now"
+<absolute installed plugin root>/bin/tldr-agents messaging agent transfer --work <work-id> --to session:<session-id> --body "Yours now"
 ```
 
 When someone delegates work to you, the offer reaches you as a message that
@@ -239,8 +248,8 @@ offer you do not answer in time closes; `handoff_unavailable` means the work is
 not an offer awaiting your answer, so read `agent threads` instead.
 
 ```sh
-"$TLDR_BIN" messaging agent accept --work <delegation-id> --body "Taking it"
-"$TLDR_BIN" messaging agent decline --work <delegation-id> --body "Cannot take it, reason"
+<absolute installed plugin root>/bin/tldr-agents messaging agent accept --work <delegation-id> --body "Taking it"
+<absolute installed plugin root>/bin/tldr-agents messaging agent decline --work <delegation-id> --body "Cannot take it, reason"
 ```
 
 `cancel` works for the session that opened the request even after the
@@ -258,9 +267,9 @@ two threads share a prefix). Reading a thread never marks anything read;
 unread messages stay tagged until you `receive` or reply.
 
 ```sh
-"$TLDR_BIN" messaging agent threads
-"$TLDR_BIN" messaging agent threads --waiting-on me
-"$TLDR_BIN" messaging agent thread --thread <thread-handle>
+<absolute installed plugin root>/bin/tldr-agents messaging agent threads
+<absolute installed plugin root>/bin/tldr-agents messaging agent threads --waiting-on me
+<absolute installed plugin root>/bin/tldr-agents messaging agent thread --thread <thread-handle>
 ```
 
 To follow up on a request you made (a nudge or more context), send into its
@@ -271,15 +280,15 @@ It stays in the same work and creates no new work. Finished or cancelled work
 gives `work_closed`; open a new request instead.
 
 ```sh
-"$TLDR_BIN" messaging agent send --thread <thread-handle> --body "Any update on the review?"
+<absolute installed plugin root>/bin/tldr-agents messaging agent send --thread <thread-handle> --body "Any update on the review?"
 ```
 
 Use `send` only when no response or action is expected:
 
 ```sh
-"$TLDR_BIN" messaging agent send --to session:<session-id> --subject "Deployment" --reason "Inform peer" --body "FYI: deployment completed" --no-reply
-"$TLDR_BIN" messaging agent send --to agent:codex:/work/acme --subject "Deployment" --reason "Inform peer" --body "FYI: deployment completed" --no-reply
-"$TLDR_BIN" messaging agent send --to new:claude-code:/work/acme --subject "Deployment" --reason "Brief a new helper" --body "FYI: deployment completed" --no-reply
+<absolute installed plugin root>/bin/tldr-agents messaging agent send --to session:<session-id> --subject "Deployment" --reason "Inform peer" --body "FYI: deployment completed" --no-reply
+<absolute installed plugin root>/bin/tldr-agents messaging agent send --to agent:codex:/work/acme --subject "Deployment" --reason "Inform peer" --body "FYI: deployment completed" --no-reply
+<absolute installed plugin root>/bin/tldr-agents messaging agent send --to new:claude-code:/work/acme --subject "Deployment" --reason "Brief a new helper" --body "FYI: deployment completed" --no-reply
 ```
 
 `--no-reply` means you will not wait for an answer. It does not stop the
@@ -288,7 +297,7 @@ recipient, including the user, from replying; a reply still reaches you.
 Reply to an ordinary, untracked agent message with its message ID:
 
 ```sh
-"$TLDR_BIN" messaging agent reply --message <message-id> --body "Acknowledged" --no-reply
+<absolute installed plugin root>/bin/tldr-agents messaging agent reply --message <message-id> --body "Acknowledged" --no-reply
 ```
 
 ### How much a message from another agent carries
@@ -332,7 +341,7 @@ When a tracked request, delegation, or channel reply is expected, wait in one
 CLI command:
 
 ```sh
-"$TLDR_BIN" messaging agent wait
+<absolute installed plugin root>/bin/tldr-agents messaging agent wait
 ```
 
 Optional wait syntax is `agent wait [--timeout <duration>] [--json]`.
@@ -394,10 +403,10 @@ existing long-wait behavior until refreshed.
 To start a new external user message, use the registered channel routes:
 
 ```sh
-"$TLDR_BIN" messaging agent send --to user --subject "Update" --reason "Notify user" --body "<message>"
-"$TLDR_BIN" messaging agent send --to user --subject "Update" --reason "Notify user" --body "<message>" --channel <selector>
-"$TLDR_BIN" messaging agent send --to user --subject "Update" --reason "Notify user" --body "<message>" --channel all
-"$TLDR_BIN" messaging agent send --to user --subject "Update" --reason "Notify user" --body "<message>" --channel email --wait-delivery 30s
+<absolute installed plugin root>/bin/tldr-agents messaging agent send --to user --subject "Update" --reason "Notify user" --body "<message>"
+<absolute installed plugin root>/bin/tldr-agents messaging agent send --to user --subject "Update" --reason "Notify user" --body "<message>" --channel <selector>
+<absolute installed plugin root>/bin/tldr-agents messaging agent send --to user --subject "Update" --reason "Notify user" --body "<message>" --channel all
+<absolute installed plugin root>/bin/tldr-agents messaging agent send --to user --subject "Update" --reason "Notify user" --body "<message>" --channel email --wait-delivery 30s
 ```
 
 `--wait-delivery 30s` waits on that one committed message's delivery (60s at
@@ -420,14 +429,14 @@ from waiting for the user's next reply.
 For self-owned work that should notify the user when finished:
 
 ```sh
-"$TLDR_BIN" messaging agent request --to self --subject "Work result" --reason "Notify on completion" --body "<work>" --completion-mode delivery_confirmed --notify user --channel <selector>
-"$TLDR_BIN" messaging agent complete --work <work-id> --body "<result>" --wait-delivery 30s
+<absolute installed plugin root>/bin/tldr-agents messaging agent request --to self --subject "Work result" --reason "Notify on completion" --body "<work>" --completion-mode delivery_confirmed --notify user --channel <selector>
+<absolute installed plugin root>/bin/tldr-agents messaging agent complete --work <work-id> --body "<result>" --wait-delivery 30s
 ```
 
 Opening with `--notify user` records the selected routes. Completion uses that
 stored selection exactly once and closes work only after every selected route
 delivers; partial or failed routes leave the work visible through
-`"$TLDR_BIN" messaging agent status --work <work-id>`.
+`<absolute installed plugin root>/bin/tldr-agents messaging agent status --work <work-id>`.
 
 ## When email isn't connected
 
@@ -442,11 +451,11 @@ declines, say the email remains unsent. Use another channel only after the user
 explicitly chooses it; never substitute one silently.
 
 If the user accepts, keep the request as a private draft, then start the setup
-skill's email connection (`"$TLDR_BIN" setup --json`). Pass the body on stdin or
+skill's email connection (`<absolute installed plugin root>/bin/tldr-agents setup --json`). Pass the body on stdin or
 with `--body-file <path>`, never as an argument:
 
 ```sh
-"$TLDR_BIN" drafts create --kind send --subject "<subject>" --body-file - <<'EOF'
+<absolute installed plugin root>/bin/tldr-agents drafts create --kind send --subject "<subject>" --body-file - <<'EOF'
 <the user's requested message>
 EOF
 ```
@@ -459,7 +468,7 @@ When email connects in the same conversation, finish the request and report
 its actual result:
 
 ```sh
-"$TLDR_BIN" drafts confirm --id <draft-id>
+<absolute installed plugin root>/bin/tldr-agents drafts confirm --id <draft-id>
 ```
 
 Confirm sends by email only, at most once per draft. After a successful
@@ -476,7 +485,7 @@ For a notification draft, confirm with the reviewed job spec (JSON, as for
 `tasks create --stdin`), as the tasks skill documents:
 
 ```sh
-"$TLDR_BIN" drafts confirm --id <draft-id> --job-file - --cwd /abs/project <<'EOF'
+<absolute installed plugin root>/bin/tldr-agents drafts confirm --id <draft-id> --job-file - --cwd /abs/project <<'EOF'
 <reviewed job JSON>
 EOF
 ```
@@ -484,7 +493,7 @@ EOF
 In a later session, or after a long delay, list what is still pending:
 
 ```sh
-"$TLDR_BIN" drafts list
+<absolute installed plugin root>/bin/tldr-agents drafts list
 ```
 
 For each draft, once email is connected, show its subject and content as
@@ -496,7 +505,7 @@ Never confirm a draft from an earlier session without the user’s explicit yes.
 On yes, confirm it; on no, close it without sending:
 
 ```sh
-"$TLDR_BIN" drafts discard --id <draft-id>
+<absolute installed plugin root>/bin/tldr-agents drafts discard --id <draft-id>
 ```
 
 Discard sends and schedules nothing. If it reports `previous_state:
@@ -506,8 +515,8 @@ user that instead of calling it unsent.
 ## Check messages and delivery
 
 ```sh
-"$TLDR_BIN" messaging agent inbox --unread
-"$TLDR_BIN" messaging agent status --message <outbound-message-id> --wait-delivery 30s
+<absolute installed plugin root>/bin/tldr-agents messaging agent inbox --unread
+<absolute installed plugin root>/bin/tldr-agents messaging agent status --message <outbound-message-id> --wait-delivery 30s
 ```
 
 Report returned status accurately: `committed` or `pending` does not mean
@@ -515,15 +524,15 @@ Report returned status accurately: `committed` or `pending` does not mean
 not the inbound notification's ID. For obligation conflicts, follow the exact
 `complete --work` or `update --work` action in the error. Delivery-status
 permission errors require the correct outbound target, not a doctor check.
-For setup or connection errors, run `"$TLDR_BIN" messaging doctor`.
+For setup or connection errors, run `<absolute installed plugin root>/bin/tldr-agents messaging doctor`.
 Every agent subcommand supports `--help` without a session.
 
 ## Offline and resume
 
 Offline messages wait durably through Tightbeam's explicit resume path. If
 notification context is missing, inspect
-`"$TLDR_BIN" messaging agent inbox --unread`, then reply to the matching
-message ID directly. Hook notifications carry no body themselves. For an
+`<absolute installed plugin root>/bin/tldr-agents messaging agent inbox --unread`, then reply to the matching
+message ID directly. Hook notifications carry no body themselves, except a user's own message: its text (up to 2,000 characters) is shown, so reply to it directly; the reply marks it read. If the reply is refused because a newer message on the same thread is unread, receive the message the refusal names, then reply again. For an
 interactive session, the oldest unread message is notified at
 T+0, one bodyless retry is made available at T+30, and at T+60 Tightbeam may
 resume the same provider session once with its rotated ownership token. The

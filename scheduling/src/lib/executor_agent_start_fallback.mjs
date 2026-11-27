@@ -58,10 +58,11 @@ export async function launchManagedAgentUntilStartedWithFallback({
   startupWindowMs,
   runId = null,
   jobId = null,
+  jobFallbackPolicy = null,
   agentExecutionEnv,
   launchAgentUntilStarted,
 }) {
-  const defaults = readAgentDefaults();
+  const defaults = readAgentDefaults(undefined, jobFallbackPolicy);
   const fallbackAgent = fallbackFor(agent, defaults);
   const captureArgs = ensureSessionCaptureArgs(agent, args, wrapper);
   const prompt = extractAgentPrompt({ agent, args: captureArgs, stdinText });

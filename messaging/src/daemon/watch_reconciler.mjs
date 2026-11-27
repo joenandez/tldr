@@ -40,15 +40,19 @@ export const WATCH_SCAN_LIMIT = 1000;
 /** Typed route of the expiry wake to the offerer; it re-delivers the original offer message. */
 export const OFFER_EXPIRED_ROUTE_REASON = 'handoff.acceptance.expired';
 
+// Rowid order is the old full scan's order, which "first match wins" depends on;
+// message_effects_handoff_offer (performance_indexes.mjs) serves it without a sort.
+export const OFFER_AUDITS_SQL = "SELECT message_id, effect_payload FROM message_effects WHERE effect = 'handoff.offer' ORDER BY rowid";
+
 /**
  * Indexes every committed handoff.offer audit row ONCE: delegation id →
  * creating offer's message id. First match wins and an unreadable payload
  * cannot match — exactly findOfferMessageId's scan semantics. Built before
- * the decision loop so a pass costs one scan instead of one full
+ * the decision loop so a pass costs one indexed read instead of one full
  * SELECT-and-JSON-parse per expired candidate held inside BEGIN IMMEDIATE.
  */
-function indexOfferAudits(db) {
-  const offers = db.prepare("SELECT message_id, effect_payload FROM message_effects WHERE effect = 'handoff.offer'").all();
+export function indexOfferAudits(db) {
+  const offers = db.prepare(OFFER_AUDITS_SQL).all();
   const index = new Map();
   for (const row of offers) {
     try {
@@ -174,10 +178,11 @@ export function runWatchReconciliation(context, { now = new Date(), limit = WATC
     )
     .all(now.toISOString(), limit);
 
-  // One scan per pass, outside every per-watch transaction: the offer audit
+  // One read per pass, outside every per-watch transaction: the offer audit
   // table is read-only to this pass, so hoisting keeps the write lock held
   // for the decision's CAS + delivery writes only.
-  const offerIndex = indexOfferAudits(context.db);
+  // Only a pass with something to decide reads it (ac-srg29.2): offers grow forever.
+  const offerIndex = candidates.length > 0 ? indexOfferAudits(context.db) : null;
 
   let expired = 0;
   for (const candidate of candidates) {

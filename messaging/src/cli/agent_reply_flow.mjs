@@ -107,6 +107,26 @@ export async function commitClosedFollowUp(
   });
 }
 
+// The root's requester: the exact opening endpoint or its lineage replacement
+// (daemon rootRequesterLineage). Another session of the same agent is not.
+export const isRequester = (chain, session) =>
+  Boolean(chain.requester) &&
+  (chain.requester.endpoint_id === session.endpoint_id ||
+    (chain.requester.replacement_endpoint_ids ?? []).includes(
+      session.endpoint_id,
+    ));
+
+// ac-jfv.158: a requester that holds no open node replies to its delegate in
+// thread as a party (a `none` effect), whatever the delegate's custody; the
+// open work still owes its result. Holders keep the custody path.
+export const requesterReplies = (chain, session) =>
+  isRequester(chain, session) &&
+  ![...(chain.attempts ?? []), ...(chain.delegations ?? [])].some(
+    (node) =>
+      node.status === "open" &&
+      node.custodian_endpoint_id === session.endpoint_id,
+  );
+
 const ackOwed = (chain) =>
   Boolean(chain.ack_due_at) &&
   !chain.ack_accepted_at &&
@@ -125,11 +145,18 @@ async function replyChain({ client, session }, message) {
   return (await conversationUserChain(client, message.conversation_id)).user;
 }
 
+// A user's follow-up in the work's thread joins the open work: it replies into the thread, so its root is the work's. It answers the work like the canonical request.
+const joinsWork = (message, chain) =>
+  typeof chain.user_origin_message_id === "string" &&
+  typeof message.in_reply_to_message_id === "string" &&
+  message.root_obligation_id === chain.root_obligation_id;
+
 function guardUserReply(command, message, chain) {
   if (
     chain.conversation_id !== message.conversation_id ||
     (message.origin_channel_selector &&
-      chain.user_origin_message_id !== command.messageId)
+      chain.user_origin_message_id !== command.messageId &&
+      !joinsWork(message, chain))
   ) {
     throw new AgentCommandError(
       "reply_target_mismatch",

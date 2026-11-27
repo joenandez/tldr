@@ -6,6 +6,7 @@
 import { ackPending } from "./agent_reply_flow.mjs";
 import { runWorkCommand, workChain } from "./agent_commands.mjs";
 import { parseWaitTimeout } from "./agent_wait.mjs";
+import { recordAckGateReplied } from "./agent_wait_notice.mjs";
 
 const AT_FORMS =
   "--at requires a duration such as 2m or +1h, or an ISO-8601 time with a timezone such as 2026-10-28T15:00:00Z";
@@ -33,9 +34,15 @@ export function parseWakeAt(value, now = Date.now()) {
 
 export async function delegateAt({ client, session, runOnce }, command) {
   const chain = await workChain(client, command.workId);
-  const parked = ackPending(chain)
-    ? await runOnce(client, session, { ...command, command: "ack" })
+  const acking = ackPending(chain);
+  const parked = acking
+    ? await runOnce(client, session, { ...command, command: "ack" }) // the ack marks chain.ack_message_id replied
     : await runWorkCommand(client, session, command, chain, "update");
+  if (!acking)
+    recordAckGateReplied(session, [chain.user_origin_message_id], {
+      conversationId: chain.conversation_id,
+      received: command.ackGateReceived,
+    });
   // A user requester's channel delivery replaces this label (deliveryConfirmation).
   return {
     ...parked,

@@ -46,6 +46,10 @@ export const BUILTIN_RUNTIMES = Object.freeze({
     // An async-rewake Stop listener wakes the idle session without holding
     // Claude Code's input queue, so background-task notifications still land.
     capabilities: Object.freeze({ stdoutInjection: true, blockExitCodes: Object.freeze([2]), idleWake: 'background-hook' }),
+    // ac-kf9rt R2b: the stdin brief carries user bodies, because this runtime's UserPromptSubmit is proven
+    // to fire for it (11-26 probe), so the launch's busy mark receipts them. Builtin data only. Codex lacks
+    // it until its app-server UPS probe (AC10) passes.
+    briefBodyReceipt: true,
   }),
   codex: Object.freeze({
     id: 'codex',

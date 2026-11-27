@@ -338,6 +338,12 @@ class TightbeamClient {
     return this;
   }
 
+  // Tear the socket down without waiting for the daemon: pending requests fail with
+  // connection_closed at once. For a caller whose deadline passed (a hung daemon never ends its side).
+  destroy() {
+    this._socket.destroy();
+  }
+
   close() {
     if (this._closed) return Promise.resolve();
     this._closed = true;

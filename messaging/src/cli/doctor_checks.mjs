@@ -37,6 +37,7 @@ import { TIGHTBEAM_MARKER, recordSettingsPath } from './hooks_install.mjs';
 import { HOOK_CREDENTIALS_FILENAME } from './hook_credentials.mjs';
 import { tightbeamCommandName } from './package_context.mjs';
 import { codexPluginTrustPresent } from './codex_plugin_trust.mjs';
+import { activeCodexPluginHookFiles, lockedCodexPluginDirs } from './codex_plugin_cache.mjs';
 import { createRuntimeRegistry } from '../runtimes/registry.mjs';
 import { pendingStateRootMigration, STATE_ROOT_MIGRATION_PENDING } from '../protocol/state_root_location.mjs';
 
@@ -183,7 +184,8 @@ function pluginWiring(record, home) {
   const configRoot = vendorConfigRoot(record.id, home);
   if (!configRoot) return null;
   const wrapperDir = record.id === 'claude-code' ? '.claude-plugin' : '.codex-plugin';
-  const files = findPluginHookFiles(path.join(configRoot, 'plugins', 'cache'), wrapperDir);
+  const found = findPluginHookFiles(path.join(configRoot, 'plugins', 'cache'), wrapperDir);
+  const files = record.id === 'codex' ? activeCodexPluginHookFiles(found) : found;
   if (files.length === 0) return null;
   const file = files[0];
   if (record.id === 'codex' && !codexPluginTrustPresent(configRoot, file)) {
@@ -389,6 +391,21 @@ export async function runDoctorChecks({
       } else {
         checks.push(fail('hook-marker', 'HOOK_MARKER_MISSING', `${record.id} config at ${file} carries no ${TIGHTBEAM_MARKER} marker`, `${tightbeamCommandName()} hooks install --runtime ${record.id}`));
       }
+    }
+  }
+
+  // 5b. Codex plugin cache dirs a killed tldr install left immutable.
+  if (records.some((record) => record.id === 'codex')) {
+    const locked = lockedCodexPluginDirs(vendorConfigRoot('codex', home));
+    if (locked.dirs.length > 0) {
+      checks.push(
+        fail(
+          'codex-plugin-cache',
+          'CODEX_PLUGIN_CACHE_LOCKED',
+          `an interrupted tldr install left Codex plugin cache dir(s) immutable (${locked.dirs.join(', ')}); codex plugin remove fails until they are cleared`,
+          `chflags -R nouchg "${locked.base}"`,
+        ),
+      );
     }
   }
 

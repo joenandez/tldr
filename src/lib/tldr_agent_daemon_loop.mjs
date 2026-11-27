@@ -30,6 +30,7 @@ import {
   runSlackOutboundOnce,
   runSlackWorkingOnce,
 } from "./daemon_slack_lane.mjs";
+import { createSlackInboundWakeLane } from "./daemon_slack_inbound_lane.mjs";
 import { runLanes } from "./daemon_lanes_run.mjs";
 import { createTierLanes } from "./daemon_tier_lanes.mjs";
 
@@ -323,7 +324,8 @@ export async function runTldrAgentDaemonLoop({
       watermarkPath,
     });
   // Inbound is its own lane and phase so a slow or aborted send cannot starve it (ac-jfv.74).
-  const slackInboundLane = createSlackLane({
+  // It wakes on an inbox append, with the cadence as its fallback (ac-jfv.228).
+  const slackInboundLane = createSlackInboundWakeLane({
     home,
     once,
     daemonInstanceId,
@@ -331,11 +333,10 @@ export async function runTldrAgentDaemonLoop({
     runSlackTick: runSlackInbound,
     runPhase,
     phaseTimeoutMs,
-    sleepInterval,
+    waitFn,
+    fallbackMs: Math.max(1, Number(intervalSec)) * 1000,
     homeExists,
     isStopped: () => stopped,
-    phaseName: "slack_inbound",
-    superviseListener: true,
   });
   // The sweep is its own lane and phase so slow slack sends or drains cannot use up its budget.
   const workingLane = createSlackLane({

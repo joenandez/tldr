@@ -11,11 +11,13 @@ import { createHash } from 'node:crypto';
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { generateId } from '../../protocol/ids.mjs';
 import { isSafeSessionId, sessionPaths } from '../../protocol/session_paths.mjs';
+import { publishRoutedDelivery, publishSessionNotice } from './session_notice.mjs';
 import { signalUserRouteDelivery } from '../../protocol/user_route_signal.mjs';
 import { ROUTE_ADMITTED_ROLE, isUniqueConstraintError } from './authority_scope.mjs';
 import { REPLY_BINDING_POLICY } from '../reply_listener_policy.mjs';
 import { activeListenerForEndpoint, createPendingPresentation, logListenerPresentationSkipped } from './listener_operations.mjs';
-import { requestHostWakesForDeliveries } from '../session_host.mjs';
+import { pendingHostWakeEndpointIds, requestHostWakesForDeliveries } from '../session_host.mjs';
+import { byMostRecentActivity, lastActivityMs, narrowUnboundRows, threadSessionEndpointIds } from './unbound_rows.mjs';
 
 /**
  * Deep, key-sorted JSON serialization so two payloads with the same
@@ -104,10 +106,11 @@ export function loadConversationOrUnknown(db, conversationId) {
  * the internal provenance record).
  */
 export function stampOwnerIfUnset(db, conversationId, senderPrincipalId) {
-  db.prepare('UPDATE conversations SET owner_principal_id = ? WHERE id = ? AND owner_principal_id IS NULL').run(
+  const stamped = db.prepare('UPDATE conversations SET owner_principal_id = ? WHERE id = ? AND owner_principal_id IS NULL').run(
     senderPrincipalId,
     conversationId,
   );
+  return stamped.changes === 1; // true: this send started the thread
 }
 
 /**
@@ -298,17 +301,17 @@ export const RESUME_REASON_BY_ROUTE = { resume_dead: 'endpoint_dead', resume_idl
  * The converse also holds: this runs inside the caller's write transaction,
  * so a rolled-back commit can leave a bumped compatibility marker.
  */
-export function refreshSessionWatermark({ stateRoot, sessionId, deliveryId, wake = null, logger }) {
+export function refreshSessionWatermark({ stateRoot, sessionId, deliveryId, attempt, wake = null, logger }) {
   if (!stateRoot || !isSafeSessionId(sessionId)) return;
   try {
     const paths = sessionPaths(stateRoot, sessionId);
     fs.mkdirSync(paths.dir, { recursive: true, mode: 0o700 });
-    const marker = wake === null ? { delivery_id: deliveryId, updated_at: new Date().toISOString() } : { delivery_id: deliveryId, wake };
+    const marker = { delivery_id: deliveryId, ...(attempt && { attempt }), ...(wake === null ? { updated_at: new Date().toISOString() } : { wake }) }; // attempt only where a notice line follows
     fs.writeFileSync(paths.watermark, `${JSON.stringify(marker)}\n`, {
       mode: 0o600,
     });
   } catch (err) {
-    logger?.warn({ event: 'session_watermark_write_failed', session_id: sessionId, delivery_id: deliveryId, error: err.message });
+    logger?.warn?.({ event: 'session_watermark_write_failed', session_id: sessionId, delivery_id: deliveryId, error: err.message });
   }
 }
 
@@ -368,6 +371,9 @@ export const DEFAULT_RESUME_STALE_AFTER_MS = DEFAULT_RESUME_STALE_AFTER_DAYS * D
 // 74.2: item 44 eligibility of unread `d` (one `?`: staleBefore), shared with the resumer's successor materialization and the owner-gone resume (read only inside functions: import cycle).
 export const ELIGIBLE_SUCCESSOR_DELIVERY_SQL = `d.state != 'failed' AND d.read_at IS NULL AND d.created_at >= ? AND NOT EXISTS (SELECT 1 FROM resume_requests prior WHERE prior.message_id = d.message_id)
   AND NOT EXISTS (SELECT 1 FROM deliveries handled WHERE handled.message_id = d.message_id AND handled.id != d.id AND handled.read_at IS NOT NULL)`;
+// ac-srg29.1: a necessary condition for the check above, once per message, not per fan-out copy (one `?`: staleBefore); reads deliveries_unread_created.
+export const UNRESUMED_UNREAD_MESSAGES_SQL = `SELECT m.message_id FROM (SELECT DISTINCT u.message_id FROM deliveries u WHERE u.read_at IS NULL AND u.state != 'failed' AND u.created_at >= ?) m
+ WHERE NOT EXISTS (SELECT 1 FROM resume_requests prior WHERE prior.message_id = m.message_id)`;
 /**
  * `TIGHTBEAM_RESUME_STALE_AFTER_DAYS` is a window parameter, like
  * TIGHTBEAM_RESUME_LEASE_MS, not a mode: a positive integer number of days.
@@ -380,23 +386,6 @@ export function resolveResumeStaleAfterMs(env = process.env) {
 }
 
 const RESUME_DECISION_LOG_LIMIT = 25;
-
-function timestampMs(value) {
-  const parsed = typeof value === 'string' ? Date.parse(value) : Number.NaN;
-  return Number.isFinite(parsed) ? parsed : Number.NEGATIVE_INFINITY;
-}
-
-/**
- * The endpoint's last recorded activity: `endpoints.updated_at`, which the
- * lifecycle hook transitions (SessionStart/UserPromptSubmit/Stop), listener
- * attach, registration and replay, and supervised death all bump. A reply
- * binding may contribute its own anchor — when the bound endpoint sent the
- * message being answered — because sending is activity the endpoint row does
- * not record.
- */
-function lastActivityMs(endpoint, anchorAt = null) {
-  return Math.max(timestampMs(endpoint.updated_at), timestampMs(endpoint.created_at), timestampMs(anchorAt));
-}
 
 /**
  * Stale: the endpoint has a provider session to resume and no activity
@@ -429,18 +418,19 @@ function isStaleResumeTarget(endpoint, { nowMs, staleAfterMs, anchorAt = null })
  *                 activity anchored at `binding.anchor_at` when given. An
  *                 interactive or unknown requester keeps the row unread and
  *                 nothing else is woken.
- *   bound_closed  the bound endpoint is closed. Rows go to the principal's
- *                 open endpoints so the message stays in the inbox, and
- *                 nothing is resumed: no sibling inherits another session's
- *                 reply.
- *   principal     no binding. Every open endpoint keeps its row (inbox
- *                 visibility unchanged) and at most one is resumed: the most
- *                 recently active eligible endpoint — route resume_idle or
+ *   bound_closed  the bound endpoint is closed. Nothing is resumed: no
+ *                 sibling inherits another session's reply.
+ *   principal     no binding. At most one is resumed: the most recently
+ *                 active eligible endpoint — route resume_idle or
  *                 resume_dead, and not stale — ties broken by newest
  *                 created_at, then endpoint id. None at all when one of the
  *                 principal's endpoints was staged a live presentation.
+ *
+ * With `narrowUnbound` (agent posts), bound_closed and principal are never
+ * principal-wide: unbound_rows.mjs narrowUnboundRows (ac-jfv.209). Inbound
+ * user mail keeps every row (ac-32qki decides it).
  */
-export function selectRecipientEndpoints({ endpoints, routes, binding = null, nowMs, staleAfterMs }) {
+export function selectRecipientEndpoints({ endpoints, routes, binding = null, nowMs, staleAfterMs, narrowUnbound = false, threadEndpointIds = null, hostWakes = true, pendingHostWakeIds = null }) {
   const decisions = [];
   const wantsResume = (endpoint) => Boolean(RESUME_REASON_BY_ROUTE[routes.get(endpoint.id)]);
   let mode = 'principal';
@@ -494,16 +484,17 @@ export function selectRecipientEndpoints({ endpoints, routes, binding = null, no
         candidates.push(endpoint);
       }
     }
-    candidates.sort((a, b) =>
-      lastActivityMs(b) - lastActivityMs(a)
-      || timestampMs(b.created_at) - timestampMs(a.created_at)
-      || (a.id < b.id ? 1 : a.id > b.id ? -1 : 0));
+    candidates.sort(byMostRecentActivity);
     candidates.forEach((endpoint, index) => {
       if (index === 0) resumeEndpointId = endpoint.id;
       decisions.push({ endpoint_id: endpoint.id, route: routes.get(endpoint.id), decision: index === 0 ? 'resume_most_recent' : 'not_most_recent' });
     });
   }
-  return { mode, rowEndpointIds: new Set(rowEndpoints.map((endpoint) => endpoint.id)), resumeEndpointId, decisions };
+  let rowBasis = mode;
+  if (narrowUnbound && (mode === 'principal' || mode === 'bound_closed')) {
+    ({ rowEndpoints, rowBasis } = narrowUnboundRows({ endpoints: rowEndpoints, routes, resumeEndpointId, threadEndpointIds, hostWakes, pendingHostWakeIds, nowMs, staleAfterMs }));
+  }
+  return { mode, rowEndpointIds: new Set(rowEndpoints.map((endpoint) => endpoint.id)), resumeEndpointId, decisions, rowBasis };
 }
 
 /**
@@ -527,6 +518,9 @@ function logResumeSelection(logger, { messageId, principalId, binding, endpoints
     },
     result: {
       delivery_rows: selection.rowEndpointIds.size,
+      row_basis: selection.rowBasis,
+      row_endpoint_ids: [...selection.rowEndpointIds].slice(0, RESUME_DECISION_LOG_LIMIT),
+      row_endpoint_ids_truncated: selection.rowEndpointIds.size > RESUME_DECISION_LOG_LIMIT,
       resume_endpoint_id: selection.resumeEndpointId,
       decision_counts: counts,
       decisions: selection.decisions.slice(0, RESUME_DECISION_LOG_LIMIT),
@@ -734,8 +728,9 @@ function logSupersededExcluded(logger, { messageId, participantEndpoints, sender
  * resolveEndpointBindings). `recipientEndpointId` is the caller's exact
  * narrowing and outranks any binding.
  *
- * The durable delivery row is written for every routing outcome, the
- * staged one included: only the durable staging happens here, inside the
+ * Each selected endpoint's durable row is written for every routing
+ * outcome, the staged one included (`narrowUnbound` agent posts select only
+ * woken, working, or one fallback endpoint): only the durable staging happens here, inside the
  * transaction. The listener frame itself is published by the caller after
  * commit, so no push failure can roll back a write.
  *
@@ -744,7 +739,7 @@ function logSupersededExcluded(logger, { messageId, participantEndpoints, sender
  * no live listeners.
  *
  * `routeReasonPrincipalId` narrows a typed route to one participant: every
- * recipient still gets a delivery row, but only that principal's endpoints
+ * selected recipient endpoint still gets a delivery row, but only that principal's endpoints
  * carry the reason/source pair; `routeReasonEndpointIds` types the rows of
  * those exact endpoints instead (a cancel notice reaches one holder session,
  * never its principal's other endpoints). `typedRouteIsClosedWorkNotice` marks
@@ -753,13 +748,14 @@ function logSupersededExcluded(logger, { messageId, participantEndpoints, sender
  * row this call writes, typed or not: a requester's cancel asks nothing of
  * any recipient (proof F40).
  */
-export function createDeliveriesForRecipients(db, { conversationId, messageId, senderPrincipalId, senderEndpointId = null, recipientEndpointId = null, routeReason = null, sourceObligationId = null, routeReasonPrincipalId = null, routeReasonEndpointIds = null, typedRouteIsClosedWorkNotice = false, everyCopyIsClosedWorkNotice = false, endpointBindings = null, resumeStaleAfterMs = DEFAULT_RESUME_STALE_AFTER_MS, stateRoot, logger }) {
+export function createDeliveriesForRecipients(db, { conversationId, messageId, senderPrincipalId, senderEndpointId = null, recipientEndpointId = null, routeReason = null, sourceObligationId = null, routeReasonPrincipalId = null, routeReasonEndpointIds = null, typedRouteIsClosedWorkNotice = false, everyCopyIsClosedWorkNotice = false, endpointBindings = null, narrowUnbound = false, hostWakes = true, resumeStaleAfterMs = DEFAULT_RESUME_STALE_AFTER_MS, stateRoot, logger }) {
   const participantEndpoints = db
     .prepare(
       `SELECT e.id AS id, e.state AS state, e.principal_id AS principal_id,
               e.provider_session_id AS session_id, e.process_generation AS process_generation,
               e.launch_mode AS launch_mode, e.authority_reference AS authority_reference,
               e.created_at AS created_at, e.updated_at AS updated_at,
+              e.host_name AS host_name, e.owner_process_exited_at AS owner_process_exited_at,
               EXISTS (SELECT 1 FROM resume_requests rr WHERE rr.endpoint_id = e.id AND rr.replacement_endpoint_id IS NOT NULL) AS superseded
          FROM endpoints e
          JOIN conversation_participants cp ON cp.principal_id = e.principal_id AND cp.role IS NOT '${ROUTE_ADMITTED_ROLE}'
@@ -800,7 +796,12 @@ export function createDeliveriesForRecipients(db, { conversationId, messageId, s
     const binding = recipientEndpointId !== null
       ? { kind: 'exact', source: 'caller_exact' }
       : endpointBindings?.get(principalId) ?? null;
-    const selection = selectRecipientEndpoints({ endpoints, routes, binding, nowMs, staleAfterMs: resumeStaleAfterMs });
+    const selection = selectRecipientEndpoints({
+      endpoints, routes, binding, nowMs, staleAfterMs: resumeStaleAfterMs, narrowUnbound,
+      threadEndpointIds: () => threadSessionEndpointIds(db, conversationId, principalId),
+      hostWakes: hostWakes && !everyCopyIsClosedWorkNotice,
+      pendingHostWakeIds: (ids) => pendingHostWakeEndpointIds(db, ids),
+    });
     for (const id of selection.rowEndpointIds) rowEndpointIds.add(id);
     if (selection.resumeEndpointId !== null) resumeEndpointIds.add(selection.resumeEndpointId);
     logResumeSelection(logger, { messageId, principalId, binding, endpoints, selection, resumeStaleAfterMs });
@@ -820,7 +821,7 @@ export function createDeliveriesForRecipients(db, { conversationId, messageId, s
   const presentations = [];
   for (const endpoint of recipientEndpoints) {
     if (!rowEndpointIds.has(endpoint.id)) continue;
-    const route = routes.get(endpoint.id);
+    let route = routes.get(endpoint.id);
     if (route === 'skip') continue;
     const listener = listeners.get(endpoint.id) ?? logListenerPresentationSkipped(logger, db, { endpointId: endpoint.id, processGeneration: endpoint.process_generation, providerSessionId: endpoint.session_id, messageId });
 
@@ -834,7 +835,7 @@ export function createDeliveriesForRecipients(db, { conversationId, messageId, s
       // it); arriving while the Stop is parked it must not wake it, and a
       // stopped holder is not launched just to read it (ux F10: delivered
       // whenever the holder next runs). It waits, unread, for the next run.
-      logger?.info?.({ event: 'closed_work_notice_not_presented', params: { message_id: messageId, endpoint_id: endpoint.id, route_reason: typed ? routeReason : null, route }, result: { route: 'enqueue_only' }, status: 'ok' });
+      route = 'enqueue_only'; logger?.info?.({ event: 'closed_work_notice_not_presented', params: { message_id: messageId, endpoint_id: endpoint.id, route_reason: typed ? routeReason : null, route }, result: { route: 'enqueue_only' }, status: 'ok' });
     } else if (route === 'stage_presentation') {
       presentations.push(createPendingPresentation(db, { listener, messageId, deliveryId }));
       db.prepare("UPDATE listeners SET state = 'waking', updated_at = ? WHERE id = ? AND listener_generation = ? AND state IN ('parked', 'attached')")
@@ -845,11 +846,10 @@ export function createDeliveriesForRecipients(db, { conversationId, messageId, s
     // 'enqueue_only', or a resume route that selection declined: the pending
     // delivery row is the whole outcome. It stays unread until exact receipt
     // by the current listener or a permitted terminated-retirement
-    // successor; no tool-boundary hook reads it.
+    // successor; message.notification.next reads it at a tool boundary.
 
-    // Every route that wrote a row refreshes the legacy compatibility marker.
-    // It never substitutes for exact presentation, admission, or receipt.
-    refreshSessionWatermark({ stateRoot, sessionId: endpoint.session_id, deliveryId, logger });
+    // Every route that wrote a row refreshes the compatibility marker; an enqueued one also gets the local notice.
+    publishRoutedDelivery(db, route, { stateRoot, sessionId: endpoint.session_id, deliveryId, logger });
   }
   return { liveDeliveries, presentations };
 }
@@ -886,7 +886,7 @@ export function createNoticeDeliveries(db, { conversationId, messageId, endpoint
     const deliveryId = generateId('delivery');
     insert.run(deliveryId, messageId, endpoint.id, routeReason, sourceObligationId, now, now);
     liveDeliveries.push({ principal_id: endpoint.principal_id, endpoint_id: endpoint.id, message_id: messageId });
-    refreshSessionWatermark({ stateRoot, sessionId: endpoint.session_id, deliveryId, logger });
+    publishSessionNotice(db, { stateRoot, sessionId: endpoint.session_id, deliveryId, logger });
   }
   logger?.info?.({
     event: 'chain_notice_fanout',

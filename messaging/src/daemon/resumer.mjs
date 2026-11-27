@@ -38,35 +38,46 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { withTransaction } from './db.mjs';
+import { holdLimitedLaunch } from './limit_note.mjs';
+import { liveResumeChildFor, liveResumeChildren, trackResumeChild } from './resume_children.mjs';
+export { liveResumeChildFor };
 import { runWatchReconciliation } from './watch_reconciler.mjs';
 import { reconcileCustodyLoss } from './custody_reconciler.mjs';
-import { acquireClaim, reapExpired, releaseClaim, resolveLeaseMs, DEFAULT_LEASE_MS } from './ops/claims_shared.mjs';
-import { MAX_RESUME_ATTEMPTS, EXACT_SESSION_UNAVAILABLE, CODEX_HOST_UNKNOWN, CODEX_QUEUE_REFUSED, CODEX_QUEUE_FAILED, hostedAttentionSource } from './ops/resume_fail.mjs';
-import { expandStoredRuntimeIds } from './ops/resume_shared.mjs';
+import { sweepStaleChannelCopies } from './channel_copy_sweep.mjs';
+import { acquireClaim, reapExpired, releaseClaim, resolveLeaseMs, retireAbandonedRequest, routeExistingMessage, DEFAULT_LEASE_MS } from './ops/claims_shared.mjs';
+import { MAX_RESUME_ATTEMPTS, USAGE_LIMIT_NOTICE, USAGE_LIMIT_REASON, holdClaimForLimit, holdIfLimited, limitOutcome, jsonLine, limitRefused, usageLimitFromLines, withoutLimitEvidence, EXACT_SESSION_UNAVAILABLE, CODEX_HOST_UNKNOWN, CODEX_QUEUE_REFUSED, CODEX_QUEUE_FAILED, hostedAttentionSource } from './ops/resume_fail.mjs';
+import { selectablePendingSql, selectableRuntimes } from './resume_candidate.mjs';
 import { prepareResumeDebugLog, stderrTail } from './resume_debug_log.mjs';
 export { RESUME_DEBUG_RETAINED_BYTES, RESUME_DEBUG_RETAINED_LOGS } from './resume_debug_log.mjs';
-import { COPILOT_SESSION_UNAVAILABLE, copilotLoadFailed, copilotWakeScopeSql, planCopilotWake, refuseCopilotWake, wakeStdin } from './copilot_wake.mjs';
-import { isPackageBoundCopilotRecord, WAKE_MESSAGE_ID } from '../runtimes/copilot_wake_contract.mjs';
+import { COPILOT_SESSION_UNAVAILABLE, copilotLoadFailed, planCopilotWake, refuseCopilotWake, wakeStdin } from './copilot_wake.mjs';
+import { WAKE_MESSAGE_ID } from '../runtimes/copilot_wake_contract.mjs';
 import { createRuntimeRegistry } from '../runtimes/registry.mjs';
 import { generateId } from '../protocol/ids.mjs';
+import { parseBodyMessageIds } from '../protocol/arrival_block.mjs';
 import { validateRecoveryContextState } from './ops/recovery_context.mjs';
 import { runScheduledWakes } from './scheduled_wake_pass.mjs';
+import { settleHolderDeath } from './holder_death.mjs';
+import { replacementComing, settleStalledHolders } from './holder_stall.mjs';
+import { decideSupervisedExit, NOT_SUPERSEDED_ENDPOINT } from './supervised_exit.mjs';
 import { hasUnreadScheduledWake } from './scheduled_wakes.mjs';
 import { endpointHasWakingUnreadSql, RECOVERY_REPLACEMENT_ROUTE_REASON, stageTerminalResumeFailureNotice } from './lifecycle_transition.mjs';
 import { stageCwdGoneSenderNotice } from './cwd_gone_notice.mjs';
 import { DEAD_HEADLESS_EXIT_SQL, successorBranchFor } from './listener_owner_loss.mjs';
-import { DEFAULT_RESUME_STALE_AFTER_MS, ELIGIBLE_SUCCESSOR_DELIVERY_SQL, pushLiveDeliveryEvents } from './ops/message_shared.mjs';
+import { DEFAULT_RESUME_STALE_AFTER_MS, ELIGIBLE_SUCCESSOR_DELIVERY_SQL, pushLiveDeliveryEvents, UNRESUMED_UNREAD_MESSAGES_SQL } from './ops/message_shared.mjs';
 import { publishPresentation } from './ops/listener_operations.mjs';
 import { maybeRequestHostWake } from './session_host.mjs';
 import { runBusyLineSweep } from './busy_line.mjs';
 import { renderNotification } from '../cli/arrival_notification.mjs';
 import { withoutSessionEnv } from '../protocol/session_env.mjs';
 import { notificationContext } from './ops/notification_context.mjs';
-import { observeRetirementProcess } from './retirement_executor.mjs';
+import { endpointReadsInbox } from './ops/session_notice.mjs';
+import { processObserverFor } from './process_table.mjs';
 import { observeOwnerLiveness, readOwnerFence, sameOwnerFence } from './owner_liveness.mjs';
-import { classifyQueueRefusal, isThreadWriterConflict, threadHostObserverFor } from './codex_thread_host.mjs';
+import { classifyQueueRefusal, isHostProbePending, isThreadWriterConflict, onHostProbeLanded, threadHostObserverFor } from './codex_thread_host.mjs';
 import { liveRunHost, pushToLiveRuns } from './run_input.mjs';
 import { isSafeSessionId } from '../protocol/session_paths.mjs';
+import { restoreTakeoverPredecessor } from './ops/takeover_reclaim.mjs';
+import { earlierWorkExistsSql } from './ops/delivery_admission.mjs';
 
 // One indexed query per second against the pending queue. Not a schedule:
 // nothing is planned for a future time, the tick only asks whether the
@@ -202,13 +213,7 @@ function availabilityTakeoverPredicate(requestAlias) {
        AND d.admission_provider_session_id IS e.provider_session_id
        AND d.admission_owner_epoch = e.owner_epoch - 1
        AND d.admission_owner_launch_token IS NOT e.owner_launch_token
-       AND NOT EXISTS (
-         SELECT 1 FROM deliveries earlier
-          WHERE earlier.endpoint_id = e.id AND earlier.state != 'failed'
-            AND earlier.read_at IS NULL
-            AND (earlier.created_at < d.created_at
-                 OR (earlier.created_at = d.created_at AND earlier.id < d.id))
-       )
+       AND NOT ${earlierWorkExistsSql('d', 'earlier', "earlier.endpoint_id = e.id AND earlier.state != 'failed' AND earlier.read_at IS NULL")}
   )
   AND NOT EXISTS (
     SELECT 1 FROM listeners newer
@@ -220,12 +225,7 @@ function availabilityTakeoverPredicate(requestAlias) {
 // An endpoint a replacement superseded was declared unresumable when that
 // replacement was admitted (plan §2.2): it is never launched, materialized,
 // or replaced again. Its lineage replacement is the only route to its work.
-const NOT_SUPERSEDED_ENDPOINT = `NOT EXISTS (
-    SELECT 1 FROM resume_requests superseding
-     WHERE superseding.endpoint_id = e.id AND superseding.replacement_endpoint_id IS NOT NULL
-  )`;
-
-function resumableEndpointPredicate(requestAlias = null) {
+export function resumableEndpointPredicate(requestAlias = null) {
   const states = RESUMABLE_ENDPOINT_STATES.map(() => '?').join(',');
   return `((e.launch_mode = ? AND e.state IN (${states})) OR (${terminatedRetirementPredicate(requestAlias)}) OR (${ownerExitedPredicate(requestAlias)}))
     OR (${availabilityTakeoverPredicate(requestAlias)})`;
@@ -246,9 +246,9 @@ function checkLaunchFence(db, endpointId, observeProcess, liveOwners, nowMs) {
   const observation = recentlyAlive(liveOwners, endpointId, before, nowMs) ?? observeOwnerLiveness(before, observeProcess);
   const after = readOwnerFence(db, endpointId);
   if (!sameOwnerFence(before, after)) return { outcome: 'deferred', liveness: observation.liveness, reason: 'owner_changed' };
-  if (observation.liveness === 'alive') {
-    if (!observation.reused) liveOwners.set(endpointId, { owner: before, observedAtMs: nowMs });
-    return { outcome: 'deferred', liveness: 'alive', reason: 'owner_alive' };
+  if (observation.liveness === 'alive' || observation.liveness === 'pending') {
+    if (observation.liveness === 'alive' && !observation.reused) liveOwners.set(endpointId, { owner: before, observedAtMs: nowMs });
+    return { outcome: 'deferred', liveness: observation.liveness, reason: observation.liveness === 'alive' ? 'owner_alive' : 'owner_observation_pending' };
   }
   liveOwners.delete(endpointId);
   return { outcome: 'launch', liveness: observation.liveness, reason: observation.reason, error: observation.error };
@@ -304,7 +304,7 @@ function logLaunchFence(context, request, fence) {
   });
 }
 
-function resumableEndpointParams() {
+export function resumableEndpointParams() {
   return [RESUMER_LAUNCH_MODE, ...RESUMABLE_ENDPOINT_STATES, RESUMER_LAUNCH_MODE, RESUMER_LAUNCH_MODE];
 }
 
@@ -328,12 +328,45 @@ function isResumerEligibleEndpoint(db, endpointId, requestId) {
 function unreadDeliveriesForEndpoint(db, endpointId) {
   return db
     .prepare(
-      `SELECT d.id, d.message_id
-         FROM deliveries d
+      `SELECT d.id, d.message_id, d.takeover_decided_at, m.body,
+              m.origin = 'inbound' AND m.origin_channel_route_id IS NOT NULL AS has_external_origin
+         FROM deliveries d JOIN messages m ON m.id = d.message_id
         WHERE d.endpoint_id = ? AND d.state != 'failed' AND d.read_at IS NULL
         ORDER BY d.created_at ASC, d.id ASC`,
     )
     .all(endpointId);
+}
+
+/**
+ * ac-kf9rt: the unread user messages whose body rides the brief (id -> body).
+ * Only a leading run of them, in receive order: a message is receipted
+ * oldest-first, so a body shown behind a bodiless unread one could never be
+ * marked read. A typed notice, a delivery a takeover decided, and every
+ * delivery of an availability-takeover relaunch carry none (no receipt path
+ * could mark them from a shown body), and they end the run.
+ */
+export function briefBodies(unread, { pendingContext = new Map(), takeover = false } = {}) {
+  const bodies = new Map();
+  if (takeover) return bodies;
+  for (const row of unread) {
+    const typed = typeof pendingContext.get(row.message_id)?.notice === 'string';
+    if (!row.has_external_origin || row.takeover_decided_at || typed || !row.body) break; // the renderer's hasBody rule: a null or empty body shows none, so none after it may
+    bodies.set(row.message_id, row.body);
+  }
+  return bodies;
+}
+
+/**
+ * ac-kf9rt v2: the ids whose body this launch's stdin brief shows (its rendered
+ * `bodies=`, so the cap is respected) carry the launch token; that launch's
+ * own busy mark receipts them (ops/endpoint_state_set.mjs). An argv, queue or
+ * Copilot brief has no body, so nothing is stamped. Never a read.
+ */
+function stampBriefLaunch(db, { endpointId, prompt, launchToken }) {
+  const ids = parseBodyMessageIds(prompt);
+  if (ids.length === 0) return;
+  db.prepare(`UPDATE deliveries SET brief_launch_token = ? WHERE endpoint_id = ? AND read_at IS NULL AND state != 'failed'
+    AND message_id IN (SELECT value FROM json_each(?))`).run(launchToken, endpointId, JSON.stringify(ids));
 }
 
 // F33: a launch needs unread work that justifies it. A typed notice about
@@ -388,8 +421,8 @@ function materializeSuccessorRequests(db, now, { staleAfterMs = DEFAULT_RESUME_S
   const endpointIds = db
     .prepare(
       `SELECT e.id
-         FROM endpoints e
-        WHERE (${successorEligiblePredicate()})
+         FROM endpoints e -- driven by the few endpoints holding an eligible delivery, not a walk of every endpoint (ac-srg29)
+        WHERE e.id IN (SELECT d.endpoint_id FROM deliveries d WHERE d.message_id IN (${UNRESUMED_UNREAD_MESSAGES_SQL}) AND ${ELIGIBLE_SUCCESSOR_DELIVERY_SQL}) AND (${successorEligiblePredicate()})
           AND ${NOT_SUPERSEDED_ENDPOINT}
           AND ${endpointHasWakingUnreadSql('e.id')}
           AND NOT EXISTS (
@@ -397,10 +430,9 @@ function materializeSuccessorRequests(db, now, { staleAfterMs = DEFAULT_RESUME_S
              WHERE active.endpoint_id = e.id AND active.state IN ('pending', 'claimed')
           )
           AND (max(coalesce(julianday(e.updated_at), 0), coalesce(julianday(e.created_at), 0)) >= julianday(?) - 1.0 / 1440
-               OR EXISTS (SELECT 1 FROM deliveries sw WHERE sw.endpoint_id = e.id AND sw.route_reason = 'scheduled.wake' AND sw.read_at IS NULL AND sw.state != 'failed'))
-          AND EXISTS (SELECT 1 FROM deliveries d WHERE d.endpoint_id = e.id AND ${ELIGIBLE_SUCCESSOR_DELIVERY_SQL})`,
+               OR EXISTS (SELECT 1 FROM deliveries sw WHERE sw.endpoint_id = e.id AND sw.route_reason = 'scheduled.wake' AND sw.read_at IS NULL AND sw.state != 'failed'))`,
     ) // stale test: a minute wider than the exact JS check below (the authority); assumes Z-suffixed ISO times, as the daemon writes
-    .all(...successorEligibleParams(), staleBefore, staleBefore).map((row) => row.id);
+    .all(staleBefore, staleBefore, ...successorEligibleParams(), staleBefore).map((row) => row.id);
   for (const endpointId of endpointIds) {
     const outcome = withTransaction(db, () => {
       const endpoint = db
@@ -501,33 +533,6 @@ export function takeoverRetryDelayMs(attempt) {
   return Math.min(TAKEOVER_RETRY_BASE_MS * 2 ** (attempt - 1), TAKEOVER_RETRY_MAX_MS);
 }
 
-// Item 48: the daemon's own resume children that are still running, per
-// endpoint, for this daemon's lifetime. A claim lease bounds the
-// confirmation window, not the child: a resumed `codex exec` that first
-// finishes a killed turn outlives its lease, and a second resume of the same
-// session beside it fails (Codex) or shares its transcript (Claude). An
-// availability takeover therefore waits while any child for the endpoint is
-// alive. Kept in memory: a daemon restart forgets children it no longer
-// supervises, and the takeover backoff above still bounds that case.
-const liveResumeChildren = new WeakMap();
-
-function trackResumeChild(context, endpointId, entry) {
-  let byEndpoint = liveResumeChildren.get(context);
-  if (!byEndpoint) {
-    byEndpoint = new Map();
-    liveResumeChildren.set(context, byEndpoint);
-  }
-  const entries = byEndpoint.get(endpointId) ?? new Set();
-  entries.add(entry);
-  byEndpoint.set(endpointId, entries);
-  const untrack = () => {
-    entries.delete(entry);
-    if (entries.size === 0 && byEndpoint.get(endpointId) === entries) byEndpoint.delete(endpointId);
-  };
-  entry.untrack = untrack;
-  return untrack;
-}
-
 // F28: the claim lease is the confirmation window, and receive authority for
 // the message a child's brief names hangs on that claim staying held (the
 // request must be `claimed`; see ops/message_receive.mjs). A child that is
@@ -603,15 +608,6 @@ function endClaimHold(context, entry, at) {
       status: 'error',
     });
   }
-}
-
-/** The oldest still-running daemon resume child for an endpoint, or null. */
-export function liveResumeChildFor(context, endpointId) {
-  const entries = liveResumeChildren.get(context)?.get(endpointId);
-  if (!entries || entries.size === 0) return null;
-  let oldest = null;
-  for (const entry of entries) if (oldest === null || entry.startedAtMs < oldest.startedAtMs) oldest = entry;
-  return oldest;
 }
 
 // ---------------------------------------------------------------------
@@ -749,6 +745,7 @@ function observeHostedSession(context, { request, observeThreadHost, nowMs, fres
   } catch (error) {
     host = { hosted: null, reason: 'observation_error', error: error.message };
   }
+  if (isHostProbePending(host)) return host; // no answer yet: not cached, not "unanswered"
   // Consecutive unanswerable probes of this session: the re-probe backs off
   // (5, 10, 20, 40, then every 60 s) instead of running lsof every 5 s for
   // as long as the window lasts.
@@ -772,8 +769,8 @@ function hostRecheckMs(unanswered) {
 // readable answer arrives.
 function unknownSinceFor(context, request, nowMs) {
   const since = contextMap(unknownHostSince, context);
-  if (!since.has(request.id)) since.set(request.id, nowMs);
-  return since.get(request.id);
+  if (!since.has(request.id) && !request.pending) since.set(request.id, nowMs); // a pending probe does not start the window
+  return since.get(request.id) ?? nowMs;
 }
 
 function noteWriterConflict(context, request, nowMs) {
@@ -971,10 +968,12 @@ export function resolveResumerSettings(env = process.env) {
  * The first input of a resumed or freshly spawned session: the exact
  * notification block a running session gets at a tool boundary
  * (src/cli/arrival_notification.mjs), built from the same notification
- * context the daemon returns to hooks. The message body is NOT in it: the
- * session explicitly receives the exact notified message, which is also what
- * completes the request, and a body would put untrusted content into an
- * argument vector.
+ * context the daemon returns to hooks. A body is in it only when the caller
+ * passes `bodies` (id -> body, user-origin mail: briefBodies), and the caller
+ * does that only for a brief that travels on the run host's stdin: a body in
+ * an argument vector would put untrusted content in a process listing. Every
+ * other brief is bodyless, and the session explicitly receives the exact
+ * notified message, which is also what completes the request.
  *
  * `pendingContext` (Map<messageId, notificationContext>) supplies each entry's
  * sender, subject, thread, offer and work lines; an id with no context keeps
@@ -982,9 +981,9 @@ export function resolveResumerSettings(env = process.env) {
  * front door the live hook uses, so the two arrivals match byte for byte. A
  * caller whose live hook states a session binding (Copilot) passes its `prefix`.
  */
-export function resumeBrief({ messageId, messageIds = [messageId], externalMessageIds = new Set(), pendingContext = new Map(), prefix }) {
+export function resumeBrief({ messageId, messageIds = [messageId], externalMessageIds = new Set(), pendingContext = new Map(), bodies = new Map(), prefix }) {
   return renderNotification(
-    messageIds.map((id) => ({ ...pendingContext.get(id), message_id: id, has_external_origin: externalMessageIds.has(id) })),
+    messageIds.map((id) => ({ ...pendingContext.get(id), message_id: id, has_external_origin: externalMessageIds.has(id), ...(bodies.has(id) ? { body: bodies.get(id) } : {}) })),
     { prefix },
   );
 }
@@ -1001,9 +1000,11 @@ export function resumeBrief({ messageId, messageIds = [messageId], externalMessa
  * record; the slots substitute whole-element only, exactly where the
  * template carries '{sessionId}' / '{prompt}'.
  */
-export function buildChildInvocation({ record, sessionId, messageId, messageIds = [messageId], academyAgentName = null, externalMessageIds = new Set(), pendingContext = new Map(), debugFile = null }) {
+export function buildChildInvocation({ record, sessionId, messageId, messageIds = [messageId], academyAgentName = null, externalMessageIds = new Set(), pendingContext = new Map(), bodies = new Map(), debugFile = null }) {
   if (!record || record.resumeStrategy !== 'daemon') return null;
-  const brief = resumeBrief({ messageId, messageIds, externalMessageIds, pendingContext });
+  // The argv brief never has a body. Only a run-hosted runtime whose launch busy mark receipts the bodies (briefBodyReceipt) reads one from stdin.
+  const argvBrief = resumeBrief({ messageId, messageIds, externalMessageIds, pendingContext });
+  const brief = RUN_HOST_RUNTIME_ARGS[record.id] && record.briefBodyReceipt === true && bodies.size > 0 ? resumeBrief({ messageId, messageIds, externalMessageIds, pendingContext, bodies }) : argvBrief;
   if (typeof sessionId === 'string' && sessionId.length > 0) {
     // Only Claude takes --debug-file; under academy it follows `--` to claude.
     const debug = record.id === 'claude-code' && debugFile ? ['--debug-file', debugFile] : [];
@@ -1017,7 +1018,7 @@ export function buildChildInvocation({ record, sessionId, messageId, messageIds 
   }
   // A hosted spawn names its session up front, so the run host's socket path is known before the run registers.
   const mintedSessionId = record.id === 'claude-code' ? randomUUID() : null;
-  const spawnArgs = record.spawnArgsTemplate.map((element) => (element === '{prompt}' ? brief : element === '{sessionId}' ? mintedSessionId : element));
+  const spawnArgs = record.spawnArgsTemplate.map((element) => (element === '{prompt}' ? argvBrief : element === '{sessionId}' ? mintedSessionId : element));
   return hostedForRunHost(record, { sessionId: mintedSessionId, resume: false }, {
     form: 'spawn',
     ...withAcademyWrapper(record, academyAgentName, spawnArgs),
@@ -1063,7 +1064,7 @@ const QUEUE_SESSION_ID = /^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$/;
 /**
  * F34: the vehicle for a Codex session a managed app-server hosts. `codex
  * queue --thread <id> --message <brief>` hands the same bodyless resume
- * brief to that app-server, which runs it as the next turn of the SAME
+ * brief (a body never rides an argument vector) to that app-server, which runs it as the next turn of the SAME
  * session (after the turn in progress, if any): one writer, the session's
  * own hooks, the ordinary exact receive. The argv is the record's template
  * with the session and the brief substituted whole-element, like every other
@@ -1118,6 +1119,9 @@ function mintLaunchToken() {
 function childEnv(stateRoot, launchToken, placeholderEndpointId = null) {
   // Also covers a daemon that an older client or another starter launched with its own session env.
   const env = { ...withoutSessionEnv(process.env), TIGHTBEAM_LAUNCH_MODE: 'non_interactive' };
+  // ac-jfv.254: a headless run shows no one a diff, but in bypass mode Claude Code
+  // git-snapshots the cwd before each Bash call (18-105 s live in a large untracked tree).
+  env.CLAUDE_CODE_BASH_EDIT_DIFF = '0';
   if (stateRoot) env.TIGHTBEAM_STATE_ROOT = stateRoot;
   // How the child learns WHICH launch it is. Its SessionStart hook
   // forwards this to endpoint.register (src/cli/hook_commands.mjs), whose
@@ -1197,7 +1201,7 @@ function markRootAttention(db, request, { source, now }) {
  * exact stored provider session.  The original root remains untouched; the
  * new session receives its context from recovery.context at SessionStart.
  */
-function admitReplacement(db, { requestId, now }) {
+function admitReplacement(db, { requestId, now, logger }) {
   const request = db
     .prepare(
       `SELECT r.*, e.runtime, e.launch_mode, e.created_by_app_id
@@ -1205,7 +1209,7 @@ function admitReplacement(db, { requestId, now }) {
         WHERE r.id = ?`,
     )
     .get(requestId);
-  if (
+  const eligible = !(
     !request ||
     request.state !== 'failed' ||
     typeof request.session_id !== 'string' ||
@@ -1213,28 +1217,29 @@ function admitReplacement(db, { requestId, now }) {
     request.recovery_mode === 'replacement' ||
     request.replacement_endpoint_id !== null ||
     request.replacement_failure_reason !== EXACT_SESSION_UNAVAILABLE ||
-    endpointSuperseded(db, request.endpoint_id)
-  ) {
-    return null;
-  }
-  const root = recoveryRoot(db, request);
+    endpointSuperseded(db, request.endpoint_id) ||
+    retireAbandonedRequest(db, { request, now, logger }) // ac-jfv.161: an abandoned message never seeds a replacement
+  );
+  const root = eligible ? recoveryRoot(db, request) : null;
   if (!root) {
-    markRecoveryIncomplete(db, request, now);
+    if (eligible) markRecoveryIncomplete(db, request, now);
     return null;
   }
   const endpointId = generateId('endpoint');
   const replacementId = generateId('resume_request');
-  const deliveryId = generateId('delivery');
   db.prepare(
     `INSERT INTO endpoints
       (id, principal_id, authority_name, provider_session_id, state, runtime, launch_mode, authority_reference, created_by_app_id, created_at, updated_at)
      SELECT ?, principal_id, authority_name, NULL, 'dead', runtime, launch_mode, authority_reference, created_by_app_id, ?, ?
        FROM endpoints WHERE id = ?`,
   ).run(endpointId, now, now, request.endpoint_id);
-  db.prepare(
-    `INSERT INTO deliveries (id, message_id, endpoint_id, state, route_reason, source_obligation_id, created_at, updated_at)
-     VALUES (?, ?, ?, 'pending', '${RECOVERY_REPLACEMENT_ROUTE_REASON}', ?, ?, ?)`,
-  ).run(deliveryId, request.message_id, endpointId, root.id, now, now);
+  // retireAbandonedRequest asked the same scope question first, so a null here cannot happen; if it ever did, drop the half-built replacement rather than throw on a daemon tick.
+  const superseded = routeExistingMessage(db, { messageId: request.message_id, endpointId, subjectId: request.endpoint_id, routeReason: RECOVERY_REPLACEMENT_ROUTE_REASON, sourceObligationId: root.id, now }) === null ? null : seedReplacement(db, { request, endpointId, replacementId, now });
+  if (superseded === null) db.prepare('DELETE FROM endpoints WHERE id = ?').run(endpointId);
+  return superseded && { replacementId, endpointId, ...superseded };
+}
+
+function seedReplacement(db, { request, endpointId, replacementId, now }) {
   db.prepare(
     `INSERT INTO resume_requests
       (id, endpoint_id, principal_id, session_id, conversation_id, message_id, reason, authority_reference, state, created_at, updated_at, recovery_mode, replacement_for_request_id)
@@ -1245,8 +1250,7 @@ function admitReplacement(db, { requestId, now }) {
         SET recovery_mode = 'exact_resume', replacement_endpoint_id = ?, updated_at = ?
       WHERE id = ? AND replacement_endpoint_id IS NULL`,
   ).run(endpointId, now, request.id);
-  const superseded = supersedePredecessorWork(db, { request, replacementEndpointId: endpointId, now });
-  return { replacementId, endpointId, ...superseded };
+  return supersedePredecessorWork(db, { request, replacementEndpointId: endpointId, now });
 }
 
 function endpointSuperseded(db, endpointId) {
@@ -1266,7 +1270,7 @@ function endpointSuperseded(db, endpointId) {
 // belonged to the replacement.
 const SUPERSEDED_REQUEST_REASON = 'superseded';
 const CLEARED_ADMISSION = `admission_opened_at = NULL, admission_process_generation = NULL, admission_provider_session_id = NULL,
-  admission_owner_epoch = NULL, admission_owner_launch_token = NULL, admitted_at = NULL, retry_armed_at = NULL, takeover_decided_at = NULL`;
+  admission_owner_epoch = NULL, admission_owner_launch_token = NULL, admitted_at = NULL, retry_armed_at = NULL, takeover_decided_at = NULL, brief_launch_token = NULL`;
 
 function endPredecessorWakes(db, { request, now }) {
   const siblings = db.prepare(
@@ -1324,7 +1328,7 @@ function supersedePredecessorWork(db, { request, replacementEndpointId, now }) {
 // admits a replacement) and marks the request's root needs_attention.
 const REFUSAL_CWD_NOT_FOUND = 'cwd_not_found';
 
-function failRequest(db, { requestId, now = new Date(), admitReplacement: shouldAdmitReplacement = false, refusal = null } = {}) {
+function failRequest(db, { requestId, now = new Date(), admitReplacement: shouldAdmitReplacement = false, refusal = null, logger } = {}) {
   withTransaction(db, () => {
     db.prepare(
       "UPDATE claims SET state = 'released', outcome = 'failed', released_at = ? WHERE resource_type = 'resume_request' AND resource_id = ? AND state = 'claimed'",
@@ -1336,7 +1340,7 @@ function failRequest(db, { requestId, now = new Date(), admitReplacement: should
               updated_at = ?
         WHERE id = ? AND state IN ('pending', 'claimed')`,
     ).run(shouldAdmitReplacement ? 1 : 0, EXACT_SESSION_UNAVAILABLE, now.toISOString(), requestId);
-    if (shouldAdmitReplacement) admitReplacement(db, { requestId, now: now.toISOString() });
+    if (shouldAdmitReplacement) admitReplacement(db, { requestId, now: now.toISOString(), logger });
     if (refusal) {
       db.prepare('UPDATE resume_requests SET replacement_failure_reason = ? WHERE id = ?').run(refusal.reason, requestId);
       markRootAttention(db, db.prepare('SELECT conversation_id, message_id FROM resume_requests WHERE id = ?').get(requestId), { source: refusal.attentionSource, now: now.toISOString() });
@@ -1443,7 +1447,7 @@ function launchExitReason(diagnostic) {
 
 // A child may exit after its lease was reclaimed or its message was read.
 // Only that launch's still-held claim may decide transport failure.
-function failSupervisedAttempt(db, { requestId, token, unavailable = false, authenticationFailed = false, rateLimited = false, terminalReason = null, now = new Date() }) {
+function failSupervisedAttempt(db, { requestId, token, unavailable = false, authenticationFailed = false, rateLimited = false, resetsAtMs = null, terminalReason = null, now = new Date(), logger }) {
   return withTransaction(db, () => {
     const row = db.prepare(
       `SELECT c.* FROM claims c JOIN resume_requests r ON r.id = c.resource_id
@@ -1451,28 +1455,25 @@ function failSupervisedAttempt(db, { requestId, token, unavailable = false, auth
           AND c.state = 'claimed' AND r.state = 'claimed'`,
     ).get(requestId, token);
     if (!row) return null;
-    // A rate limit waits like a refused credential, holding the longest delay
-    // until the attempt budget ends rather than relaunching into more 429s.
-    const delayMs = authenticationFailed ? AUTH_RETRY_DELAYS_MS[row.attempt_count - 1] ?? null
-      : rateLimited ? AUTH_RETRY_DELAYS_MS[Math.min(row.attempt_count, AUTH_RETRY_DELAYS_MS.length) - 1] : null;
+    const limit = limitOutcome(db, { rateLimited, unavailable, requestId, claimId: row.id, nowMs: now.getTime(), resetsAtMs });
+    if (limit?.delayMs) return holdClaimForLimit(db, { row, limit, resetsAtMs, now });
+    const delayMs = authenticationFailed ? AUTH_RETRY_DELAYS_MS[row.attempt_count - 1] ?? null : null;
     if (delayMs !== null && !unavailable && row.attempt_count < MAX_RESUME_ATTEMPTS) {
-      // The claim stays held, which keeps siblings fenced and the request
-      // unlaunchable; its lapse returns the request to pending as usual.
-      // outcome 'backoff' marks a held claim with no live launch behind it,
-      // so a newer message can cut it short (runResumerTick).
+      // A held claim fences siblings; outcome 'backoff' lets newer mail cut it short (runResumerTick).
       const retryAt = new Date(now.getTime() + delayMs).toISOString();
       db.prepare("UPDATE claims SET lease_expires_at = ?, outcome = 'backoff' WHERE id = ?").run(retryAt, row.id);
       return { state: 'backoff', attempt: row.attempt_count, delay_ms: delayMs, retry_at: retryAt };
     }
-    const state = unavailable || authenticationFailed || terminalReason || row.attempt_count >= MAX_RESUME_ATTEMPTS ? 'failed' : 'pending';
+    const reason = terminalReason ?? limit?.reason ?? null;
+    const state = unavailable || authenticationFailed || reason || row.attempt_count >= MAX_RESUME_ATTEMPTS ? 'failed' : 'pending';
     releaseClaim(db, { row, outcome: 'failed', now });
     db.prepare(
       `UPDATE resume_requests SET state = ?, updated_at = ?,
          replacement_failure_reason = CASE WHEN ? THEN ? ELSE COALESCE(?, replacement_failure_reason) END
         WHERE id = ? AND state = 'claimed'`,
-    ).run(state, now.toISOString(), unavailable ? 1 : 0, EXACT_SESSION_UNAVAILABLE, terminalReason, requestId);
-    const replacement = unavailable ? admitReplacement(db, { requestId, now: now.toISOString() }) : null;
-    return { state, attempt: row.attempt_count, ...(replacement ? { replacement } : {}) };
+    ).run(state, now.toISOString(), unavailable ? 1 : 0, EXACT_SESSION_UNAVAILABLE, reason, requestId);
+    const replacement = unavailable ? admitReplacement(db, { requestId, now: now.toISOString(), logger }) : null;
+    return { state, attempt: row.attempt_count, reason, ...(replacement ? { replacement } : {}) };
   });
 }
 
@@ -1543,39 +1544,6 @@ function settleSupervisedFailure(db, { endpointId, capture }) {
   });
 }
 
-/**
- * Whether one supervised child exit is death evidence for the custody its
- * endpoint holds. A headless session ends its turn by exiting 0; that is the
- * session stopping, not dying, so the work it holds stays open and the same
- * session is resumed by the next message (ux.md: `stopped` = process
- * exited, resumable; scope SC4/SC9/SC12). The owner-exit reconciler makes
- * the same call for an exit it observes (retirement_executor.mjs). Only
- * evidence that the session cannot continue still counts:
- *
- *   abnormal_exit                    nonzero code, a signal, or the provider's
- *                                    own "session not on this machine" words
- *                                    (the last also admits the disclosed
- *                                    replacement);
- *   endpoint_unknown/closed/superseded
- *                                    nothing resumable remains to retain;
- *   clean_exit_without_session       the launch never adopted a provider
- *                                    session, so there is nothing to resume.
- *
- * A clean exit of an endpoint with a bound provider session id retains
- * custody (`clean_exit_resumable_session`).
- */
-function decideSupervisedExit(db, { endpointId, failed }) {
-  const openOwnedWork = db.prepare("SELECT COUNT(*) AS n FROM obligations WHERE custodian_endpoint_id = ? AND status = 'open'").get(endpointId).n;
-  const decide = (rule, retainsCustody) => ({ rule, retainsCustody, openOwnedWork });
-  if (failed) return decide('abnormal_exit', false);
-  const endpoint = db.prepare(`SELECT e.state, e.provider_session_id, ${NOT_SUPERSEDED_ENDPOINT} AS current FROM endpoints e WHERE e.id = ?`).get(endpointId);
-  if (!endpoint) return decide('endpoint_unknown', false);
-  if (endpoint.state === 'closed') return decide('endpoint_closed', false);
-  if (!endpoint.current) return decide('endpoint_superseded', false);
-  if (!endpoint.provider_session_id) return decide('clean_exit_without_session', false);
-  return decide('clean_exit_resumable_session', true);
-}
-
 function stageTerminalFailureNotice(context, { requestId }) {
   try {
     const notice = withTransaction(context.db, () => stageTerminalResumeFailureNotice(context.db, { requestId }));
@@ -1606,10 +1574,10 @@ function endForGoneCwd(context, { request, hosted = false }) {
 // Already-handled outcomes are info; anything that left the sender unnotified is a warning.
 const QUIET_GONE_CWD_REASONS = new Set(['delivery_not_failed_here', 'already_noticed']);
 function logGoneCwdNotice(context, request, outcome) {
-  const { status, ...result } = outcome;
+  const { status, event = 'resume.cwd_refused_sender_notified', ...result } = outcome;
   const level = QUIET_GONE_CWD_REASONS.has(result.reason) ? 'info' : 'warn';
   context.logger?.[level]?.({
-    event: 'resume.cwd_refused_sender_notified',
+    event,
     params: { resume_request_id: request.id, endpoint_id: request.endpoint_id, message_id: request.message_id },
     result,
     status,
@@ -1618,25 +1586,26 @@ function logGoneCwdNotice(context, request, outcome) {
 
 // After commit, as for any reply: inbox events, and every presentation staged
 // for a parked listener (unpublished, it is missed at its ack deadline).
-function noticeSenderOfGoneCwd(context, request) {
+function noticeSenderOfGoneCwd(context, request, { reason, body, event } = {}) {
+  const log = (outcome) => logGoneCwdNotice(context, request, { ...outcome, event });
   try {
-    const notice = withTransaction(context.db, () => stageCwdGoneSenderNotice(context, { requestId: request.id }));
+    const notice = withTransaction(context.db, () => stageCwdGoneSenderNotice(context, { requestId: request.id, reason, body }));
     if (notice.liveDeliveries?.length) {
       pushLiveDeliveryEvents(context, { conversationId: notice.conversation_id, liveDeliveries: notice.liveDeliveries });
     }
     for (const presentation of notice.presentations ?? []) publishPresentation(context, presentation);
     if (notice.liveDeliveries?.length > 0) {
       const notified = notice.liveDeliveries.map((delivery) => delivery.endpoint_id);
-      logGoneCwdNotice(context, request, { status: 'notified', notice_message_id: notice.message_id, notified_endpoint_ids: notified });
+      log({ status: 'notified', notice_message_id: notice.message_id, notified_endpoint_ids: notified });
     } else if (notice.idempotent_replay) {
-      logGoneCwdNotice(context, request, { status: 'skipped', reason: 'already_noticed' });
+      log({ status: 'skipped', reason: 'already_noticed' });
     } else {
-      logGoneCwdNotice(context, request, { status: 'skipped', reason: notice.skipped ?? 'no_open_sender_endpoint' });
+      log({ status: 'skipped', reason: notice.skipped ?? 'no_open_sender_endpoint' });
     }
   } catch (error) {
     // A key taken by different content means this message was already noticed.
     if (error.code === 'idempotency_collision') {
-      logGoneCwdNotice(context, request, { status: 'skipped', reason: 'already_noticed' });
+      log({ status: 'skipped', reason: 'already_noticed' });
       return;
     }
     context.logger?.warn({ event: 'resume_cwd_gone_notice_unavailable', resume_request_id: request.id, code: error.code, message: error.message });
@@ -1685,22 +1654,24 @@ function providerToken(value) {
 }
 
 function providerResultFromOutput(text) {
-  const result = {};
-  for (const line of text.split('\n')) {
-    let event;
-    try {
-      event = JSON.parse(line);
-    } catch {
-      continue;
-    }
+  const lines = text.split('\n');
+  let result = {};
+  let since = 0; // limit evidence counts only after the last successful turn or named non-limit error
+  for (const [index, line] of lines.entries()) {
+    const event = jsonLine(line);
     if (event?.type === 'result') {
       if (typeof event.is_error === 'boolean') result.is_error = event.is_error;
       if (providerToken(event.subtype)) result.subtype = event.subtype;
       if (providerToken(event.terminal_reason)) result.terminal_reason = event.terminal_reason;
     } else if (event?.type === 'assistant' && event.is_api_error_message === true && providerToken(event.error)) {
       result.error = event.error;
+      if (event.error !== 'rate_limit') since = index + 1;
+    } else if (event?.type === 'assistant' && !event.error) {
+      result = { recovered: true }; // a successful turn: everything before it is stale
+      since = index + 1;
     }
   }
+  Object.assign(result, usageLimitFromLines(lines.slice(since)));
   return Object.keys(result).length > 0 ? result : null;
 }
 
@@ -1718,8 +1689,8 @@ function readProviderResultTail(fd) {
   return lineEnd === -1 ? null : providerResultFromOutput(text.slice(lineEnd + 1));
 }
 
-function mergeProviderResult(earlier, later) {
-  return earlier && later ? { ...earlier, ...later } : earlier ?? later;
+function mergeProviderResult(earlier, later, wroteSince = true) { // output after a trim supersedes its limit verdict
+  return earlier && !later?.recovered ? { ...(wroteSince ? withoutLimitEvidence(earlier) : earlier), ...later } : later;
 }
 
 /**
@@ -1748,7 +1719,7 @@ function takeChildOutputResult(context, capture, requestId) {
   capture.fd = null;
   context.childOutputCaptures?.delete(capture);
   try {
-    return mergeProviderResult(capture.seen, readProviderResultTail(fd));
+    return mergeProviderResult(capture.seen, readProviderResultTail(fd), fs.fstatSync(fd).size > 0);
   } catch (err) {
     context.logger?.warn({ event: 'resume_output_read_failed', resume_request_id: requestId, message: err.message });
     return capture.seen;
@@ -1858,7 +1829,7 @@ export function exactSessionUnavailableDiagnostic({ runtime, form, sessionId, st
  * SPAWN-ERROR shape the same way.
  */
 function captureLaunchCustody(db, endpointId, launchToken) {
-  const endpoint = db.prepare('SELECT process_generation AS g, state, owner_epoch AS epoch, owner_launch_token AS token FROM endpoints WHERE id = ?').get(endpointId) ?? {};
+  const endpoint = db.prepare('SELECT process_generation AS g, state, owner_epoch AS epoch, owner_launch_token AS token, owner_process_pid AS pid, owner_process_start_identity AS start FROM endpoints WHERE id = ?').get(endpointId) ?? {};
   const recorded = endpoint.g ?? null;
   const seamAdvances = recorded === null || endpoint.state === 'dead' || endpoint.state === 'takeover_pending';
   return {
@@ -1866,23 +1837,18 @@ function captureLaunchCustody(db, endpointId, launchToken) {
     predictedProcessGeneration: seamAdvances ? (recorded ?? 0) + 1 : recorded,
     recordedProcessGeneration: recorded,
     observedOwnerEpoch: endpoint.epoch ?? 0,
-    recordedOwnerToken: endpoint.token ?? null,
+    recordedOwnerToken: endpoint.token ?? null, recordedOwnerPid: endpoint.pid ?? null, recordedOwnerStart: endpoint.start ?? null,
     capturedNodes: db.prepare("SELECT id, generation FROM obligations WHERE custodian_endpoint_id = ? AND status = 'open'").all(endpointId),
   };
 }
 
-// A failed availability launch is transport failure, not death evidence.
-// Keep the reconciler's one rotated owner regime and its durable request
-// intact so the next claim retries the same session and launch token.
-//
-// With `backoff` (an attempt that ran or tried to run and ended without
-// receipt, item 48) the claim stays held until the attempt's delay has
-// passed, exactly like the authentication backoff: the lapse returns the
-// request to pending and carries its attempt count. Its own outcome keeps
-// newer mail from cutting it short (yieldBackoffHoldsToNewerMail). Only a
-// live launch's claim (no outcome yet) is decided, so a late second event
-// for the same launch changes nothing.
-function releaseAvailabilityAttempt(db, { requestId, token, now = new Date(), backoff = false }) {
+// A failed availability launch is transport failure, not death evidence: the rotated owner regime and
+// durable request stay, so the next claim retries the same session and launch token. With `backoff`
+// (an attempt that ended without receipt, item 48) the claim is held for its delay like the
+// authentication backoff (a usage limit: the limit hold); the lapse returns it to pending with its
+// attempt count, and its outcome keeps newer mail from cutting it short (yieldBackoffHoldsToNewerMail).
+// Only a live launch's claim (no outcome yet) is decided, so a late second event changes nothing.
+function releaseAvailabilityAttempt(db, { requestId, token, now = new Date(), backoff = false, rateLimited = false, unavailable = false, resetsAtMs = null }) {
   return withTransaction(db, () => {
     const row = db.prepare(
       `SELECT c.* FROM claims c JOIN resume_requests r ON r.id = c.resource_id
@@ -1890,6 +1856,8 @@ function releaseAvailabilityAttempt(db, { requestId, token, now = new Date(), ba
           AND c.state = 'claimed' AND c.outcome IS NULL AND r.state = 'claimed' AND r.reason = 'availability_takeover'`,
     ).get(requestId, token);
     if (!row) return null;
+    const held = holdIfLimited(db, { row, rateLimited, unavailable, requestId, resetsAtMs, now });
+    if (held) return held;
     const delayMs = backoff && row.attempt_count < MAX_RESUME_ATTEMPTS ? takeoverRetryDelayMs(row.attempt_count) : 0;
     if (delayMs > 0) {
       const retryAt = new Date(now.getTime() + delayMs).toISOString();
@@ -1911,28 +1879,8 @@ function releaseAvailabilityAttempt(db, { requestId, token, now = new Date(), ba
 function releaseExhaustedTakeover(context, { request, now }) {
   const { db } = context;
   const nowIso = now.toISOString();
-  const released = withTransaction(db, () => {
-    const decided = db.prepare(
-      `SELECT d.id AS delivery_id, d.admission_owner_epoch, d.admission_owner_launch_token, e.owner_launch_token
-         FROM deliveries d JOIN endpoints e ON e.id = d.endpoint_id
-        WHERE d.endpoint_id = ? AND d.message_id = ? AND d.takeover_decided_at IS NOT NULL AND d.read_at IS NULL
-          AND e.state = 'takeover_pending' AND e.process_generation = d.admission_process_generation
-          AND e.provider_session_id IS d.admission_provider_session_id AND e.owner_epoch = d.admission_owner_epoch + 1`,
-    ).get(request.endpoint_id, request.message_id);
-    if (!decided) return null;
-    // Restore the predecessor's exact epoch and token (not a fresh token): a
-    // token marks a daemon headless launch, and receipt matches the admission.
-    const restored = db.prepare(
-      `UPDATE endpoints SET state = 'idle', owner_epoch = ?, owner_launch_token = ?, updated_at = ?
-        WHERE id = ? AND state = 'takeover_pending' AND owner_epoch = ? AND owner_launch_token IS ?`,
-    ).run(
-      decided.admission_owner_epoch, decided.admission_owner_launch_token, nowIso,
-      request.endpoint_id, decided.admission_owner_epoch + 1, decided.owner_launch_token,
-    );
-    if (restored.changes !== 1) return null;
-    db.prepare('UPDATE deliveries SET takeover_decided_at = NULL, updated_at = ? WHERE id = ?').run(nowIso, decided.delivery_id);
-    return decided.delivery_id;
-  });
+  const released = withTransaction(db, () =>
+    restoreTakeoverPredecessor(db, { endpointId: request.endpoint_id, messageId: request.message_id, now: nowIso }));
   context.logger?.[released ? 'info' : 'warn']?.({
     event: 'availability_takeover_released',
     params: { resume_request_id: request.id, endpoint_id: request.endpoint_id, message_id: request.message_id },
@@ -1944,14 +1892,17 @@ function releaseExhaustedTakeover(context, { request, now }) {
 
 // Every takeover attempt that ends without receipt goes through here, so
 // each one logs its decision once, at the moment it is made.
-function endAvailabilityAttempt(context, { request, token, now, cause }) {
-  const released = releaseAvailabilityAttempt(context.db, { requestId: request.id, token, now, backoff: true });
+function endAvailabilityAttempt(context, { request, token, now, cause, limit = {} }) {
+  const released = releaseAvailabilityAttempt(context.db, { requestId: request.id, token, now, backoff: true, ...limit });
   if (released?.state === 'backoff') {
-    logTakeoverRelaunchDecision(context, {
-      request, decision: 'backoff', attempt: released.attempt, cause, delay_ms: released.delay_ms, retry_at: released.retry_at,
-    });
+    logTakeoverRelaunchDecision(context, { request, decision: 'backoff', attempt: released.attempt, cause: released.cause ?? cause, delay_ms: released.delay_ms, retry_at: released.retry_at });
   } else if (released?.state === 'pending') {
     logTakeoverRelaunchDecision(context, { request, decision: 'released', attempt: released.attempt, cause });
+  } else if (released?.state === 'failed') { // a usage limit still in force 24 h on: end it as the ordinary path does
+    logTakeoverRelaunchDecision(context, { request, decision: 'failed', attempt: released.attempt, cause: released.cause });
+    stageTerminalFailureNotice(context, { requestId: request.id });
+    releaseExhaustedTakeover(context, { request, now });
+    noticeSenderOfGoneCwd(context, request, USAGE_LIMIT_NOTICE);
   }
   return released;
 }
@@ -2042,7 +1993,7 @@ function reconcileSupervisedEvidence(context, evidence) {
  * `clock` is when a child's later exit or error is decided (a takeover
  * backoff starts then); tests on a simulated clock pass their own.
  */
-export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEASE_MS, spawnLeaseMs = SPAWN_LEASE_MS, now = new Date(), clock = () => new Date(), observeProcess = observeRetirementProcess, observeThreadHost = threadHostObserverFor(context) } = {}) {
+export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEASE_MS, spawnLeaseMs = SPAWN_LEASE_MS, now = new Date(), clock = () => new Date(), observeProcess = processObserverFor(context), observeThreadHost = threadHostObserverFor(context) } = {}) {
   const db = context.db;
   const logger = context.logger;
   // Watch expiry reconciliation runs FIRST inside the same pass (plan
@@ -2052,6 +2003,7 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
   // below, so one tick can both decide a dead offer and wake its parent.
   const watchSummary = runWatchReconciliation(context, { now });
   runScheduledWakes(context, { now });
+  sweepStaleChannelCopies(context, { now });
   const summary = { candidates: 0, spawned: 0, failed: 0, skipped: 0, watches_expired: watchSummary.expired, custody_losses: 0 };
 
   // One snapshot per tick (plan W1 «Registration lifecycle», last
@@ -2062,13 +2014,15 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
   // registry on their context fall back to a builtin-only instance over
   // the same state root; the daemon always wires the real snapshot.
   const registry = context.runtimeRegistry ?? createRuntimeRegistry({ stateRoot: context.stateRoot });
-  const daemonRecords = registry.list().filter((record) => record.resumeStrategy === 'daemon');
-  const wakeRecords = registry.list().filter((record) => isPackageBoundCopilotRecord(record));
+  const runtimes = selectableRuntimes(registry);
 
   // A delivery that predates the old owner's retirement or exit could not
   // use the normal resume route. Materialize precisely one wake only here,
   // after rechecking the terminated-retirement or owner-exit proof.
   materializeSuccessorRequests(db, now.toISOString(), { staleAfterMs: context.resumeStaleAfterMs ?? DEFAULT_RESUME_STALE_AFTER_MS, logger });
+  // ac-4p2j0: open work whose holder stopped, with nothing coming. After
+  // materialization, so every launch this pass will queue counts as coming (r17 F2).
+  settleStalledHolders(context, now);
 
   trimChildOutputCaptures(context);
   yieldBackoffHoldsToNewerMail(db, now);
@@ -2117,8 +2071,9 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
       endpointId: failure.endpoint_id,
       evidenceKind: EXACT_SESSION_UNAVAILABLE,
       ...observeCurrentCustody(db, failure.endpoint_id),
+      notifyRequester: false,
     });
-    const replacement = withTransaction(db, () => admitReplacement(db, { requestId: failure.id, now: now.toISOString() }));
+    const replacement = withTransaction(db, () => admitReplacement(db, { requestId: failure.id, now: now.toISOString(), logger }));
     if (replacement) {
       logger?.info?.({
         event: 'resume_replacement_admitted',
@@ -2133,15 +2088,12 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
   // must match — canonical ids and their legacy aliases ('claude' rows
   // stay eligible for managed resume without being rewritten) plus the
   // exact manifest ids. External-strategy records are never selected.
-  const selectableRuntimeIds = expandStoredRuntimeIds(
-    [...daemonRecords, ...wakeRecords].map((record) => record.id),
-    registry.acceptedStoredIds,
-  );
+  const selectableRuntimeIds = runtimes.ids;
   const runtimePlaceholders = selectableRuntimeIds.map(() => '?').join(',');
   const coalescedEndpointPredicate = resumableEndpointPredicate('pending');
-  const candidateEndpointPredicate = resumableEndpointPredicate('r');
   const endpointParams = resumableEndpointParams();
   const nowIso = now.toISOString();
+  const selectable = selectablePendingSql('r', runtimes, nowIso); // shared with the stalled-holder catch-all
   const coalesced = db
     .prepare(
       `SELECT pending.id AS queued_request_id, pending.endpoint_id AS endpoint_id,
@@ -2187,40 +2139,11 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
               e.academy_permission_mode AS academy_permission_mode, e.provider_session_id AS endpoint_session_id
          FROM resume_requests r
          JOIN endpoints e ON e.id = r.endpoint_id
-        WHERE r.state = 'pending'
-          AND (${candidateEndpointPredicate})
-          AND ${NOT_SUPERSEDED_ENDPOINT}
-          AND ${endpointHasWakingUnreadSql('e.id')}
-          AND e.runtime IN (${runtimePlaceholders})
-          AND ${copilotWakeScopeSql(wakeRecords)}
-          -- One representative per endpoint keeps a large sibling backlog
-          -- from consuming the materialisation bound and starving unrelated
-          -- endpoints. Per-message request rows remain durable and pending.
-          AND (r.reason = 'availability_takeover' OR NOT EXISTS (
-            SELECT 1
-              FROM resume_requests earlier
-             WHERE earlier.endpoint_id = r.endpoint_id
-               AND earlier.state = 'pending'
-               AND (earlier.created_at < r.created_at OR (earlier.created_at = r.created_at AND earlier.id < r.id))
-          ))
-          -- A representative already in flight is the endpoint's bounded
-          -- launch fence. Its completion/failure/expiry releases eligibility
-          -- without adding another lease or endpoint state.
-          AND NOT EXISTS (
-            SELECT 1
-              FROM resume_requests active
-              JOIN claims active_claim
-                ON active_claim.resource_type = 'resume_request'
-               AND active_claim.resource_id = active.id
-               AND active_claim.state = 'claimed'
-             WHERE active.endpoint_id = r.endpoint_id
-               AND active.state = 'claimed'
-               AND active_claim.lease_expires_at > ?
-          )
+        WHERE ${selectable.sql}
         ORDER BY r.created_at ASC, r.id ASC
         LIMIT ?`,
     )
-    .all(...endpointParams, ...selectableRuntimeIds, nowIso, CANDIDATE_QUERY_LIMIT);
+    .all(...selectable.params, CANDIDATE_QUERY_LIMIT);
   summary.candidates = candidates.length;
 
   for (const request of candidates) {
@@ -2309,6 +2232,8 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
       WHERE d.endpoint_id = ? AND d.state != 'failed' AND d.read_at IS NULL AND m.origin = 'inbound' AND m.origin_channel_route_id IS NOT NULL`).all(request.endpoint_id).map((row) => row.id));
     const runtimeRecord = registry.get(request.runtime);
     const pendingContext = new Map(unread.map((row) => [row.message_id, notificationContext(db, row.message_id, { deliveryId: row.id })]));
+    // No body without the owning app's read_inbox grant (review v2): the brief is bodyless and nothing is stamped.
+    const bodies = endpointReadsInbox(db, request.endpoint_id) ? briefBodies(unread, { pendingContext, takeover: request.reason === 'availability_takeover' }) : new Map();
     const wake = planCopilotWake({ record: runtimeRecord, request, messageIds, externalMessageIds, pendingContext, briefFor: resumeBrief });
     if (wake?.refusal) {
       summary.failed += refuseCopilotWake({ context, request, refusal: wake.refusal, now, ops: { failRequest, stageTerminalFailureNotice } });
@@ -2322,6 +2247,7 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
       academyAgentName: request.academy_agent_name,
       externalMessageIds,
       pendingContext,
+      bodies,
       // Named by a fresh nonce, never a stored id: no database column may
       // reach an argument vector (test/unit/no_child_process.test.mjs), and
       // an imported request id could otherwise walk out of the directory.
@@ -2351,14 +2277,13 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
         // only on a fresh answer: the cached one can be a minute old, and a
         // host that became readable since is delivered to as usual.
         const nowMs = now.getTime();
-        const unknownFor = nowMs - unknownSinceFor(context, request, nowMs);
-        if (unknownFor < HOST_UNKNOWN_WINDOW_MS) {
+        const unknownFor = nowMs - unknownSinceFor(context, { id: request.id, pending: isHostProbePending(host) }, nowMs);
+        const cachedReason = host.reason;
+        if (unknownFor < HOST_UNKNOWN_WINDOW_MS || isHostProbePending((host = observeHostedSession(context, { request, observeThreadHost, nowMs, fresh: true })))) {
           summary.skipped += 1;
           logHostedDeferral(context, request, host, 'host_unknown_waits');
           continue;
         }
-        const cachedReason = host.reason;
-        host = observeHostedSession(context, { request, observeThreadHost, nowMs, fresh: true });
         if (host.hosted === null) {
           const ended = endHostedRequest(context, { request, reason: CODEX_HOST_UNKNOWN, now });
           summary.failed += ended ? 1 : 0;
@@ -2528,6 +2453,7 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
     if (invocation.debugFile) prepareResumeDebugLog(invocation.debugFile, logger, request.id);
     if (wake && invocation.form === 'resume') invocation = { ...invocation, prompt: wakeStdin(db, request, claim) };
     const output = openChildOutputCapture(context, request.id);
+    if (!hostedVehicle && !wake) stampBriefLaunch(db, { endpointId: request.endpoint_id, prompt: invocation.prompt, launchToken });
     let child;
     try {
       child = spawnFn(invocation.command, invocation.args, {
@@ -2579,7 +2505,7 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
     const liveChild = {
       requestId: request.id, endpointId: request.endpoint_id, runtime: request.runtime, reason: request.reason, pid: child.pid ?? null,
       startedAtMs: now.getTime(), claimToken: claim.token, windowMs: confirmationWindowMs, held: false,
-      sessionId: request.session_id, vehicle: hostedVehicle ? HOSTED_QUEUE_VEHICLE : 'child', hostedQueue: null,
+      sessionId: request.session_id, vehicle: hostedVehicle ? HOSTED_QUEUE_VEHICLE : 'child', hostedQueue: null, capture: custodyCapture,
     };
     const untrackChild = trackResumeChild(context, request.endpoint_id, liveChild);
 
@@ -2647,8 +2573,10 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
       untrackChild();
       endClaimHold(context, liveChild, clock());
       const unavailable = exactSessionUnavailableDiagnostic({ runtime: request.runtime, form: invocation.form, sessionId: request.session_id, stderr: childStderr });
-      const failed = code !== 0 || signal != null || unavailable;
       const providerResult = takeChildOutputResult(context, output, request.id);
+      const exited = code !== 0 || Boolean(signal) || unavailable;
+      const limitExit = exited ? holdLimitedLaunch(context, { request, token: claim.token, rateLimited: !unavailable && limitRefused(childExitDiagnostic(childStderr, unavailable, providerResult), providerResult), resetsAtMs: providerResult?.resets_at ?? null, now: clock(), settle: () => settleSupervisedFailure(db, { endpointId: request.endpoint_id, capture: custodyCapture }), evidence: exitEvidence(custodyCapture), capture: custodyCapture }) : null;
+      const failed = exited && limitExit !== 'held';
       const diagnostic = failed ? childExitDiagnostic(childStderr, unavailable, providerResult) : null;
       logger?.info({
         event: 'resume_child_exited', resume_request_id: request.id, pid: child.pid, code, signal,
@@ -2724,16 +2652,17 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
           return;
         }
         if (request.reason === 'availability_takeover') {
-          endAvailabilityAttempt(context, { request, token: claim.token, now: clock(), cause: failed ? 'child_failed' : 'exited_without_receipt' });
+          summary.failed += Number(endAvailabilityAttempt(context, { request, token: claim.token, now: clock(), cause: failed ? 'child_failed' : 'exited_without_receipt', limit: { rateLimited: failed && limitRefused(diagnostic, providerResult), unavailable, resetsAtMs: providerResult?.resets_at ?? null } })?.state === 'failed');
           return;
         }
+        let failure = null;
         if (failed) {
           const authenticationFailed = diagnostic === 'authentication_failed';
-          const failure = failSupervisedAttempt(db, { requestId: request.id, token: claim.token, unavailable, authenticationFailed, rateLimited: diagnostic === 'rate_limited', terminalReason: diagnostic === COPILOT_SESSION_UNAVAILABLE ? diagnostic : null });
+          failure = failSupervisedAttempt(db, { requestId: request.id, token: claim.token, unavailable, authenticationFailed, rateLimited: limitRefused(diagnostic, providerResult), resetsAtMs: providerResult?.resets_at ?? null, terminalReason: diagnostic === COPILOT_SESSION_UNAVAILABLE ? diagnostic : null, now: clock(), logger });
           if (failure) {
             if (failure.state === 'failed') summary.failed += 1;
             if (failure.state === 'backoff') {
-              logger?.warn({ event: 'resume_retry_scheduled', resume_request_id: request.id, attempt: failure.attempt, delay_ms: failure.delay_ms, retry_at: failure.retry_at, diagnostic });
+              logger?.warn({ event: 'resume_retry_scheduled', resume_request_id: request.id, attempt: failure.attempt, delay_ms: failure.delay_ms, retry_at: failure.retry_at, diagnostic, ...(failure.cause ? { cause: failure.cause, resets_at: failure.resets_at, attempt_spent: false } : {}) });
             }
             const settled = settleSupervisedFailure(db, {
               endpointId: request.endpoint_id,
@@ -2751,6 +2680,7 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
               }
             } else if (failure.state === 'failed') {
               notices = [stageTerminalFailureNotice(context, { requestId: request.id })].filter(Boolean);
+              if (failure.reason === USAGE_LIMIT_REASON) noticeSenderOfGoneCwd(context, request, USAGE_LIMIT_NOTICE);
             }
             if (failure.state === 'failed') {
               logger?.info({ event: 'resume_terminal_failure_settled', resume_request_id: request.id, endpoint_repaired: settled.repaired, notice_staged: notices.length > 0 });
@@ -2758,14 +2688,17 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
             logger?.warn({ event: 'resume_child_failure_decided', resume_request_id: request.id, ...failure });
           }
         }
-        const exitDecision = decideSupervisedExit(db, { endpointId: request.endpoint_id, failed });
+        const exitDecision = decideSupervisedExit(db, { endpointId: request.endpoint_id, failed, unavailable, terminal: failure?.state === 'failed' || limitExit === 'expired' });
         let endpointSettled = false;
         if (exitDecision.retainsCustody) {
           // A busy row whose Stop never reached the daemon would otherwise
           // never be resumable again: the same exact-launch CAS as a failed
           // exit parks it, and no obligation is touched.
           if (exitDecision.openOwnedWork > 0) endpointSettled = settleSupervisedFailure(db, { endpointId: request.endpoint_id, capture: custodyCapture }).repaired;
-        } else if (reconcileSupervisedEvidence(context, { endpointId: request.endpoint_id, evidenceKind: 'supervised_exit', ...exitEvidence(custodyCapture) }).decided) {
+          // ac-4p2j0: a session that took its brief then died is resumed quietly; a launch whose own request is retried (failure) is judged only for holders already cut off once.
+          const evidence = exitEvidence(custodyCapture);
+          summary.custody_losses += settleHolderDeath(context, { endpointId: request.endpoint_id, generation: evidence.observedProcessGeneration, capture: custodyCapture, source: 'supervised_exit', now: clock(), died: exitDecision.rule === 'abnormal_exit_resumable_session' && exitDecision.openOwnedWork > 0, onlyRetried: Boolean(failure), close: (capturedNodes) => reconcileSupervisedEvidence(context, { endpointId: request.endpoint_id, evidenceKind: 'supervised_exit', ...evidence, capturedNodes, notifyRequester: !replacementComing(db, request.endpoint_id) }).decided });
+        } else if (reconcileSupervisedEvidence(context, { endpointId: request.endpoint_id, evidenceKind: limitExit === 'expired' ? 'usage_limit_expired' : 'supervised_exit', ...exitEvidence(custodyCapture), notifyRequester: !replacementComing(db, request.endpoint_id) }).decided) {
           summary.custody_losses += 1;
         }
         logger?.info({
@@ -2849,8 +2782,7 @@ export function runResumerTick(context, { spawnFn = spawn, leaseMs = DEFAULT_LEA
  */
 export function startResumer(context, { env = process.env, spawnFn = spawn, busyLineSweep = runBusyLineSweep, pushLiveRuns = pushToLiveRuns } = {}) {
   const settings = resolveResumerSettings(env);
-  // Startup evidence only: each tick captures its own snapshot, so this
-  // name list describes the registry as of daemon start.
+  // Startup evidence only: each tick captures its own snapshot (names as of daemon start).
   const startupRegistry = context.runtimeRegistry ?? createRuntimeRegistry({ stateRoot: context.stateRoot });
 
   // Async jobs run after the sync tick, each behind its own in-flight guard: a slow push pass never
@@ -2877,7 +2809,7 @@ export function startResumer(context, { env = process.env, spawnFn = spawn, busy
   };
 
   let running = false;
-  const timer = setInterval(() => {
+  const tick = () => {
     if (running) return;
     running = true;
     try {
@@ -2888,19 +2820,17 @@ export function startResumer(context, { env = process.env, spawnFn = spawn, busy
       running = false;
     }
     runAsyncStep();
-  }, settings.tickMs);
+  };
+  const timer = setInterval(tick, settings.tickMs);
   timer.unref?.();
+  const stopWake = onHostProbeLanded(context, tick); // a landed holder probe is read now, whatever the tick spacing
 
   context.logger?.info({
     event: 'resumer_started',
     tick_ms: settings.tickMs,
     lease_ms: settings.leaseMs,
     spawn_lease_ms: settings.spawnLeaseMs,
-    runtimes: startupRegistry
-      .list()
-      .filter((record) => record.resumeStrategy === 'daemon')
-      .map((record) => record.id)
-      .join(','),
+    runtimes: startupRegistry.list().filter((record) => record.resumeStrategy === 'daemon').map((record) => record.id).join(','),
   });
-  return { settings, stop: () => clearInterval(timer) };
+  return { settings, stop: () => { clearInterval(timer); stopWake(); } };
 }

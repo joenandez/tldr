@@ -3,11 +3,14 @@
 // the daemon resumes or spawns (src/daemon/resumer.mjs). Building it in one
 // place is what keeps the three arrivals the same message.
 
+import { isUserNotice } from "../protocol/ack_gate.mjs";
 import {
   arrivalField,
+  quoteBody,
   renderArrivalBlock,
 } from "../protocol/arrival_block.mjs";
 import { shortId } from "../protocol/ids.mjs";
+import { FIRST_REPLY_RULE } from "../protocol/ack_gate_copy.mjs";
 import {
   offerActionCommands,
   tightbeamCommandHint,
@@ -23,9 +26,13 @@ const MAX_INJECTED_CHARS = 8000;
 const MAX_FIELD_CHARS = 500;
 const field = (value) => arrivalField(value).slice(0, MAX_FIELD_CHARS);
 
+// A user message's own text, when the caller put it in the entry: capped at
+// this many rendered characters, so ~25 notices still fit the notice file's tail.
+export const MAX_BODY_CHARS = 2000;
+
 // UX §9 S7. The context lines are absent for an entry staged before the
-// daemon returned them; nothing here ever reads or prints a message body.
-// Sender-controlled values pass through arrivalField (H1): one line, no tag.
+// daemon returned them. Sender-controlled values pass through arrivalField (H1):
+// one line, no tag.
 function renderContextLines(entry) {
   if (typeof entry.thread_id !== "string") return [];
   return [
@@ -33,6 +40,62 @@ function renderContextLines(entry) {
     `Subject: ${field(entry.subject)}`,
     `Thread: ${shortId(entry.thread_id)} · ${entry.reply_required ? "reply required" : entry.from === "scheduled wake" ? "request held · complete or park" : "no reply required"}`,
   ];
+}
+
+// The body of a user's own message (never an agent's, never a typed notice,
+// whatever the entry carries): `Body:` then each line quoted `> `, the cut
+// naming the command that returns the full text (a later receive is idempotent).
+function renderBodyLines(entry, prefix) {
+  if (!hasBody(entry)) return [];
+  const { lines, truncated } = quoteBody(entry.body, MAX_BODY_CHARS);
+  return [
+    "Body:",
+    ...lines,
+    ...(truncated
+      ? [
+          `> … [truncated; full text: ${prefix} agent receive --message ${entry.message_id}]`,
+        ]
+      : []),
+  ];
+}
+const hasBody = (entry) =>
+  isUserNotice(entry) && typeof entry.body === "string" && entry.body !== "";
+/** The ids whose body these (already withBodyPrefix'd) entries render: the ack gate's body_shown (R4). */
+export const bodyShownIds = (entries) =>
+  new Set(entries.filter(hasBody).map((entry) => entry.message_id));
+
+/**
+ * `entry` as a block of `before` then it renders it: bodiless unless its body
+ * shows. Its body and the cap depend only on the entries before it, so this is
+ * exact for a block that adds entries after it.
+ */
+export function asRendered(before, entry, { prefix } = {}) {
+  const block = withBodyPrefix([...before, entry]);
+  if (shownEntries(block, { prefix }).length === block.length)
+    return block.at(-1);
+  const bodiless = { ...entry };
+  delete bodiless.body;
+  return bodiless;
+}
+
+/**
+ * A hook block carries a body only for the leading run of user messages: past
+ * the first entry without one, bodies are dropped, so the receipt order never
+ * leaves a shown body behind an unread message it would have to wait for.
+ * ac-kf9rt v2 R2c: and one per thread (its oldest unread): a later same-thread
+ * entry is bodiless and ends the run. An entry with no thread_id counts as one thread.
+ */
+export function withBodyPrefix(entries) {
+  let open = true;
+  const threads = new Set();
+  return entries.map((entry) => {
+    open = open && hasBody(entry) && !threads.has(entry.thread_id);
+    threads.add(entry.thread_id);
+    if (open || entry.body === undefined) return entry;
+    const bodiless = { ...entry };
+    delete bodiless.body;
+    return bodiless;
+  });
 }
 
 // UX §9 S11: a chain notice (delegation or cancel) leads with the S11 line
@@ -81,11 +144,17 @@ const isAgentMessage = (entry) =>
   !entry.has_external_origin && entry.from !== "scheduled wake";
 
 function renderMessageLines(entry, prefix) {
-  const lines = ["tldr message · received", ...renderContextLines(entry)];
+  const lines = [
+    "tldr message · received",
+    ...renderContextLines(entry),
+    ...renderBodyLines(entry, prefix),
+  ];
   lines.push(`Message: ${entry.message_id}`);
-  lines.push(
-    `Receive command: ${prefix} agent receive --message ${entry.message_id}`,
-  );
+  // ac-jfv.254: a shown body needs no receive round (the gate's R4 copy says reply first); a truncated one names receive in its marker.
+  if (!hasBody(entry) || typeof entry.delegation_id === "string")
+    lines.push(
+      `Receive command: ${prefix} agent receive --message ${entry.message_id}`,
+    );
   if (typeof entry.delegation_id === "string") {
     // A delegate answers an offer with accept or decline; a reply is not one.
     const offer = offerActionCommands(entry.delegation_id, prefix);
@@ -109,7 +178,8 @@ function renderMessageLines(entry, prefix) {
     );
   }
   if (owesAnswer(entry)) lines.push(ANSWER_LINE);
-  if (entry.has_external_origin) lines.push(whyReplyFastLine(prefix));
+  if (entry.has_external_origin)
+    lines.push(whyReplyFastLine(prefix), FIRST_REPLY_RULE);
   if (isAgentMessage(entry)) lines.push(AGENT_SAFETY_LINE);
   return lines;
 }
@@ -132,6 +202,15 @@ function entriesWithinCap(groups) {
   return count;
 }
 
+/** The entries renderNotification shows in full; the rest are only counted ("N more pending"). */
+export function shownEntries(
+  entries,
+  { prefix = tightbeamCommandHint() } = {},
+) {
+  const groups = entries.map((entry) => entryLines(entry, prefix));
+  return entries.slice(0, entriesWithinCap(groups));
+}
+
 /**
  * @param entries notification entries: the daemon's notificationContext plus
  *   `message_id` and `has_external_origin`.
@@ -141,10 +220,9 @@ export function renderNotification(
   entries,
   { prefix = tightbeamCommandHint(), log = null } = {},
 ) {
-  const groups = entries.map((entry) => entryLines(entry, prefix));
-  const shown = entries.slice(0, entriesWithinCap(groups));
-  const lines = groups
-    .slice(0, shown.length)
+  const shown = shownEntries(entries, { prefix });
+  const lines = shown
+    .map((entry) => entryLines(entry, prefix))
     .flatMap((group, i) => (i > 0 ? ["", ...group] : group));
   const omitted = entries.length - shown.length;
   if (omitted > 0)
@@ -173,6 +251,14 @@ export function renderNotification(
     externalMessageIds: new Set(
       shown
         .filter((entry) => entry.has_external_origin)
+        .map((entry) => entry.message_id),
+    ),
+    bodyMessageIds: new Set(
+      shown.filter(hasBody).map((entry) => entry.message_id),
+    ),
+    typedMessageIds: new Set(
+      shown
+        .filter((entry) => typeof entry.notice === "string")
         .map((entry) => entry.message_id),
     ),
     body: lines.join("\n"),

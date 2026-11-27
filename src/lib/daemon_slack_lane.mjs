@@ -180,7 +180,7 @@ export function recordLaneResult({
 }) {
   if (error) {
     process.stderr.write(
-      `tldr daemon ${lane} failed: ${error?.message || error}\n`,
+      `tldr daemon ${lane} failed: ${error?.stack || error?.message || error}\n`,
     );
   }
   appendActivityEvent(

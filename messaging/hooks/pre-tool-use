@@ -24,7 +24,9 @@ _NEWLINE='
 payload_field() {
   _plutil=${TIGHTBEAM_PLUTIL:-/usr/bin/plutil}
   if [ -x "${_plutil}" ]; then
-    printf '%s' "$1" | "${_plutil}" -extract "$2" raw -o - - 2>/dev/null || true
+    # plutil prints its "no value at that key path" error on STDOUT, so a
+    # missing key must be told apart by its exit status, never by the text.
+    _value=$(printf '%s' "$1" | "${_plutil}" -extract "$2" raw -o - - 2>/dev/null) && printf '%s' "${_value}" || true
   else
     printf '%s' "$1" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{let v=JSON.parse(s);for(const k of process.argv[1].split("."))v=v?.[k];if(["string","number","boolean"].includes(typeof v))process.stdout.write(String(v))}catch{}})' "$2" 2>/dev/null || true
   fi
@@ -69,48 +71,388 @@ is_own_front_door() {
   [ -n "${own_bin}" ] && [ "${own_bin}" = "${candidate_bin}" ]
 }
 
-# The hard ACK gate permits remediation, not arbitrary shell work that
-# happens to mention a Tightbeam word. Parse only the structured Bash
-# command field, reject shell syntax before word splitting, then accept the
-# small supported CLI grammar with no wrappers or trailing arguments. The
-# grammar is the same after `tightbeam`, after the unified front door's
-# `tldr-agents messaging`, or after this plugin's own front door path. The
-# one quoted form admitted is a final `--body "<text>"` whose text contains
-# no double quote, `$`, backtick, backslash, or newline, so the shell
-# expands nothing in it.
+# A leading own front-door path (bare, '...' or "...") becomes the bare
+# front-door name in `command`, before quotes are stripped and words split,
+# so a path with a space survives. The own path comes from TIGHTBEAM_CLI as in
+# is_own_front_door (as written, then physical). Quoted patterns: a literal
+# match, never a glob. A form the shell would read differently is skipped:
+# '...' with a ', "..." with " $ ` or \, bare with anything but plain chars.
+own_front_door_prefix() {
+  [ -n "${TIGHTBEAM_CLI:-}" ] || return 0
+  own_dir=${TIGHTBEAM_CLI%/*}
+  case "${own_dir}" in
+    */libexec) own_bin=${own_dir%/libexec}/bin ;;
+    *) own_bin=${own_dir} ;;
+  esac
+  for own in "${own_bin}/${_TIGHTBEAM_FRONT_DOOR}" "$(physical_dir "${own_bin}")/${_TIGHTBEAM_FRONT_DOOR}"; do
+    case "${own}" in /*) ;; *) continue ;; esac
+    [ -f "${own}" ] && [ -x "${own}" ] || continue
+    for form in "'${own}'" "\"${own}\"" "${own}"; do
+      case "${form}" in
+        \'*) case "${own}" in *\'*) continue ;; esac ;;
+        \"*) case "${own}" in *[\"\$\`\\]*) continue ;; esac ;;
+        *) case "${own}" in *[!A-Za-z0-9/._+@%,:=-]*) continue ;; esac ;;
+      esac
+      case "${command}" in
+        "${form} "*) command=${_TIGHTBEAM_FRONT_DOOR}${command#"${form}"}; return 0 ;;
+      esac
+    done
+  done
+}
+
+# The ack-first gate permits remediation, not arbitrary shell work that
+# happens to mention a Tightbeam word. Only the structured Bash command field
+# is parsed. The grammar is the same after `tightbeam`, after the unified front
+# door's `tldr-agents messaging`, or after this plugin's own front door path:
+# While a user message is armed, only commands that answer it or read it pass:
+#   agent reply|ack|update|complete|cancel|decline ...   answer; free text
+#                                    starts at --body, --body-file or --reason
+#   agent delegate ...               park only: the raw command has --at and no
+#                                    --to substring anywhere (a park body that
+#                                    mentions --to is refused, accepted)
+#   agent accept ...                 free text as above (does not answer)
+#   ack <id> --endpoint <e> --generation <n>              exact (low-level ack)
+#   agent receive|inbox ...          prefix match, no free text
+#   read <x> --principal <p>         exact
+#   recovery retry|switch ...        exact
+# Every other command (send, delegate --to, request, wait, drafts, setup, ...)
+# is refused until the reply, bounded by the CLI's 3 refusals and 5 minutes.
+# Allowed commands may be chained (`;`, `&&`, newline), after an optional alias
+# of the own front door: see safe_ack_remediation (ac-jfv.230).
+# An allowed command may end with ONE output-filter suffix, outside any quote,
+# stripped before every check below (which then run on the remainder):
+#   [ 2>&1 ] [ | head|tail -N | head|tail -n N | sed -n 'A,Bp' | sed -n "A,Bp"
+#             | sed -n A,Bp | sed -n Np ]      (N, A, B digits)
+# A second pipe, a redirect to a file, `$`, a backtick, another sed
+# script or another target is not stripped and refuses as before. A suffix
+# inside an unclosed quote leaves that quote open in the remainder: refused.
+# Everything BEFORE the first free-text flag must be plain words, so a piece
+# that chains (`;`, `&&`, `||`, `|`), redirects, quotes or expands anything
+# there is refused. Everything from it on goes through body_ok: quote state is
+# tracked; an unquoted `;`, `&`, `|`, `<`, `>`, `$`, backtick or newline, an
+# open quote, or a `$` or backtick inside double quotes refuses. Single quotes
+# hold anything. A "$(cat <<'TAG' ... TAG)" unit is one opaque string.
+#
+# body_ok "<text>": POSIX parameter expansion only (no fork, no bashism). Each
+# step jumps to the next character that matters in the current state, so a
+# 4 KB body costs one step per quote or separator, not per character. The
+# character is read with a case on the string's head: stripping a long
+# literal suffix to get it is 100x slower in macOS /bin/sh.
+body_ok() {
+  rest=$1
+  while :; do
+    pre=${rest%%[\'\"\\;\&\|\<\>\$\`"${_NEWLINE}"]*}
+    [ "${pre}" = "${rest}" ] && return 0
+    rest=${rest#"${pre}"}
+    case "${rest}" in
+      \\*) rest=${rest#?}; rest=${rest#?} ;;
+      \'*) rest=${rest#?}
+         after=${rest#*\'}
+         [ "${after}" = "${rest}" ] && return 1
+         rest=${after} ;;
+      '"$(cat <<'*) heredoc_unit || return 1 ;;
+      \"*) rest=${rest#?}
+         while :; do
+           pre=${rest%%[\"\\\$\`]*}
+           [ "${pre}" = "${rest}" ] && return 1
+           rest=${rest#"${pre}"}
+           case "${rest}" in
+             \"*) rest=${rest#?}; break ;;
+             \\*) rest=${rest#?}; rest=${rest#?} ;;
+             \$*|\`*) return 1 ;;
+             *) rest=${rest#?} ;;
+           esac
+         done ;;
+      *) return 1 ;;
+    esac
+  done
+}
+
+# At an unquoted "$(cat <<TAG ... TAG)" (TAG bare, '...' or "..."): the shell
+# does not parse quotes inside a here-document, so body_ok would misread them.
+# A unit only when the FIRST line that is exactly TAG is followed by `)"` (the
+# shell ends the document there); a bare TAG expands the document, so it may
+# hold no `$` or backtick. Moves `rest` past the unit, or returns 1.
+heredoc_unit() {
+  h_rest=${rest#\"\$(cat <<}
+  h_line=${h_rest%%"${_NEWLINE}"*}
+  [ "${h_line}" != "${h_rest}" ] || return 1
+  h_tag=${h_line#[\'\"]}
+  h_tag=${h_tag%[\'\"]}
+  case "${h_tag}" in ""|[!A-Za-z_]*|*[!A-Za-z0-9_]*) return 1 ;; esac
+  case "${h_line}" in "'${h_tag}'"|"\"${h_tag}\""|"${h_tag}") ;; *) return 1 ;; esac
+  h_doc=${_NEWLINE}${h_rest#*"${_NEWLINE}"}
+  h_head=${h_doc%%"${_NEWLINE}${h_tag}${_NEWLINE}"*}
+  [ "${h_head}" != "${h_doc}" ] || return 1
+  if [ "${h_line}" = "${h_tag}" ]; then
+    case "${h_head}" in *[\$\`]*) return 1 ;; esac
+  fi
+  h_after=${h_doc#"${h_head}${_NEWLINE}${h_tag}${_NEWLINE}"}
+  case "${h_after}" in ')"'*) rest=${h_after#??}; return 0 ;; esac
+  return 1
+}
+
+# Sets `stripped` to $1 with balanced '...' / "..." quotes removed (their
+# contents kept as is). Returns 1 on an unbalanced quote. The caller has
+# already refused every expansion, escape and separator character.
+strip_quotes() {
+  rest=$1
+  stripped=
+  while :; do
+    pre=${rest%%[\'\"]*}
+    [ "${pre}" = "${rest}" ] && { stripped=${stripped}${rest}; return 0; }
+    rest=${rest#"${pre}"}
+    q=${rest%"${rest#?}"}
+    rest=${rest#?}
+    case "${rest}" in *"${q}"*) ;; *) return 1 ;; esac
+    stripped=${stripped}${pre}${rest%%"${q}"*}
+    rest=${rest#*"${q}"}
+  done
+}
+
+# digits_only "<text>": one or more digits, nothing else.
+digits_only() {
+  case "$1" in ""|*[!0-9]*) return 1 ;; esac
+}
+
+# strip_output_filter: sets `command` to itself minus ONE output-filter suffix
+# at its very end (grammar in the allow-list comment above); unchanged if none. Pure
+# parameter expansion. The caller's checks then run on the remainder, so a
+# "suffix" inside an open quote leaves an open quote there and is refused.
+strip_output_filter() {
+  of_cmd=${command}
+  of_f=${command##*" | "}
+  if [ "${of_f}" != "${command}" ]; then
+    of_n=
+    case "${of_f}" in
+      "head -n "*|"tail -n "*) of_n=${of_f#*" -n "} ;;
+      "head -"*|"tail -"*) of_n=${of_f#*" -"} ;;
+      "sed -n "*)
+        of_n=${of_f#"sed -n "}
+        case "${of_n}" in
+          \'?*\'|\"?*\") of_n=${of_n#?}; of_n=${of_n%?} ;;
+        esac
+        # A print range only: the script must end in p (`sed -n 42` is not one).
+        case "${of_n}" in *p) of_n=${of_n%p} ;; *) of_n= ;; esac
+        if [ "${of_n#*,}" != "${of_n}" ]; then
+          digits_only "${of_n#*,}" && of_n=${of_n%%,*}
+        fi ;;
+    esac
+    digits_only "${of_n}" && of_cmd=${command%" | ${of_f}"}
+  fi
+  case "${of_cmd}" in *" 2>&1") of_cmd=${of_cmd%" 2>&1"} ;; esac
+  command=${of_cmd}
+}
+
+# next_segment: cuts `chain_rest` at its first `;`, `&&` or newline outside
+# quotes into `segment` (spaces trimmed); chain_more=1 when it cut one. Returns
+# 1 at a quote it cannot close. It only splits: each piece must still pass
+# safe_one_command, whose quote tracking matches the shell's, so a cut the
+# shell would not make leaves an open quote in a piece, which refuses.
+next_segment() {
+  n_rest=${chain_rest}
+  chain_more=
+  while :; do
+    pre=${n_rest%%[\'\"\\\;\&"${_NEWLINE}"]*}
+    if [ "${pre}" = "${n_rest}" ]; then n_rest=; break; fi
+    n_rest=${n_rest#"${pre}"}
+    case "${n_rest}" in
+      \\*) n_rest=${n_rest#?}; n_rest=${n_rest#?} ;;
+      \'*) n_rest=${n_rest#?}
+         case "${n_rest}" in *\'*) n_rest=${n_rest#*\'} ;; *) return 1 ;; esac ;;
+      '"$(cat <<'*) rest=${n_rest}; heredoc_unit || return 1; n_rest=${rest} ;;
+      \"*) n_rest=${n_rest#?}
+         while :; do
+           pre=${n_rest%%[\"\\]*}
+           [ "${pre}" = "${n_rest}" ] && return 1
+           n_rest=${n_rest#"${pre}"}
+           case "${n_rest}" in
+             \"*) n_rest=${n_rest#?}; break ;;
+             *) n_rest=${n_rest#?}; n_rest=${n_rest#?} ;;
+           esac
+         done ;;
+      \&\&*) chain_more=1; n_sep=2; break ;;
+      \&*) n_rest=${n_rest#?} ;;
+      *) chain_more=1; n_sep=1; break ;;
+    esac
+  done
+  segment=${chain_rest%"${n_rest}"}
+  chain_rest=${n_rest}
+  if [ -n "${chain_more}" ]; then
+    chain_rest=${chain_rest#?}
+    [ "${n_sep}" = 1 ] || chain_rest=${chain_rest#?}
+  fi
+  while :; do
+    case "${segment}" in
+      " "*) segment=${segment# } ;;
+      *" ") segment=${segment% } ;;
+      *) break ;;
+    esac
+  done
+}
+
+# A chain of allow-listed commands is allowed (ac-jfv.230): every piece
+# between `;`, `&&` or newlines must pass safe_one_command. The first piece may
+# instead be NAME=<own front door> (any form own_front_door_prefix admits);
+# later pieces may then start with $NAME, ${NAME}, "$NAME" or "${NAME}".
+# Agents alias the long snapshot path this way (T, B, S: 1,129 of 1,135 uses).
+# NAME is an allow list, 1-3 uppercase letters or digits, without the few
+# that sh, bash or zsh treat specially: a longer list of exclusions kept
+# missing one (RANDOM, HISTCHARS). The path must be plain characters even when
+# quoted: an unquoted $NAME would split or glob anything else.
+# shortcut: assumes the agent's shell has default IFS and no attributes on
+# NAME (e.g. zsh `typeset -l T`); agent tool shells start fresh, so only a
+# session that set them itself is affected. Upgrade if a runtime keeps one.
 safe_ack_remediation() {
   tool_name=$(payload_field "${payload}" tool_name)
-  command=$(payload_field "${payload}" tool_input.command)
+  chain_rest=$(payload_field "${payload}" tool_input.command)
   [ "${tool_name}" = "Bash" ] || return 1
-  [ -n "${command}" ] || return 1
-  case "${command}" in
-    *' --body "'*'"')
-      quoted_body=${command#*' --body "'}
-      quoted_body=${quoted_body%'"'}
-      case "${quoted_body}" in
-        ""|*[\"\$\`\\]*|*"${_NEWLINE}"*) return 1 ;;
+  alias_name=
+  next_segment || return 1
+  a_name=${segment%%=*}
+  case "${a_name}" in
+    "${segment}"|""|[!A-Za-z_]*|*[!A-Za-z0-9_]*) ;;
+    IFS|UID|GID|PWD|ENV|TTY|PS[1-4]) return 1 ;;
+    [A-Z]|[A-Z][A-Z0-9]|[A-Z][A-Z0-9][A-Z0-9])
+      a_path=${segment#*=}
+      case "${a_path}" in
+        \'*\'|\"*\") a_path=${a_path#?}; a_path=${a_path%?} ;;
       esac
-      command="${command%%' --body "'*} --body quoted-body"
-      ;;
+      case "${a_path}" in ""|*[!A-Za-z0-9/._+@%,:=-]*) return 1 ;; esac
+      command="${segment#*=} x"
+      own_front_door_prefix
+      [ "${command}" = "${_TIGHTBEAM_FRONT_DOOR} x" ] || return 1
+      [ -n "${chain_more}" ] || return 1
+      alias_name=${a_name}
+      next_segment || return 1 ;;
+    *) return 1 ;;
   esac
-  case "${command}" in *[\;\|\&\<\>\`\\\'\"\$\(\)]*|*"${_NEWLINE}"*) return 1 ;; esac
+  while :; do
+    command=${segment}
+    if [ -n "${alias_name}" ]; then
+      for a_form in "\$${alias_name}" "\${${alias_name}}" "\"\$${alias_name}\"" "\"\${${alias_name}}\""; do
+        case "${command}" in
+          "${a_form} "*) command=${_TIGHTBEAM_FRONT_DOOR}${command#"${a_form}"}; break ;;
+        esac
+      done
+    fi
+    safe_one_command || return 1
+    [ -n "${chain_more}" ] || return 0
+    next_segment || return 1
+  done
+}
+
+safe_one_command() {
+  [ -n "${command}" ] || return 1
+  strip_output_filter
+  [ -n "${command}" ] || return 1
+  own_front_door_prefix
+  # The words end at the first free-text flag (a body, cancel's --reason); the
+  # tail goes through body_ok.
+  words=${command}
+  for boundary in ' --body ' ' --body=' ' --body-file ' ' --body-file=' ' --reason ' ' --reason='; do
+    cut=${command%%"${boundary}"*}
+    [ "${#cut}" -ge "${#words}" ] || words=${cut}
+  done
+  # Before the body: no expansion, escape or separator, even inside quotes;
+  # balanced quotes around values (--message "msg_1") are removed.
+  case "${words}" in *[\;\|\&\<\>\`\\\$\(\)]*|*"${_NEWLINE}"*) return 1 ;; esac
+  strip_quotes "${words}" || return 1
   set -f
-  set -- ${command}
+  set -- ${stripped}
   set +f
   if [ "$#" -ge 2 ] && [ "$2" = messaging ] &&
     { [ "$1" = "${_TIGHTBEAM_FRONT_DOOR}" ] || is_own_front_door "$1"; }; then
     shift 2
     set -- tightbeam "$@"
   fi
-  case "$1:$2:$3:$#" in
-    tightbeam:agent:inbox:3) return 0 ;;
-    tightbeam:agent:inbox:4) [ "$4" = "--unread" ] && return 0 ;;
-    tightbeam:agent:ack:7) [ "$4" = "--work" ] && [ -n "$5" ] && [ "$6" = "--body" ] && [ -n "$7" ] && return 0 ;;
-    tightbeam:read:*:5) [ -n "$3" ] && [ "$4" = "--principal" ] && [ -n "$5" ] && return 0 ;;
-    tightbeam:recovery:retry:13|tightbeam:recovery:switch:13)
+  [ "$1" = tightbeam ] || return 1
+  case "$2:$3" in
+    agent:reply|agent:ack|agent:update|agent:complete|agent:cancel|agent:decline|agent:accept)
+      body_ok "${command#"${words}"}"; return ;;
+    agent:delegate)
+      # Flags may follow the body, so the whole command is searched, body text
+      # included, after quote removal (so --t''o counts as --to): any --to
+      # refuses, and --at must appear. Accepted false refusal: a park body that
+      # mentions --to (bounded by the Node refusal cap).
+      body_ok "${command#"${words}"}" || return 1
+      unquoted=${command}
+      while :; do
+        case "${unquoted}" in
+          *\'*) unquoted=${unquoted%%\'*}${unquoted#*\'} ;;
+          *\"*) unquoted=${unquoted%%\"*}${unquoted#*\"} ;;
+          *\\*) unquoted=${unquoted%%\\*}${unquoted#*\\} ;;
+          *) break ;;
+        esac
+      done
+      case "${unquoted}" in *--to*) return 1 ;; esac
+      case "${unquoted}" in *--at*) return 0 ;; esac
+      return 1 ;;
+  esac
+  # The commands below take no free text: any here would be unchecked.
+  [ "${words}" = "${command}" ] || return 1
+  case "$2:$3:$#" in
+    agent:receive:*|agent:inbox:*) return 0 ;;
+    ack:*:7) [ -n "$3" ] && [ "$4" = "--endpoint" ] && [ -n "$5" ] && [ "$6" = "--generation" ] && [ -n "$7" ] && return 0 ;;
+    read:*:5) [ -n "$3" ] && [ "$4" = "--principal" ] && [ -n "$5" ] && return 0 ;;
+    recovery:retry:13|recovery:switch:13)
       [ "$4" = "--root" ] && [ -n "$5" ] && [ "$6" = "--generation" ] && [ -n "$7" ] && [ "$8" = "--target-endpoint" ] && [ -n "$9" ] && [ "${10}" = "--target-process-generation" ] && [ -n "${11}" ] && [ "${12}" = "--key" ] && [ -n "${13}" ] && return 0 ;;
   esac
   return 1
+}
+
+# One JSON line per fail-open, appended in the shape the CLI writes
+# (contract: ack-gate.log). umask 077 so the file is 0600. main() admits only
+# [A-Za-z0-9._-] session ids, so printf needs no JSON escaping.
+ack_gate_log() {
+  (
+    umask 077
+    printf '{"event":"ack_gate.opened","reason":"%s","session":"%s","at":"%s"}\n' \
+      "$1" "${session_id}" "$(/bin/date -u +%Y-%m-%dT%H:%M:%S.000Z)" >> "${ack_log}"
+  ) 2>/dev/null || printf 'tightbeam: could not write ack-gate.log\n' >&2
+}
+
+# Run the CLI verdict in the foreground with the payload on stdin. The CLI
+# decides from local files only (no daemon contact), so it needs no timer.
+# Returns 0 allowed, 2 refused, 1 unavailable (hook_error already logged).
+ack_gate_run_cli() {
+  if [ -z "${cli}" ] || [ ! -x "${cli}" ]; then
+    printf 'tightbeam: ACK gate verdict unavailable (no usable CLI); allowing this call\n' >&2
+    ack_gate_log hook_error
+    return 1
+  fi
+  # --ack-gate-only: this boundary never opens a daemon client or drains, even if armed/ emptied since the glob.
+  set -- hook pre-tool-use --ack-gate-only
+  [ -z "${TIGHTBEAM_RUNTIME:-}" ] || set -- "$@" --runtime "${TIGHTBEAM_RUNTIME}"
+  # Exit 2 is a refusal only with the refusal's lead line: bin/tightbeam also
+  # exits 2 on a usage error (a CLI older than this hook), which fails open.
+  gate_err=$(printf '%s' "${payload}" | "${cli}" "$@" 2>&1 > /dev/null)
+  gate_rc=$?
+  [ -z "${gate_err}" ] || printf '%s\n' "${gate_err}" >&2
+  case "${gate_rc}" in
+    0) return 0 ;;
+    2)
+      # The lead must open stderr (after any TIGHTBEAM_HOOK_DEBUG JSON lines).
+      lead=${gate_err}
+      while :; do
+        case "${lead}" in
+          '{"component":"tightbeam-hook"'*"${_NEWLINE}"*) lead=${lead#*"${_NEWLINE}"} ;;
+          *) break ;;
+        esac
+      done
+      case "${lead}" in '[tldr] This tool call did not run'[.:]*) return 2 ;; esac ;;
+  esac
+  printf 'tightbeam: ACK gate verdict failed (exit %s); allowing this call\n' "${gate_rc}" >&2
+  ack_gate_log hook_error
+  return 1
+}
+
+# True when ack.gate/armed/ holds any entry. A glob in the current shell: no
+# fork, no process. Node writes the entries and decides cap, expiry and
+# corruption; the shell only asks "is anything armed".
+ack_gate_armed() {
+  set -- "${ack_armed}"/*
+  [ -e "$1" ]
 }
 
 main() {
@@ -127,18 +469,21 @@ main() {
     session_id="${CLAUDE_SESSION_ID:-${CODEX_THREAD_ID:-${HELM_AGENT_SESSION_ID:-${CLAUDE_CODE_SESSION_ID:-}}}}"
   fi
   [ -n "${session_id}" ] || return 0
-  # Never build a path out of a session id that could leave the sessions
-  # directory; the CLI enforces the same rule (src/protocol/session_paths.mjs).
+  # Take only the ids the CLI takes (src/protocol/session_paths.mjs): a path
+  # built from one stays in the sessions directory, and ack_gate_log can print
+  # it into JSON unescaped (no quote, backslash or control character).
   case "${session_id}" in
-    */*|*..*|.*|"") return 0 ;;
+    *[!A-Za-z0-9._-]*|[!A-Za-z0-9]*|*..*|"") return 0 ;;
   esac
+  [ "${#session_id}" -le 128 ] || return 0
 
   # The default matches src/protocol/state_root_location.mjs (Phase E).
   state_root="${TIGHTBEAM_STATE_ROOT:-${HOME}/.tldr-agents/tightbeam}"
   dir="${state_root}/sessions/${session_id}"
   watermark="${dir}/inbox.watermark"
   seen="${dir}/inbox.seen"
-  ack_hint="${dir}/ack.deadline.json"
+  ack_armed="${dir}/ack.gate/armed"
+  ack_log="${dir}/ack-gate.log"
   action="${dir}/current-action-id"
 
   action_id=""
@@ -159,48 +504,40 @@ main() {
   # none, there is nothing trusted to start, so the boundary is left alone.
   [ -n "${HOME:-}" ] || return 0
   cli="${TIGHTBEAM_CLI:-}"
-  [ -n "${cli}" ] && [ -x "${cli}" ] || return 0
 
-  # A tool boundary must not fail because the drain failed, so the CLI's
-  # exit status is swallowed here. What makes that safe is the CLI's
-  # ordering, not this line: a message is staged on disk BEFORE it is
-  # marked read, and the seen marker only advances after a clean drain.
-  # A swallowed failure therefore leaves the delivery unread and the next
-  # tool boundary retries it. It is still reported, because a failure that
-  # repeats every boundary should be visible to whoever reads stderr.
-  if [ -n "${TIGHTBEAM_RUNTIME:-}" ]; then
-    drain() { printf '%s' "${payload}" | "${cli}" hook pre-tool-use --runtime "${TIGHTBEAM_RUNTIME}"; }
-  else
-    drain() { printf '%s' "${payload}" | "${cli}" hook pre-tool-use; }
+  # ack.gate/armed/<message id> is created by the CLI when a user message
+  # notice is shown. The dir is absent or empty otherwise, so the no-message
+  # path stays one glob and no process or daemon contact. A subagent call
+  # (payload agent_id) is not gated; the key is read as a field so command text
+  # that merely mentions it cannot skip the gate.
+  if ack_gate_armed && [ -z "$(payload_field "${payload}" agent_id)" ]; then
+    safe_ack_remediation && return 0
+    ack_gate_run_cli
+    # Allowed or failed open. The CLI hands the drain to its detached worker.
+    [ $? -ne 2 ] || return 2
+    return 0
   fi
 
-  # A canonical-derived local hint keeps the 120-second ACK deadline
-  # reachable after the inbox watermark has been seen. It is absent for
-  # ordinary agent correspondence, so the no-message/no-deadline path
-  # below remains one stat and no process or daemon contact.
-  if [ -s "${ack_hint}" ]; then
-    if ! drain >/dev/null; then
-      printf 'tightbeam: PreToolUse ACK reconciliation failed; retry an acknowledgement or inbox read\n' >&2
-      safe_ack_remediation && return 0
-      subject=$(payload_field "$(/bin/cat "${ack_hint}" 2>/dev/null || true)" subject)
-      [ -n "${subject}" ] || subject="this thread"
-      printf 'Acknowledgement required now on “%s”. Send it before continuing.\n' "${subject}" >&2
-      return 2
-    fi
-    # The provider-accepted ACK or terminal transition is canonical; its
-    # next boundary removes the local hint before this shell decides a
-    # deadline. A remaining hint is still an open, unacknowledged user root.
-    [ -s "${ack_hint}" ] || return 0
-    due_ms=$(payload_field "$(/bin/cat "${ack_hint}" 2>/dev/null || true)" due_at_epoch_ms)
-    now_ms=$(( $(/bin/date +%s) * 1000 ))
-    case "${due_ms}" in *[!0-9]*|"") due_ms=0 ;; esac
-    if [ "${due_ms}" -gt 0 ] && [ "${now_ms}" -ge "${due_ms}" ]; then
-      safe_ack_remediation && return 0
-      subject=$(payload_field "$(/bin/cat "${ack_hint}" 2>/dev/null || true)" subject)
-      [ -n "${subject}" ] || subject="this thread"
-      printf 'Acknowledgement required now on “%s”. Send it before continuing.\n' "${subject}" >&2
-      return 2
-    fi
+  [ -n "${cli}" ] && [ -x "${cli}" ] || return 0
+
+  # The CLI reads the daemon's local notice file (no daemon contact) and
+  # hands the drain to a detached worker. A tool boundary must not fail
+  # because that failed, so the CLI's exit status is swallowed here. What
+  # makes that safe is the CLI's ordering, not this line: a notice is staged
+  # or shown BEFORE the seen marker advances, and only once the watermark's
+  # own notice was found. A swallowed failure therefore leaves the watermark
+  # unseen and the next tool boundary retries it. It is still reported (and
+  # logged to ack-gate.log), because a failure that repeats every boundary
+  # should be visible.
+  # Unarmed only (an armed remediation call returned above with no drain):
+  # --ack-remediation lets an allow-listed command still drain (the notice is
+  # staged and shown at PostToolUse), but the CLI never refuses it (the .156
+  # allow list, safe_ack_remediation).
+  remedy=""
+  if [ -n "${TIGHTBEAM_RUNTIME:-}" ]; then
+    drain() { printf '%s' "${payload}" | "${cli}" hook pre-tool-use --runtime "${TIGHTBEAM_RUNTIME}" ${remedy:+--ack-remediation}; }
+  else
+    drain() { printf '%s' "${payload}" | "${cli}" hook pre-tool-use ${remedy:+--ack-remediation}; }
   fi
 
   # The whole zero-IPC path: no watermark means the daemon has never
@@ -208,8 +545,15 @@ main() {
   # nothing new since the last drain.
   [ -s "${watermark}" ] || return 0
   /usr/bin/cmp -s "${watermark}" "${seen}" && return 0
-  if ! drain; then
+  safe_ack_remediation && remedy=1
+  drain
+  drain_rc=$?
+  # Exit 2 is the CLI's deliberate refusal (a user notice shown in place of
+  # the call); any other failure stays swallowed as above.
+  [ "${drain_rc}" -ne 2 ] || return 2
+  if [ "${drain_rc}" -ne 0 ]; then
     printf 'tightbeam: PreToolUse drain failed; the message stays unread and the next tool boundary retries\n' >&2
+    ack_gate_log notice_error
   fi
   return 0
 }
@@ -222,8 +566,8 @@ track_codex_bash() {
     printf 'tightbeam: could not create background item bash-%s\n' "${action_id}" >&2
 }
 
-# Drain errors still never fail a tool boundary. A deadline refusal is the
-# deliberate exception: exit 2 is the runtime's block contract.
+# Drain errors still never fail a tool boundary. A gate or notice refusal is
+# the deliberate exception: exit 2 is the runtime's block contract.
 track_bash=""
 main "$@"
 status=$?

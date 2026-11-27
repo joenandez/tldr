@@ -249,6 +249,7 @@ function usage() {
       "--max-catchup-cost",
       "--estimated-catchup-cost",
       "--overlap-policy",
+      "--fallback-policy",
       "--no-network-check",
       "--network-host",
       "--activate",
@@ -1507,6 +1508,9 @@ function buildJobFromFlags(flags, scope, partial = false, trailingArgs = []) {
 
   const schedule = buildScheduleFromFlags(flags);
   if (schedule) out.schedule = schedule;
+
+  if (flags["fallback-policy"] !== undefined)
+    out.fallback_policy = flags["fallback-policy"];
 
   const notify = {};
   if (flags["notify-on"]) notify.on = flags["notify-on"];

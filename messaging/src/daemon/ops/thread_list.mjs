@@ -13,14 +13,15 @@
 // through resume lineage (resume_requests.replacement_endpoint_id), so an
 // adopting session sees the threads of the session it took over from.
 //
-// Read-only: it never writes a row, never touches read_at, delivery state, or
-// work state.
+// Read-only: it never writes a row, never touches read_at, delivery state, or work state.
 
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { requireActingEndpoint } from '../lifecycle_transition.mjs';
 import { chainNodes, chainWatches, conversationSubject, deriveChainLabel, isHostedLaunchFailure, launchFailureFor, sessionHandles } from './lifecycle_view.mjs';
 import { offerRecipientEndpointIds, replacementDeliveryFor } from './message_shared.mjs';
+import { holderNoteVisibleSql } from './reserved_notice.mjs';
 import { deliveryStepFor } from '../../protocol/delivery_step.mjs';
+import { skippedDeliverySql } from './claims_shared.mjs';
 
 const FIELDS = new Set(['principal_id', 'endpoint_id', 'process_generation', 'all', 'waiting_on', 'limit']);
 const WAITING_ON_FILTERS = { me: 'you', them: 'them' };
@@ -240,8 +241,7 @@ function heldWorkOf(root, nodes, endpointId) {
 }
 
 function unreadCount(db, conversationId, endpointIds) {
-  return db
-    .prepare(
+  return db.prepare(
       `SELECT COUNT(*) AS n
          FROM deliveries d JOIN messages m ON m.id = d.message_id
         WHERE m.conversation_id = ? AND d.endpoint_id IN (${marksFor(endpointIds)})
@@ -324,7 +324,7 @@ function deliveryStep(db, conversationId, endpointIds, holderEndpointId) {
     .get(conversationId, ...endpointIds);
   if (!message) return null;
   const rows = db
-    .prepare('SELECT id AS delivery_id, COALESCE(channel_route_id, endpoint_id) AS recipient, endpoint_id, state, read_at, acknowledged_at, created_at FROM deliveries WHERE message_id = ? ORDER BY created_at ASC, rowid ASC')
+    .prepare(`SELECT d.id AS delivery_id, COALESCE(d.channel_route_id, d.endpoint_id) AS recipient, d.endpoint_id, d.state, d.read_at, d.acknowledged_at, d.created_at, ${skippedDeliverySql('d')} AS skipped FROM deliveries d WHERE d.message_id = ? ORDER BY d.created_at ASC, d.rowid ASC`)
     .all(message.id)
     .map((row) => ({ ...row, replacement_delivery_id: replacementDeliveryFor(db, { messageId: message.id, endpointId: row.endpoint_id, state: row.state }) }));
   return deliveryStepFor(rows, { holderEndpointId });
@@ -366,7 +366,7 @@ function roleFor(db, { conversationId, caller, links, nodes }) {
   if (adoptedIds.length === 0) return { role: 'participant', adoptedFrom: [] };
   const adoptedFrom = adoptedIds.map((id) => {
     const endpoint = db.prepare('SELECT id, provider_session_id, runtime FROM endpoints WHERE id = ?').get(id);
-    return { endpoint_id: id, provider_session_id: endpoint.provider_session_id ?? null, runtime: endpoint.runtime ?? null, short: shortSessionId(db, endpoint) };
+    return { endpoint_id: id, provider_session_id: endpoint.provider_session_id ?? null, runtime: endpoint.runtime ?? null, short: (caller.handle ?? sessionHandles(db))(endpoint) };
   });
   return { role: `adopted from ${adoptedFrom[0].short}`, adoptedFrom: adoptedFrom.map(({ short, ...rest }) => rest) };
 }
@@ -376,8 +376,8 @@ function roleFor(db, { conversationId, caller, links, nodes }) {
 // registered by its channel adapter's own application, never the agent's, so
 // the conversation's own messages, deliveries and reply bindings (which only
 // this application's conversation can hold) decide which routes it names.
-export function participantsFor(db, appId, conversationId, callerEndpointId) {
-  const handle = sessionHandles(db);
+// `handle` lets a caller rendering many threads read the handle table once.
+export function participantsFor(db, appId, conversationId, callerEndpointId, handle = sessionHandles(db)) {
   const sessions = db
     .prepare(
       `SELECT e.id, e.provider_session_id, e.runtime, e.authority_reference
@@ -436,7 +436,7 @@ export function threadSummary(db, appId, conversationId, caller, links) {
   const leaves = openLeaves(nodes);
   const unread = unreadCount(db, conversationId, caller.endpointIds);
   const conversation = db.prepare('SELECT closed_at, created_at FROM conversations WHERE id = ?').get(conversationId);
-  const lastActivity = db.prepare('SELECT MAX(created_at) AS at FROM messages WHERE conversation_id = ?').get(conversationId).at;
+  const lastActivity = db.prepare(`SELECT MAX(m.created_at) AS at FROM messages m WHERE m.conversation_id = ? AND ${holderNoteVisibleSql('m', caller.endpointIds)}`).get(conversationId, ...caller.endpointIds).at;
   const { role, adoptedFrom } = roleFor(db, { conversationId, caller, links, nodes });
   const state = root ? workState({ db, root, nodes, watches, attention, caller, leaves }) : null;
   const step = deliveryStep(db, conversationId, caller.endpointIds, currentHolderEndpoint(nodes));
@@ -444,7 +444,7 @@ export function threadSummary(db, appId, conversationId, caller, links) {
   // untracked message has no root, so only its failed delivery does, or a
   // resume the daemon ended on purpose for a session another app holds (its
   // delivery is unread, not failed).
-  const failure = root && root.status !== 'open' ? null : launchFailureFor(db, conversationId);
+  const failure = root && root.status !== 'open' ? null : launchFailureFor(db, conversationId, caller.handle);
   const launchFailed = root ? root.status === 'open' : step === 'failed' || isHostedLaunchFailure(failure);
   const chains = openRootChains(db, conversationId, root ? { rootId: root.id, nodes } : null);
   // Offers to the caller on ANY open root, newest root first: an offer on an
@@ -488,7 +488,7 @@ function listThreads(context, connection, request) {
   const db = context.db;
   validatedEndpoint(db, connection, request);
   const predecessors = predecessorEndpointIds(db, connection.appId, request.endpointId);
-  const caller = { principalId: request.principalId, endpointId: request.endpointId, endpointIds: [request.endpointId, ...predecessors], logger: context.logger };
+  const caller = { principalId: request.principalId, endpointId: request.endpointId, endpointIds: [request.endpointId, ...predecessors], logger: context.logger, handle: sessionHandles(db) }; // one handle table per call (ac-dsts3)
   const linksByConversation = Map.groupBy(participationLinks(db, connection.appId, caller.endpointIds), (link) => link.conversation_id);
   const wanted = request.waitingOn === null ? null : WAITING_ON_FILTERS[request.waitingOn];
   const summaries = [...linksByConversation]
@@ -498,7 +498,7 @@ function listThreads(context, connection, request) {
   const truncated = summaries.length > request.limit;
   const threads = summaries.slice(0, request.limit).map((thread) => ({
     ...thread,
-    participants: participantsFor(db, connection.appId, thread.conversation_id, caller.endpointId),
+    participants: participantsFor(db, connection.appId, thread.conversation_id, caller.endpointId, caller.handle),
   }));
   return { threads, truncated, predecessorCount: predecessors.length };
 }

@@ -9,6 +9,7 @@
 // applyUpdate: that would cancel its own row.
 
 import { withTransaction } from "./db.mjs";
+import { requestContext, rootOf } from "./held_request.mjs";
 import {
   createDeliveriesForChannelRoutes,
   createDeliveriesForRecipients,
@@ -28,11 +29,11 @@ import {
   launchFailed,
   markFired,
   markNotified,
+  SCHEDULED_WAKE_ROUTE_REASON,
   toldThisSilence,
   wakeMessageKey,
 } from "./scheduled_wakes.mjs";
 
-export const SCHEDULED_WAKE_ROUTE_REASON = "scheduled.wake";
 export const REWAKE_AFTER_MS = 60 * 60 * 1000;
 
 const RULE =
@@ -45,16 +46,6 @@ const AGENT_LAUNCH_NOTICE =
   "The scheduled wake for the request you opened could not launch its holder. The request remains open.";
 const AGENT_NOTICE =
   "No update on the request you opened since the scheduled wake an hour ago. The holder was woken again; the request remains open.";
-
-const rootOf = (db, attempt) => {
-  let node = attempt;
-  while (node && node.role !== "root" && node.parent_id) {
-    node = db
-      .prepare("SELECT * FROM obligations WHERE id = ?")
-      .get(node.parent_id);
-  }
-  return node?.role === "root" ? node : null;
-};
 
 // Custody-loss recovery closes the held attempt failed after the wake fired;
 // the rewake phase still owes the holder one launch and the requester a notice.
@@ -81,27 +72,7 @@ function loadWork(db, wake) {
     .prepare("SELECT * FROM obligations WHERE id = ?")
     .get(wake.attempt_id);
   const root = attempt ? rootOf(db, attempt) : null;
-  const held = stillHeld(attempt, root, wake);
-  const opening =
-    held && root
-      ? db
-          .prepare(
-            `SELECT m.id, m.app_id, m.sender_principal_id, me.effect_payload
-               FROM message_effects me JOIN messages m ON m.id = me.message_id
-              WHERE me.obligation_id = ? AND me.effect = 'open' ORDER BY m.rowid LIMIT 1`,
-          )
-          .get(root.id)
-      : null;
-  if (!opening) return null;
-  let requesterEndpointId = null;
-  try {
-    requesterEndpointId =
-      JSON.parse(opening.effect_payload)?.declaration?.sender_endpoint_id ??
-      null;
-  } catch {
-    // An unreadable audit leaves the requester unknown; the wake still goes out.
-  }
-  return { root, opening, requesterEndpointId };
+  return stillHeld(attempt, root, wake) ? requestContext(db, attempt) : null;
 }
 
 function wakeBody(rootId, rewake) {
@@ -111,20 +82,23 @@ function wakeBody(rootId, rewake) {
   return `${head} Please ${RULE}`;
 }
 
-function deliverWake(context, wake, work) {
+// `work.note` ({ key, body, notice }) replaces the wake's own text (ac-4p2j0).
+export function deliverWake(context, wake, work) {
   const { db } = context;
-  const { root, opening, rewake } = work;
-  const key = rewake
-    ? `scheduled-rewake:${wake.wake_id}`
-    : wakeMessageKey(wake.wake_id);
-  const body = wakeBody(root.id, rewake);
+  const { root, opening, rewake, note } = work;
+  const key =
+    note?.key ??
+    (rewake
+      ? `scheduled-rewake:${wake.wake_id}`
+      : wakeMessageKey(wake.wake_id));
+  const body = note?.body ?? wakeBody(root.id, rewake);
   const messageId = insertMessage(db, {
     conversationId: root.conversation_id,
     appId: opening.app_id,
     senderPrincipalId: opening.sender_principal_id,
     kind: "commit",
     body,
-    metadata: { notice: "scheduled_wake" },
+    metadata: { notice: note?.notice ?? "scheduled_wake" },
     idempotencyKey: key,
     hash: payloadHash({ key, body }),
     origin: "agent",
@@ -164,8 +138,9 @@ function userRoute(db, work) {
 // The requester hears it through the channel the request came in on.
 function noticeUser(db, wake, work) {
   const { root, opening, route } = work;
-  const text = work.launchFailed ? USER_LAUNCH_NOTICE : USER_NOTICE;
-  const key = `scheduled-wake-notice:${wake.wake_id}`;
+  const text =
+    work.notice?.text ?? (work.launchFailed ? USER_LAUNCH_NOTICE : USER_NOTICE);
+  const key = work.notice?.key ?? `scheduled-wake-notice:${wake.wake_id}`;
   const hash = payloadHash({ body: text, key });
   return withIdempotency(
     db,
@@ -177,7 +152,7 @@ function noticeUser(db, wake, work) {
         senderPrincipalId: opening.sender_principal_id,
         kind: "commit",
         body: text,
-        metadata: {},
+        metadata: work.notice?.type ? { notice: work.notice.type } : {},
         idempotencyKey: key,
         hash,
         origin: "agent",
@@ -205,8 +180,10 @@ function noticeAgent(context, wake, work) {
       "SELECT principal_id, process_generation FROM endpoints WHERE id = ?",
     )
     .get(wake.endpoint_id);
-  const text = work.launchFailed ? AGENT_LAUNCH_NOTICE : AGENT_NOTICE;
-  const key = `scheduled-wake-notice:${wake.wake_id}`;
+  const text =
+    work.notice?.text ??
+    (work.launchFailed ? AGENT_LAUNCH_NOTICE : AGENT_NOTICE);
+  const key = work.notice?.key ?? `scheduled-wake-notice:${wake.wake_id}`;
   const declaration = {
     type: "none",
     sender_endpoint_id: wake.endpoint_id,
@@ -218,7 +195,7 @@ function noticeAgent(context, wake, work) {
     senderPrincipalId: holder.principal_id,
     kind: "commit",
     body: text,
-    metadata: {},
+    metadata: work.notice?.type ? { notice: work.notice.type } : {},
     idempotencyKey: key,
     hash: payloadHash({ key, body: text }),
     origin: "agent",
@@ -229,7 +206,7 @@ function noticeAgent(context, wake, work) {
     effect: declaration,
     obligationId: null,
     obligationGeneration: null,
-    notice: "scheduled_wake",
+    notice: work.notice?.type ?? "scheduled_wake",
     now: new Date().toISOString(),
   });
   return createDeliveriesForRecipients(db, {
@@ -238,12 +215,14 @@ function noticeAgent(context, wake, work) {
     senderPrincipalId: holder.principal_id,
     senderEndpointId: wake.endpoint_id,
     recipientEndpointId: requester,
+    everyCopyIsClosedWorkNotice: Boolean(work.notice?.closedWork),
     stateRoot: context.stateRoot,
     logger: context.logger,
   });
 }
 
-function noticeRequester(context, wake, work) {
+// `work.notice` ({ key, text, type }) replaces the wake notice copy (ac-4p2j0).
+export function noticeRequester(context, wake, work) {
   const route = userRoute(context.db, work);
   const toAgent = !route && work.requesterEndpointId;
   if (toAgent) return { to: "agent", sent: noticeAgent(context, wake, work) };
@@ -255,7 +234,7 @@ function noticeRequester(context, wake, work) {
 
 // After commit: inbox events, and every presentation staged for a parked
 // listener (unpublished, it is missed at its ack deadline and the wake lost).
-function publish(context, conversationId, sent) {
+export function publish(context, conversationId, sent) {
   pushLiveDeliveryEvents(context, {
     conversationId,
     liveDeliveries: sent.liveDeliveries ?? [],

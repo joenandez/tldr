@@ -44,6 +44,8 @@ function tally(state, outcome) {
   if (outcome?.ok === true) state.counts.delivered += 1;
   // Released to Tightbeam for its backoff retry: not a failure.
   else if (outcome?.released === true) state.released += 1;
+  // Skipped by policy: another channel delivered the message (ac-jfv.55).
+  else if (outcome?.skipped === true) state.skipped += 1;
   else {
     state.counts.failed += 1;
     state.lastFailure = outcome;
@@ -84,6 +86,7 @@ export async function drainOutboundDeliveries({
     counts: { attempted: 0, delivered: 0, failed: 0 },
     timings: { claim_ms: 0, send_ms: 0 },
     released: 0,
+    skipped: 0,
     stoppedForDeadline: false,
     lastFailure: null,
     thrown: null,
@@ -98,6 +101,7 @@ export async function drainOutboundDeliveries({
     counts: {
       ...state.counts,
       ...(state.released ? { released: state.released } : {}),
+      ...(state.skipped ? { skipped: state.skipped } : {}),
       ...(state.stoppedForDeadline ? { stopped_for_deadline: true } : {}),
     },
     lastFailure: state.lastFailure,

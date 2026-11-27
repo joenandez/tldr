@@ -2,7 +2,8 @@
 
 import { TightbeamError } from "../../protocol/envelope.mjs";
 import { markExactDeliveryRead } from "./message_read.mjs";
-import { receiveOrderBy, receivedBeforeSql } from "./message_shared.mjs";
+import { earlierAdmittedExistsSql } from "./delivery_admission.mjs";
+import { receiveOrderBy } from "./message_shared.mjs";
 
 // Any live session receives any delivery addressed to it (Joe, 2026-10-25;
 // ac-jfv.26/.27). Launch kind, admission windows, and claimed resume requests
@@ -20,12 +21,7 @@ export function exactLiveSessionReceipt(db, input, appId) {
         WHERE d.message_id = ? AND d.state != 'failed' AND d.read_at IS NULL
           AND e.id = ? AND e.process_generation = ? AND e.provider_session_id = ?
           AND e.created_by_app_id = ? AND e.state IN ('idle', 'busy')
-          AND NOT EXISTS (
-            SELECT 1 FROM deliveries earlier
-             WHERE earlier.endpoint_id = e.id AND earlier.state != 'failed'
-               AND earlier.read_at IS NULL
-               AND ${receivedBeforeSql("earlier", "d")}
-          )
+          AND NOT ${earlierAdmittedExistsSql("d", "earlier", "earlier.endpoint_id = e.id AND earlier.state != 'failed' AND earlier.read_at IS NULL")}
         ORDER BY ${receiveOrderBy("d")}
         LIMIT 1`,
     )

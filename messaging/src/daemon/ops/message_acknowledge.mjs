@@ -10,6 +10,7 @@
 
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
+import { openNextUnreadForLiveOwner, publishNextUnread } from './next_unread_notice.mjs';
 
 export const messageAcknowledgeOp = {
   name: 'message.acknowledge',
@@ -53,7 +54,7 @@ export const messageAcknowledgeOp = {
     }
 
     const now = new Date().toISOString();
-    withTransaction(context.db, () => {
+    const wake = withTransaction(context.db, () => {
       // Acknowledging is a TRANSPORT fact about the delivery row only.
       // The legacy write that advanced the implicit read/acknowledge
       // obligation rows ended at the lifecycle cutover: an
@@ -64,7 +65,9 @@ export const messageAcknowledgeOp = {
           'UPDATE deliveries SET acknowledged_at = COALESCE(acknowledged_at, ?), read_at = COALESCE(read_at, ?), updated_at = ? WHERE id = ?',
         )
         .run(now, now, now, delivery.id);
+      return openNextUnreadForLiveOwner(context.db, endpointId); // R1
     });
+    publishNextUnread(context, wake, { op: 'message.acknowledge', messageId, endpointId });
 
     return { result: { message_id: messageId, endpoint_id: endpointId, delivery_state: 'acknowledged' } };
   },

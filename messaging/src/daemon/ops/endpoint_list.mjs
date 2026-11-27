@@ -14,12 +14,13 @@
 // endpoint.retirement.get and principal.resolve apply. Closed endpoints are
 // omitted unless asked for, because a closed session never returns.
 
+import { createHash } from 'node:crypto';
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { normalizeStartIdentity } from '../owner_process_contract.mjs';
 import { isTachyonArmedForGeneration } from '../tachyon_arming.mjs';
 import { expandStoredRuntimeIds, runtimeContract } from './resume_shared.mjs';
 
-const FIELDS = new Set(['endpoint_id', 'provider_session_id', 'provider_session_id_prefix', 'authority_reference', 'runtime', 'created_after', 'created_before', 'active_after', 'order_by', 'include_closed', 'limit']);
+const FIELDS = new Set(['authority_name', 'endpoint_id', 'provider_session_id', 'provider_session_id_prefix', 'authority_reference', 'runtime', 'created_after', 'created_before', 'active_after', 'order_by', 'include_closed', 'limit']);
 export const ENDPOINT_LIST_DEFAULT_LIMIT = 100;
 export const ENDPOINT_LIST_MAX_LIMIT = 1000;
 
@@ -59,6 +60,7 @@ function parsePayload(payload) {
   const orderBy = payload.order_by ?? 'created_at';
   if (orderBy !== 'created_at' && orderBy !== 'updated_at') malformed('order_by', 'order_by must be created_at or updated_at when present');
   return {
+    authorityName: optionalString(payload, 'authority_name'),
     endpointId: optionalString(payload, 'endpoint_id'),
     providerSessionId: optionalString(payload, 'provider_session_id'),
     providerSessionIdPrefix: optionalString(payload, 'provider_session_id_prefix'),
@@ -101,6 +103,9 @@ function projection(context, row) {
     runtime: row.runtime ?? null,
     provider_session_id: row.provider_session_id ?? null,
     state: row.state,
+    process_generation: row.process_generation ?? null,
+    // A digest, never the token: a hook tells another launch's custody from its own (ac-x09n0).
+    owner_launch_digest: row.owner_launch_token ? `sha256:${createHash('sha256').update(row.owner_launch_token, 'utf8').digest('hex')}` : null,
     launch_mode: row.launch_mode ?? null,
     authority_reference: row.authority_reference ?? null,
     academy_agent_name: row.academy_agent_name ?? null,
@@ -115,6 +120,12 @@ function projection(context, row) {
   };
 }
 
+// One authority narrows inside the query, before the limit: a filter after it can miss the row.
+function listedAuthorities(grant, authorityName) {
+  const granted = Array.isArray(grant?.allowed_authorities) ? grant.allowed_authorities : [];
+  return authorityName === null ? granted : granted.filter((name) => name === authorityName);
+}
+
 export const endpointListOp = {
   name: 'endpoint.list',
   allowedScopes: ['agent'],
@@ -122,7 +133,7 @@ export const endpointListOp = {
   handler(context, payload, connection) {
     const filters = parsePayload(payload);
     const grant = connection.permissions.get('register_endpoints');
-    const authorities = Array.isArray(grant?.allowed_authorities) ? grant.allowed_authorities : [];
+    const authorities = listedAuthorities(grant, filters.authorityName);
     if (authorities.length === 0) return { result: { endpoints: [], truncated: false } };
 
     const where = ['created_by_app_id = ?', `authority_name IN (${authorities.map(() => '?').join(', ')})`];
@@ -171,7 +182,7 @@ export const endpointListOp = {
     const rows = context.db
       .prepare(
         `SELECT id, principal_id, authority_name, runtime, provider_session_id, state, launch_mode,
-                authority_reference, academy_agent_name, owner_process_pid, owner_process_exited_at, owner_process_start_identity, owner_process_generation, process_generation,
+                authority_reference, academy_agent_name, owner_process_pid, owner_process_exited_at, owner_process_start_identity, owner_process_generation, process_generation, owner_launch_token,
                 tachyon_armed_process_generation, created_at, updated_at, closed_at,
                 (SELECT original.replacement_endpoint_id FROM resume_requests original
                   WHERE original.endpoint_id = endpoints.id

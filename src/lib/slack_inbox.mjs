@@ -104,3 +104,12 @@ export function resolveOwner({ ownerUserId, home }) {
     return null;
   }
 }
+
+// The largest socket receipt -> commit time so far in a drain, counting only lines handed on to
+// an agent; a line with no receipt stamp (an older listener) leaves it as it was (ac-jfv.229).
+export function maxIntake(current, entry, outcome) {
+  const receivedAt = Date.parse(entry?.received_at);
+  const handedOn = outcome === "published" || outcome === "committed";
+  if (!handedOn || Number.isNaN(receivedAt)) return current;
+  return Math.max(current ?? 0, Date.now() - receivedAt);
+}

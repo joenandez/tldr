@@ -7,8 +7,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 
 import { connect } from '../client/client.mjs';
-import { shortId } from '../protocol/ids.mjs';
-import { isSafeSessionId, sessionPaths } from '../protocol/session_paths.mjs';
+import { isSafeSessionId, markMessagingUsed, sessionPaths } from '../protocol/session_paths.mjs';
 import { routeOpenTo, slackChannelAdded } from '../protocol/session_env.mjs';
 import {
   captureOwnerProcess,
@@ -24,14 +23,30 @@ import {
 } from './hook_identity.mjs';
 import { hookCredentialsPath, readHookCredentials } from './hook_credentials.mjs';
 import { observeProcessRow } from './hook_process_tree.mjs';
-import { bootstrap, ensureDaemon } from './bootstrap.mjs';
+import { bootstrap, ensureDaemon, hasUsableCredentials } from './bootstrap.mjs';
 import { tightbeamStopWaitReason, tightbeamCommandName, tightbeamRecipeCommand } from './package_context.mjs';
-import { renderNotification } from './arrival_notification.mjs';
-import { readCurrentWaitOutcome, readWaitMessage } from './agent_wait_journal.mjs';
+import { bodyShownIds, renderNotification, shownEntries, withBodyPrefix } from './arrival_notification.mjs';
+import { readCurrentWaitOutcome } from './agent_wait_journal.mjs';
+import { readWaitNotice } from './agent_wait_notice.mjs';
 import { requestSessionStop } from './stop_request.mjs';
 import { decodeCopilotHookInput } from './copilot_hook.mjs';
 import { academyLaunchStamp, packageBoundCopilotRuntimeIds } from '../runtimes/copilot_wake_contract.mjs';
-import { boundCopilotRuntime, requiresExplicitCopilotRuntime, runCopilotHook } from './copilot_hook_runtime.mjs';
+import { localAckGateVerdict } from './hook_ack_gate.mjs';
+import { armPromptNotices, armPromptWithoutCredentials, armShownEntries, armStopBlock, armWaitNotice, isGatedSession } from './hook_ack_arm.mjs';
+import { renderAdoptionLines, renderRecoveryContext } from './recovery_render.mjs';
+export { renderAdoptionLines, renderRecoveryContext };
+import { boundCopilotRuntime, copilotDetachedSessionStart, requiresExplicitCopilotRuntime, runCopilotHook, runCopilotSessionStart } from './copilot_hook_runtime.mjs';
+import { legacyPaths, legacyPending, runDetachedWorker } from './hook_detach.mjs';
+import { appendLog } from './detach_log.mjs';
+import { adoptionOwnerProcess, callerLaunch, fromOtherLaunch, launchPaths, nextNotificationUnlessFenced, registerThisLaunch, setStateUnlessFenced, unlessSuperseded, workerLaunch, workerPaths } from './takeover_launch.mjs';
+import { DETACHED_STOP_IDLE, LOCAL_STOP_PARK, localParkBackedOff, localParkUnreachable, localStopExit, registerLocalStopPark, stopIdleStillCurrent } from './stop_local_exit.mjs';
+import { DETACHED_IDENTITY, ackPrompt, deferWithoutIdentity, detachPromptBusy, promptBusyNeeded, readPrompt, recordPrompt } from './prompt_busy.mjs';
+import { renderOutboundChannelCatalog } from './session_start_cache.mjs';
+import { DETACHED_SESSION_START, detachSessionStartRegistration, runSessionStartRegistration } from './session_start_register.mjs';
+import { claimNotice, isNoticeShown, markNoticeShown, releaseNotice } from './notice_ledger.mjs';
+import { claimStagedBatch, claimedBatchFiles, withScratchLock } from './hook_scratch.mjs';
+import { detachPreToolUse, drainPassNeeded, recordDrainDeferred, watermarkUnseen } from './ack_gate_reconcile.mjs';
+import { localPreToolUse, markCapturedWatermarkSeen } from './hook_local_notice.mjs';
 
 /** Choose bootstrap or daemon restoration without publishing partial credentials. */
 function sessionStartPreparation({ credentials, flags, env }) {
@@ -49,6 +64,15 @@ function sessionStartPreparation({ credentials, flags, env }) {
   const appSecret = flags.appSecret || env.TIGHTBEAM_APP_SECRET || credentials?.app_secret;
   const authority = flags.authority || env.TIGHTBEAM_AUTHORITY || credentials?.authority_name;
   return appId && appSecret && authority ? 'daemon' : null;
+}
+
+/**
+ * Direct sessions only: a placeholder/launch token (daemon-started resume),
+ * or explicit credentials keep the synchronous path.
+ */
+export function shouldDetachSessionStart({ verb, detach, env, preparation }) {
+  if (verb !== 'session-start' || !detach || preparation !== 'bootstrap') return false;
+  return !(env.TIGHTBEAM_PLACEHOLDER_ENDPOINT_ID || env.TIGHTBEAM_LAUNCH_TOKEN);
 }
 
 export const HOOK_EVENT_VERBS = ['session-start', 'user-prompt-submit', 'stop', 'wake-listen', 'pre-tool-use', 'post-tool-use', 'subagent-start', 'subagent-stop'];
@@ -122,7 +146,15 @@ function debugLog(fields) {
 
 function writeFilePrivate(file, contents) {
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(file, contents, { mode: 0o600 });
+  // temp + rename: a reader (setPendingReplyGuard) never sees a torn endpoint.json.
+  const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temp, contents, { mode: 0o600 });
+    fs.renameSync(temp, file);
+  } catch (error) {
+    fs.rmSync(temp, { force: true });
+    throw error;
+  }
 }
 
 function readCache(paths) {
@@ -130,8 +162,7 @@ function readCache(paths) {
     const cached = JSON.parse(fs.readFileSync(paths.endpoint, 'utf8'));
     if (cached && typeof cached.endpoint_id === 'string' && typeof cached.principal_id === 'string') return cached;
   } catch {
-    // A missing or unreadable cache is not an error: every verb can
-    // rebuild it from an idempotent re-registration.
+    // A missing or unreadable cache is not an error: an idempotent re-registration rebuilds it.
   }
   return null;
 }
@@ -160,9 +191,10 @@ function sanitizedRecoveryContext(context) {
   };
 }
 
+const hookAuthority = ({ flags, env, credentials }) => flags.authority || env.TIGHTBEAM_AUTHORITY || credentials?.authority_name;
 /** Identity is already resolved and validated against this runtime's registry. */
 export function resolveIdentity({ payload, env, flags, credentials, sessionId, runtime, verb, copilotRecord = null }) {
-  const authorityName = flags.authority || env.TIGHTBEAM_AUTHORITY || credentials?.authority_name;
+  const authorityName = hookAuthority({ flags, env, credentials });
   if (!authorityName) {
     throw new HookError(
       `no authority to register under: run "${tightbeamCommandName()} bootstrap", or set "authority_name" in the hook credential ` +
@@ -192,12 +224,59 @@ export function resolveIdentity({ payload, env, flags, credentials, sessionId, r
     ...academyLaunchStamp(env, { record: copilotRecord, log }),
     ...resolveHostBinding(env, { log }),
     ...(flags.reviveDeadGeneration ? { revive_dead_generation: flags.reviveDeadGeneration } : {}),
-    principal_ref: flags.principalRef || env.TIGHTBEAM_PRINCIPAL_REF || credentials?.principal_ref || defaultPrincipalRef({ runtime, cwd }),
+    ...principalRef({ flags, env, credentials, runtime, cwd }),
   };
 }
 
-/** Idempotently register the session identity and cache the returned endpoint. */
-async function registerSession(client, { paths, identity, app_id: appId }) {
+/** An explicit principal ref, or the folder default marked as derived so a kept claim can re-derive it. */
+function principalRef({ flags, env, credentials, runtime, cwd }) {
+  const explicit = flags.principalRef || env.TIGHTBEAM_PRINCIPAL_REF || credentials?.principal_ref;
+  return explicit ? { principal_ref: explicit } : { principal_ref: defaultPrincipalRef({ runtime, cwd }), principal_ref_derived: true };
+}
+
+/** The same identity claimed under another folder; only a derived principal ref follows the folder. */
+function claimAt(ctx, cwd) {
+  const { identity: id } = ctx;
+  const ref = id.principal_ref_derived ? defaultPrincipalRef({ runtime: id.runtime, cwd }) : id.principal_ref;
+  // The owner process is still found where the session runs now, not where it first claimed.
+  return { ...ctx, identity: { ...id, cwd, principal_ref: ref, owner_cwd: id.cwd } };
+}
+
+/**
+ * The folder the daemon holds this exact session's claim under (same
+ * provider session id, same runtime, this app), or null when it holds none.
+ * Read before registering: the daemon row is the only owner of that fact.
+ */
+async function storedClaimFolder(client, id) {
+  const row = await storedEndpoint(client, id);
+  return typeof row?.authority_reference === 'string' ? row.authority_reference : null;
+}
+
+async function storedEndpoint(client, id) {
+  const { endpoints = [] } = await client.request('endpoint.list', { authority_name: id.authority_name, provider_session_id: id.session_id, runtime: id.runtime, include_closed: true, limit: 1 });
+  return endpoints.find((endpoint) => endpoint.authority_name === id.authority_name && endpoint.provider_session_id === id.session_id) ?? null;
+}
+
+/**
+ * One claim per session (ac-7bjbg): the folder a session first registered
+ * under is its claim for life. A live session re-registers on compact,
+ * resume and the agent CLI's refresh from wherever its shell now is (a
+ * subfolder it cd-ed into, a symlinked spelling claimed before fb0617a4);
+ * deriving the claim from that folder was refused as identity_conflict.
+ * A different session or runtime finds no row here and registers as before.
+ */
+async function registerSession(client, ctx) {
+  const { identity: id } = ctx;
+  const claimed = await storedClaimFolder(client, id);
+  if (claimed === null || claimed === id.cwd) return registerClaim(client, ctx);
+  const fields = { level: 'info', status: 'ok', event: 'session_claim_kept_folder', params: { session_id: id.session_id, claim_cwd: claimed, cwd: id.cwd } };
+  appendLog(ctx.paths, fields);
+  debugLog(fields);
+  return registerClaim(client, claimAt(ctx, claimed));
+}
+
+/** Idempotently register one claim and cache the returned endpoint. */
+async function registerClaim(client, { paths, identity, app_id: appId }) {
   // The owning runtime process (item 42 C), observed only where the
   // endpoint is registered: the tool-boundary verbs never pay for a ps
   // walk. Null (capture failed or unsupported) registers without liveness
@@ -205,7 +284,7 @@ async function registerSession(client, { paths, identity, app_id: appId }) {
   // own; a caller-supplied snapshot (tests) is forwarded as given.
   const ownerProcess = identity.owner_process !== undefined
     ? identity.owner_process
-    : captureOwnerProcess({ runtime: identity.runtime, copilot: identity.copilot_hook_bound, sessionId: identity.session_id, cwd: identity.cwd, log: (fields) => debugLog({ ...fields, session_id: identity.session_id }) });
+    : captureOwnerProcess({ runtime: identity.runtime, copilot: identity.copilot_hook_bound, sessionId: identity.session_id, cwd: identity.owner_cwd ?? identity.cwd, log: (fields) => debugLog({ ...fields, session_id: identity.session_id }) });
   const principal = await client.request('principal.register', {
     authority_name: identity.authority_name,
     external_principal_ref: identity.principal_ref,
@@ -218,6 +297,7 @@ async function registerSession(client, { paths, identity, app_id: appId }) {
     launch_mode: identity.launch_mode,
     authority_reference: identity.cwd,
     launch_token: identity.launch_token,
+    ...(identity.takeover_only ? { takeover_only: true } : {}),
     academy_agent_name: identity.academy_agent_name,
     academy_permission_mode: identity.academy_permission_mode,
     ...(identity.host_name ? { host_name: identity.host_name, ...(identity.host_ref ? { host_ref: identity.host_ref } : {}) } : {}),
@@ -234,6 +314,8 @@ async function registerSession(client, { paths, identity, app_id: appId }) {
     authority_name: identity.authority_name,
     authority_reference: identity.cwd,
     launch_mode: identity.launch_mode,
+    // The launch this generation belongs to (ac-x09n0): another launch of the same session must not reuse it.
+    launch_token: identity.launch_token ?? null,
     // Absent until runtime adoption stamps it (wave 4); carried once the
     // registration response exposes it so session.stop can fence exactly.
     process_generation: endpoint.process_generation ?? null,
@@ -263,7 +345,7 @@ async function resolveSessionEndpoint(client, ctx) {
     if (typeof cached.app_id === 'string' && cached.app_id !== ctx.app_id) {
       throw new HookError('the hook app does not match the app that registered this session endpoint');
     }
-    if (typeof cached.app_id === 'string') return cached;
+    if (typeof cached.app_id === 'string') return fromOtherLaunch(cached, ctx.identity) ? registerThisLaunch(cached, launchDeps(client, ctx)) : cached;
     // An old cache did not record its owner. Re-registering is idempotent
     // for the owning app and lets the daemon refuse a foreign app before
     // any inbox enumeration or delivery read.
@@ -275,78 +357,31 @@ async function resolveSessionEndpoint(client, ctx) {
   return registerSession(client, ctx);
 }
 
+const launchDeps = (client, ctx) => ({ client, ctx, register: registerSession, stored: storedEndpoint, log: debugLog });
+
 async function setEndpointState(client, ctx, state) {
+  const promptAtMs = ctx.promptAtMs;
   const endpoint = await resolveSessionEndpoint(client, ctx);
   if (!Number.isSafeInteger(endpoint.process_generation) || endpoint.process_generation < 1) {
     throw new HookError('the cached session endpoint has no exact process generation');
   }
-  const result = await client.request('endpoint.state.set', {
+  const result = await setStateUnlessFenced(endpoint, {
     endpoint_id: endpoint.endpoint_id,
     process_generation: endpoint.process_generation,
     state,
-  });
-  debugLog({ event: 'endpoint_state_set', session_id: ctx.identity.session_id, endpoint_id: endpoint.endpoint_id, state });
-  return { endpoint_id: result.endpoint_id, state: result.state };
+    ...(promptAtMs === undefined ? {} : { prompt_at_ms: promptAtMs }),
+    ...(ctx.stopAtMs === undefined ? {} : { stop_at_ms: ctx.stopAtMs }),
+    ...(ctx.launchToken ? { launch_token: ctx.launchToken } : {}),
+    ...callerLaunch(ctx),
+  }, launchDeps(client, ctx));
+  debugLog({ event: 'endpoint_state_set', session_id: ctx.identity.session_id, endpoint_id: endpoint.endpoint_id, state, stale_busy_ignored: result.stale_busy_ignored === true, stale_idle_ignored: result.stale_idle_ignored === true });
+  return { endpoint_id: result.endpoint_id, state: result.state, ...(result.stale_busy_ignored ? { stale_busy_ignored: true } : {}), ...(result.stale_idle_ignored ? { stale_idle_ignored: true } : {}), ...(result.takeover_fenced ? { takeover_fenced: true } : {}) };
 }
 
 // The notification block itself lives in arrival_notification.mjs so the daemon's
 // spawn and resume prompts render the same bytes; only the debug stream is bound here.
 export function renderInjection(entries, options = {}) {
   return renderNotification(entries, { log: debugLog, ...options });
-}
-
-function renderOutboundChannelCatalog(routes) {
-  const catalog = routes.map(({ selector, label }) => ({ selector, label }))
-    .sort((a, b) => (a.selector < b.selector ? -1 : a.selector > b.selector ? 1 : 0));
-  return `<tightbeam_outbound_channels>\n${JSON.stringify(catalog)}\n</tightbeam_outbound_channels>`;
-}
-
-/**
- * A replacement SessionStart receives canonical recovery state before the
- * ordinary outbound catalog.  Lineage IDs and provider-session identities
- * deliberately stay out of the model prompt: they are operator evidence,
- * not instructions or reply authority.
- */
-export function renderRecoveryContext(context, adoptionLines = []) {
-  const participantNames = (context.participants ?? []).map((participant) => participant.display_name ?? 'Unnamed participant').join(', ');
-  const messages = (context.messages ?? [])
-    .map((message) => `[${message.created_at}] ${String(message.body ?? '')}`)
-    .join('\n');
-  const root = context.root ?? {};
-  return [
-    '<tightbeam_recovery_context>',
-    'You are the freshly started replacement session for this existing work. Continue from canonical context; do not recreate or infer a sibling transcript.',
-    `Subject: ${context.subject ?? '(subject unavailable)'}`,
-    `Participants: ${participantNames}`,
-    `Root: ${root.root_obligation_id ?? 'unavailable'}`,
-    `Root generation: ${root.generation ?? 'unavailable'}`,
-    `Custody state: ${root.status ?? 'unavailable'}`,
-    `Unread message ids: ${(context.unread?.message_ids ?? []).join(', ') || 'none'}`,
-    'Relevant messages:',
-    messages,
-    'This is recovery context, not an acknowledgement request: no acknowledgement ceremony is required before ordinary action.',
-    ...adoptionLines,
-    '</tightbeam_recovery_context>',
-  ].join('\n');
-}
-
-/**
- * S10 (ux.md §9): the threads this replacement adopted through lineage and
- * each predecessor that could not be resumed. Plain text, no bodies.
- */
-export function renderAdoptionLines(threads) {
-  const adopted = (threads ?? []).filter((thread) => (thread.adopted_from ?? []).length > 0);
-  if (adopted.length === 0) return [];
-  const previous = new Map();
-  for (const thread of adopted) {
-    for (const from of thread.adopted_from) {
-      if (previous.has(from.endpoint_id)) continue;
-      const runtime = from.runtime ?? (thread.participants ?? []).find((participant) => participant.endpoint_id === from.endpoint_id)?.runtime ?? 'session';
-      previous.set(from.endpoint_id, `Previous session: ${runtime} ${shortId(from.provider_session_id ?? from.endpoint_id)} could not be resumed.`);
-    }
-  }
-  const listed = adopted.map((thread) => [shortId(thread.conversation_id), thread.subject].filter(Boolean).join(' ')).join(', ');
-  return [`Adopted threads: ${listed}`, ...previous.values()];
 }
 
 // The adopted-thread read is disclosure, not recovery authority: a failure
@@ -388,64 +423,6 @@ function readStagedEntries(paths, file = paths.pending) {
   return { entries, torn };
 }
 
-const SCRATCH_LOCK_STALE_MS = 30_000;
-
-function scratchLockPath(paths) {
-  return path.join(paths.dir, '.pending-inject.lock');
-}
-
-function withScratchLock(paths, work) {
-  fs.mkdirSync(paths.dir, { recursive: true, mode: 0o700 });
-  const lock = scratchLockPath(paths);
-  try {
-    fs.mkdirSync(lock, { mode: 0o700 });
-  } catch (error) {
-    if (error.code !== 'EEXIST') throw error;
-    try {
-      if (Date.now() - fs.statSync(lock).mtimeMs > SCRATCH_LOCK_STALE_MS) {
-        fs.rmdirSync(lock);
-        fs.mkdirSync(lock, { mode: 0o700 });
-      } else {
-        return null;
-      }
-    } catch (retryError) {
-      if (retryError.code === 'EEXIST' || retryError.code === 'ENOENT') return null;
-      throw retryError;
-    }
-  }
-  try {
-    return work();
-  } finally {
-    fs.rmSync(lock, { recursive: true, force: true });
-  }
-}
-
-function claimFileName() {
-  return `.pending-inject.claim-${process.pid}`;
-}
-
-function activeClaim(paths) {
-  try {
-    return fs
-      .readdirSync(paths.dir)
-      .filter((name) => name.startsWith('.pending-inject.claim-'))
-      .sort()[0] ?? null;
-  } catch {
-    return null;
-  }
-}
-
-function isLiveClaim(name) {
-  const pid = Number(name.slice('.pending-inject.claim-'.length));
-  if (!Number.isSafeInteger(pid) || pid < 1 || pid === process.pid) return false;
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 /**
  * Appends ONE staged notification and returns only once it is on the disk.
  *
@@ -455,7 +432,8 @@ function isLiveClaim(name) {
  */
 export function appendStagedEntry(paths, entry) {
   const staged = withScratchLock(paths, () => {
-    const { entries } = readStagedEntries(paths);
+    // A claimed batch is mid-render (G2): its entries count as staged until PostToolUse records them shown.
+    const entries = [paths.pending, ...claimedBatchFiles(paths)].flatMap((file) => readStagedEntries(paths, file).entries);
     if (entries.some((existing) => existing?.message_id === entry.message_id)) return false;
     const fd = fs.openSync(paths.pending, 'a', 0o600);
     try {
@@ -467,25 +445,12 @@ export function appendStagedEntry(paths, entry) {
     return true;
   });
   if (staged === null) throw new HookError('the local notification scratch is busy; retry at the next tool boundary');
+  markMessagingUsed(paths, { logger: debugLog });
   return staged;
 }
 
-// Claim only the bytes PostToolUse will render.  New PreToolUse writes go to
-// a fresh pending file, so this Post cleanup cannot erase them.
-export function claimStagedBatch(paths) {
-  return withScratchLock(paths, () => {
-    const prior = activeClaim(paths);
-    if (prior) return isLiveClaim(prior) ? null : path.join(paths.dir, prior);
-    try {
-      const claim = path.join(paths.dir, claimFileName());
-      fs.renameSync(paths.pending, claim);
-      return claim;
-    } catch (error) {
-      if (error.code === 'ENOENT') return null;
-      throw error;
-    }
-  });
-}
+export { claimStagedBatch };
+
 
 function ensurePendingScratch(paths) {
   const fd = fs.openSync(paths.pending, 'a', 0o600);
@@ -493,7 +458,7 @@ function ensurePendingScratch(paths) {
 }
 
 // What PreToolUse and a parked Stop stage for the renderer: the message id and
-// the bodyless context fields the daemon returned (older daemons return none).
+// the context fields the daemon returned (older daemons return none), and a user message's capped body.
 const STAGED_CONTEXT_FIELDS = Object.freeze(['from', 'from_cwd', 'subject', 'thread_id', 'reply_required', 'notice', 'delegation_id', 'work_id', 'ack_pending']);
 
 export function stagedNotificationEntry(attempt, source) {
@@ -503,6 +468,8 @@ export function stagedNotificationEntry(attempt, source) {
     has_external_origin: source.has_external_origin === true,
   };
   for (const field of STAGED_CONTEXT_FIELDS) if (source[field] !== undefined) entry[field] = source[field];
+  // Only a user's own message keeps a body (never an agent's or a typed notice's, whatever the line holds).
+  if (entry.has_external_origin && entry.notice === undefined && typeof source.body === 'string') entry.body = source.body;
   return entry;
 }
 
@@ -516,52 +483,6 @@ function capturedWatermark(paths) {
   } catch {
     return null;
   }
-}
-
-export function markCapturedWatermarkSeen(paths, watermark) {
-  const temporary = `${paths.seen}.${process.pid}.${randomUUID()}.tmp`;
-  const fd = fs.openSync(temporary, 'wx', 0o600);
-  try {
-    fs.writeFileSync(fd, watermark);
-    fs.fsyncSync(fd);
-    fs.closeSync(fd);
-    fs.renameSync(temporary, paths.seen);
-  } catch (err) {
-    try { fs.closeSync(fd); } catch {}
-    fs.rmSync(temporary, { force: true });
-    throw err;
-  }
-}
-
-function ackHintPath(paths) {
-  return path.join(paths.dir, 'ack.deadline.json');
-}
-
-function writeAckHint(paths, message) {
-  if (typeof message.root_obligation_id !== 'string' || typeof message.ack_due_at !== 'string' || message.ack_accepted_at !== null) return;
-  const dueAt = Date.parse(message.ack_due_at);
-  if (!Number.isFinite(dueAt)) return;
-  writeFilePrivate(ackHintPath(paths), `${JSON.stringify({ root_obligation_id: message.root_obligation_id, subject: message.conversation_subject ?? null, due_at: message.ack_due_at, due_at_epoch_ms: dueAt })}\n`);
-}
-
-function readAckHint(paths) {
-  try {
-    const hint = JSON.parse(fs.readFileSync(ackHintPath(paths), 'utf8'));
-    return hint && typeof hint.root_obligation_id === 'string' ? hint : null;
-  } catch {
-    return null;
-  }
-}
-
-async function reconcileAckHint(client, ctx) {
-  const hint = readAckHint(ctx.paths);
-  if (!hint) return;
-  const chain = (await client.request('lifecycle.view', { root_obligation_id: hint.root_obligation_id })).chains?.[0];
-  if (!chain || chain.status === 'done' || chain.ack_accepted_at || typeof chain.ack_due_at !== 'string') {
-    fs.rmSync(ackHintPath(ctx.paths), { force: true });
-    return;
-  }
-  writeAckHint(ctx.paths, { root_obligation_id: chain.root_obligation_id, ack_due_at: chain.ack_due_at, ack_accepted_at: chain.ack_accepted_at, conversation_subject: chain.subject });
 }
 
 /**
@@ -650,6 +571,11 @@ function holdParkedListener(client, { endpoint, decision, ctx, append, timers, e
   const deadlineMs = Date.parse(decision.park_deadline_at);
   const waitMs = Number.isFinite(deadlineMs) ? Math.max(1, deadlineMs - Date.now()) : 1;
   const log = (suffix, fields = {}) => debugLog({ event: `${logPrefix}_${suffix}`, listener_id: fence.listener_id, ...fields });
+  // P4/P5: a user notice this emitter shows (Stop continuation or async rewake) arms the ack gate.
+  const emitShown = (entry) => {
+    armShownEntries(ctx, [entry], { source: logPrefix, log: debugLog });
+    return emit(entry);
+  };
   let settled = false;
   let presenting = false;
   let heartbeat = null;
@@ -677,7 +603,7 @@ function holdParkedListener(client, { endpoint, decision, ctx, append, timers, e
     }
   };
   // `connection_lost` is the reason the reconciler itself uses when a
-  // holder disappears: pending presentations take the daemon's miss path.
+  // holder disappears: listener.end marks pending presentations missed and notices them.
   const hostLost = async (at) => {
     log('host_lost', { at, status: 'warn' });
     await end('connection_lost');
@@ -728,7 +654,7 @@ function holdParkedListener(client, { endpoint, decision, ctx, append, timers, e
         return;
       }
       log('presented', { message_id: entry.message_id, presentation_id: presentation.presentation_id });
-      finish(emit(entry));
+      finish(emitShown(entry));
     } catch (error) {
       log('delivery_failed', { error: error.code || error.message, woke: staged !== null && !settled, status: 'warn' });
       await end('presentation_failed');
@@ -736,7 +662,7 @@ function holdParkedListener(client, { endpoint, decision, ctx, append, timers, e
       // the daemon's miss path with nothing that wakes an idle session. The entry
       // is durable, so wake anyway: a spurious wake is cheap and `agent receive`
       // still owns delivery.
-      finish(staged && !settled ? emit(staged) : null);
+      finish(staged && !settled ? emitShown(staged) : null);
     }
   });
 
@@ -786,7 +712,7 @@ function holdParkedListener(client, { endpoint, decision, ctx, append, timers, e
       log('background_pending', { pending: items.length, completed, stale });
     }
     if (items.length > 0) return;
-    // Claims the listener: a presentation racing the end takes the daemon's miss path.
+    // Claims the listener: a presentation racing the end is marked missed by listener.end, which notices it.
     presenting = true;
     const ids = backgroundItems.map((item) => item.id).join(', ');
     log('background_finished', { items: backgroundItems.length, reason: stale > 0 ? 'stale' : 'finished' });
@@ -925,7 +851,7 @@ const HANDOFF_RECORD_VERSION = 1;
 const HANDOFF_TTL_MS = 5 * 60 * 1000;
 const HANDOFF_WAIT_MS = 10_000;
 const HANDOFF_POLL_MS = 50;
-const HANDOFF_DECISIONS = new Set(['park', 'block', 'allow', 'error']);
+const HANDOFF_DECISIONS = new Set(['park', 'block', 'allow', 'error', LOCAL_STOP_PARK]);
 const HANDOFF_KEY = /^[0-9a-f]{64}$/;
 
 export function stopHandoffKey(raw) {
@@ -987,7 +913,9 @@ function recordStopHandoffBestEffort(ctx, fields) {
   try {
     writeStopHandoff(ctx, fields);
   } catch (error) {
-    debugLog({ event: 'stop_handoff_write_failed', session_id: ctx.identity.session_id, decision: fields.decision, error: error.code || error.message, status: 'warn' });
+    const entry = { event: 'stop_handoff_write_failed', session_id: ctx.identity.session_id, decision: fields.decision, error: error.code || error.message, status: 'warn' };
+    debugLog(entry);
+    try { appendLog(ctx.paths, entry); } catch (logError) { debugLog({ event: 'stop_handoff_log_failed', error: logError.code || logError.message, status: 'error' }); } // a broken handoff dir must show without debug on
   }
 }
 
@@ -1149,11 +1077,17 @@ export const HANDLERS = {
     };
   },
 
+  // Background pass only (the foreground hands off in detachPromptBusy).
   async 'user-prompt-submit'(client, ctx) {
-    return setEndpointState(client, ctx, 'busy');
+    const prompt = readPrompt(ctx.paths);
+    // R6: only this pass names the launch (its prompt is that launch's brief), so the daemon can receipt the brief's bodies.
+    const result = await setEndpointState(client, { ...ctx, promptAtMs: prompt?.prompt_at_ms, launchToken: ctx.identity?.launch_token }, 'busy');
+    if (prompt) ackPrompt(ctx.paths, prompt.generation);
+    return result;
   },
 
   async stop(client, ctx) {
+    if (ctx.payload?.[DETACHED_STOP_IDLE]) return stopIdleStillCurrent(ctx) ? setEndpointState(client, { ...ctx, stopAtMs: ctx.payload[DETACHED_STOP_IDLE].stop_at_ms }, 'idle') : { skipped: true, newer_prompt: true };
     try {
       return await gateStop(client, ctx);
     } catch (error) {
@@ -1163,29 +1097,47 @@ export const HANDLERS = {
   },
 
   'wake-listen'(client, ctx) {
+    if (ctx.handoffRecord.decision === LOCAL_STOP_PARK) return registerLocalStopPark(client, ctx, { gateStop, consume: consumeStopHandoff, listen: listenForWake, markBusy: (c, x) => setEndpointState(c, x, 'busy'), log: debugLog });
     return listenForWake(client, { record: ctx.handoffRecord, ctx, hostProbe: ctx.hostProbe });
   },
 
+  // The detached drain (the foreground reads the local notice file: hook_local_notice.mjs).
   async 'pre-tool-use'(client, ctx) {
-    await reconcileAckHint(client, ctx);
     const watermark = capturedWatermark(ctx.paths);
     if (!watermark) return { staged: 0, message_ids: [] };
     const endpoint = await resolveSessionEndpoint(client, ctx);
     if (!Number.isSafeInteger(endpoint.process_generation) || endpoint.process_generation < 1) {
       throw new HookError('the cached session endpoint has no exact process generation');
     }
-    const notification = await client.request('message.notification.next', {
-      endpoint_id: endpoint.endpoint_id,
-      process_generation: endpoint.process_generation,
-      provider_session_id: ctx.identity.session_id,
-    });
+    const notification = await nextNotificationUnlessFenced(endpoint, { endpoint_id: endpoint.endpoint_id, process_generation: endpoint.process_generation, provider_session_id: ctx.identity.session_id, ...callerLaunch(ctx) }, launchDeps(client, ctx));
+    if (!notification) { // fenced (ac-x09n0): defer, so the worker does not spin and the owner still drains it
+      recordDrainDeferred(ctx.paths, watermark);
+      return { staged: 0, message_ids: [], deferred: 'takeover_fenced' };
+    }
     if (typeof notification.message_id === 'string' && (notification.attempt === 'initial' || notification.attempt === 'retry')) {
-      appendStagedEntry(ctx.paths, stagedNotificationEntry(notification.attempt, notification));
-      // Never re-read `inbox.watermark` here.  A daemon write during the
-      // peek remains different from this captured value and wakes the next
-      // tool boundary.
+      const claim = claimNotice(ctx.paths, notification.message_id, notification.attempt);
+      // Another live claimer (or a busy lock) owns staging: leave the
+      // watermark unseen so a dead claimer's entry is recovered next pass.
+      if (!claim.claimed && claim.reason !== 'shown') {
+        recordDrainDeferred(ctx.paths, watermark); // backoff: drainPassNeeded skips re-running this watermark
+        debugLog({ event: 'drain_result', session_id: ctx.identity.session_id, staged: 0, reason: claim.reason, backoff: true, status: 'warn' });
+        return { staged: 0, message_ids: [], deferred: claim.reason };
+      }
+      let staged = false;
+      if (claim.claimed) {
+        const entry = stagedNotificationEntry(notification.attempt, notification);
+        try {
+          // Never a refusal here: the foreground shows user notices (hook_local_notice.mjs). Stage before the seen mark; never re-read `inbox.watermark` (a write during the peek wakes the next boundary).
+          // The claim ends unshown; PostToolUse records the id when it renders.
+          appendStagedEntry(ctx.paths, entry);
+          staged = true;
+        } finally {
+          releaseNotice(ctx.paths, notification.message_id, notification.attempt);
+        }
+      }
       markCapturedWatermarkSeen(ctx.paths, watermark);
-      return { staged: 1, message_ids: [notification.message_id] };
+      debugLog({ event: 'drain_result', session_id: ctx.identity.session_id, staged: staged ? 1 : 0, reason: claim.claimed ? 'staged' : 'already_shown', recovered: claim.recovered === true });
+      return staged ? { staged: 1, message_ids: [notification.message_id] } : { staged: 0, message_ids: [] };
     }
     markCapturedWatermarkSeen(ctx.paths, watermark);
     return { staged: 0, message_ids: [] };
@@ -1268,10 +1220,15 @@ async function gateStop(client, ctx) {
     endpoint_id: endpoint.endpoint_id,
     process_generation: endpoint.process_generation,
     idempotency_key: randomUUID(),
+    ...callerLaunch(ctx),
     ...(ctx.waitMode === 'explicit' ? { wait_mode: 'explicit' } : {}),
     ...(waitOutcome ? { wait_outcome: waitOutcome } : {}),
   };
-  const decision = await requestSessionStop(client, request, { backgroundWait, sessionId: ctx.identity.session_id, log: debugLog });
+  const decision = await unlessSuperseded(endpoint, () => requestSessionStop(client, request, { backgroundWait, sessionId: ctx.identity.session_id, log: debugLog }), launchDeps(client, ctx));
+  if (!decision) {
+    if (handoff) recordStopHandoffBestEffort(ctx, { decision: 'allow' }); // ac-x09n0: not this process's endpoint to idle
+    return { endpoint_id: endpoint.endpoint_id, state: 'takeover_pending', gate: 'takeover-fenced' };
+  }
   if (ctx.waitMode === 'explicit') setPendingReplyGuard(ctx, endpoint, decision);
   if (ctx.waitMode === 'explicit' && decision.pending_references?.length) {
     decision.reason = tightbeamStopWaitReason(decision.reason, ctx.identity.runtime);
@@ -1297,6 +1254,7 @@ async function gateStop(client, ctx) {
     // same decision in the documented hook-output shape for a runtime
     // that reads stdout instead. Every other failure in this file stays
     // exit 1 for exactly the reason this path wants 2.
+    armStopBlock(ctx, decision, debugLog);
     process.stderr.write(`${decision.reason}\n`);
     process.exitCode = 2;
     return {
@@ -1496,10 +1454,11 @@ function trackCodexSubagent(verb, ctx) {
   return { tracked: true };
 }
 
-function currentWaitMessage(ctx, cached, actionId) {
+// The message the current `agent wait` returned, as `{ message_id, user_notice }`, or null.
+function currentWaitNotice(ctx, cached, actionId) {
   if (!cached || !actionId) return null;
   try {
-    return readWaitMessage({
+    return readWaitNotice({
       endpoint_id: cached.endpoint_id,
       process_generation: cached.process_generation,
       session_id: ctx.identity.session_id,
@@ -1511,8 +1470,31 @@ function currentWaitMessage(ctx, cached, actionId) {
   }
 }
 const toolActionId = (ctx) => (ctx.payload.tool_use_id === undefined ? currentActionId(ctx) : isSafeSessionId(ctx.payload.tool_use_id) ? ctx.payload.tool_use_id : null);
+// The message an `agent wait` returned for this tool call. A user's own notice arms the gate here, staged batch or not.
+function waitedMessageOf(ctx) {
+  const waited = currentWaitNotice(ctx, readCache(ctx.paths), toolActionId(ctx));
+  if (waited?.user_notice) armWaitNotice(ctx, waited.message_id, debugLog);
+  return waited?.message_id ?? null;
+}
 // PostToolUse touches no socket at all — it renders what PreToolUse already staged locally (zero IPC).
-async function runPostToolUse(ctx) {
+// The ledger, not the staged file, remembers what was rendered: an id shown once is never rendered again.
+function unrenderedEntries(paths, entries, waitedMessage) {
+  return entries.filter((entry) => entry.message_id !== waitedMessage && !isNoticeShown(paths, entry.message_id, entry.attempt));
+}
+
+// After rendering succeeded and before the staged bytes go away.
+function recordShown(ctx, entries) {
+  for (const entry of entries) {
+    if (!markNoticeShown(ctx.paths, entry.message_id, entry.attempt)) debugLog({ event: 'notice_shown_unrecorded', session_id: ctx.identity.session_id, id: entry.message_id, status: 'warn' });
+  }
+}
+// The cap decides once what this boundary shows; the rest stay staged for the next one (never recorded shown, never cleared).
+function planInjection(visibleEntries, prefix) {
+  const bodied = withBodyPrefix(visibleEntries);
+  const shown = shownEntries(bodied, { prefix });
+  return { shown, omitted: visibleEntries.slice(shown.length), injection: visibleEntries.length === 0 ? null : renderInjection(bodied, { prefix }) };
+}
+export async function runPostToolUse(ctx) {
   // A subagent's tool call carries the parent's session_id plus agent_id.
   // Its PostToolUse must not claim the parent's staged messages: the main
   // agent's next PostToolUse (e.g. PostToolUse:Agent on return) injects them.
@@ -1520,15 +1502,14 @@ async function runPostToolUse(ctx) {
     debugLog({ event: 'inject_skipped_subagent', session_id: ctx.identity.session_id, agent_type: ctx.payload.agent_type ?? null });
     return { injected: 0, quarantined: 0, output: null, subagent: true };
   }
+  const waitedMessage = waitedMessageOf(ctx);
   const claimed = claimStagedBatch(ctx.paths);
   if (!claimed) {
     debugLog({ event: 'inject_skipped', session_id: ctx.identity.session_id });
     return { injected: 0, quarantined: 0, output: null };
   }
   const { entries, torn } = readStagedEntries(ctx.paths, claimed);
-  const cached = readCache(ctx.paths);
-  const waitedMessage = currentWaitMessage(ctx, cached, toolActionId(ctx));
-  const visibleEntries = waitedMessage ? entries.filter((entry) => entry.message_id !== waitedMessage) : entries;
+  const visibleEntries = unrenderedEntries(ctx.paths, entries, waitedMessage);
   if (entries.length === 0 && torn.length === 0) {
     fs.rmSync(claimed, { force: true });
     debugLog({ event: 'inject_skipped', session_id: ctx.identity.session_id });
@@ -1540,20 +1521,24 @@ async function runPostToolUse(ctx) {
     quarantineTornLines(ctx.paths, torn);
     debugLog({ event: 'inject_quarantined', session_id: ctx.identity.session_id, lines: torn.length });
   }
-  const output =
-    visibleEntries.length === 0
-      ? null
-      : { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: renderInjection(visibleEntries, { prefix: ctx.recipePrefix }) } };
+  const { shown, omitted, injection } = planInjection(visibleEntries, ctx.recipePrefix);
+  const output = injection === null ? null : { hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: injection } };
+  // Arm what the model saw: the entries the injection rendered within its cap, plus the wait result (the wait output showed it).
+  const seen = [...shown, ...entries.filter((entry) => entry.message_id === waitedMessage)];
+  armShownEntries(ctx, seen, { source: 'post_tool_use', log: debugLog, bodyShown: bodyShownIds(shown) }); // R4: the wait result's body is not counted
   // Truncate only after rendering succeeded, so a crash mid-render leaves
   // the staged messages to be injected at the next tool boundary.
   const commitOutput = () => {
+    // Shown only once the output is written (Copilot defers this past its stdout write), and before the staged bytes go away.
+    recordShown(ctx, shown);
     fs.rmSync(claimed, { force: true });
     // Create only if PreToolUse did not open the successor file; append mode cannot truncate a notification staged meanwhile.
     ensurePendingScratch(ctx.paths);
+    for (const entry of omitted) appendStagedEntry(ctx.paths, entry);
   };
   if (!ctx.deferOutputCommit || output === null) commitOutput();
-  debugLog({ event: 'inject_emitted', session_id: ctx.identity.session_id, messages: visibleEntries.length, suppressed_wait_message: Boolean(waitedMessage), quarantined: torn.length });
-  return { injected: visibleEntries.length, quarantined: torn.length, output, ...(ctx.deferOutputCommit && output !== null ? { commitOutput } : {}) };
+  debugLog({ event: 'inject_emitted', session_id: ctx.identity.session_id, messages: shown.length, omitted: omitted.length, suppressed_wait_message: Boolean(waitedMessage), quarantined: torn.length });
+  return { injected: shown.length, quarantined: torn.length, output, ...(ctx.deferOutputCommit && output !== null ? { commitOutput } : {}) };
 }
 
 /**
@@ -1572,7 +1557,9 @@ async function prepareWakeListen(ctx) {
     debugLog({ event: 'wake_listen_no_record', session_id: sessionId, key, result: status, latency: Date.now() - startedAt, status: 'warn' });
     return { result: { woke: false, handoff: status } };
   }
-  if (record.decision !== 'park') {
+  const backedOff = localParkBackedOff(ctx, record, debugLog);
+  if (backedOff) return { result: backedOff };
+  if (record.decision !== 'park' && record.decision !== LOCAL_STOP_PARK) {
     debugLog({ event: 'wake_listen_ended', session_id: sessionId, key, reason: `gate_${record.decision}` });
     return { result: { woke: false, decision: record.decision } };
   }
@@ -1599,14 +1586,68 @@ async function prepareWakeListen(ctx) {
  * state root; without one, identity resolves against the builtins only.
  */
 export function runHookVerb(verb, options = {}) {
+  if (options.flags?.background) return runBackgroundHookVerb(verb, options);
   if (verb === 'wake-listen') return withDebugOffWakeChannel(() => runResolvedHookVerb(verb, options));
   return runResolvedHookVerb(verb, options);
 }
 
-async function runResolvedHookVerb(verb, { stateRoot, flags = {}, env = process.env, stdin, registry, socketPath } = {}) {
+// Per-verb check over local session state (paths) that says a detached
+// worker must run again after a pass (contract C2); runDetached callers add theirs.
+export const DETACHED_PASS_NEEDED = {
+  'user-prompt-submit': (paths) => promptBusyNeeded(paths),
+  // The drain is done once the captured watermark has been marked seen, or backs off a deferred one.
+  'pre-tool-use': drainPassNeeded,
+};
+
+// `hook <verb> --background <session_id>`: the detached child runDetached
+// spawned. It reads the payload from the session dir, never stdin, and keeps
+// flags.background set so the verb skips its fork and does the work.
+function runBackgroundHookVerb(verb, options) {
   if (!HOOK_EVENT_VERBS.includes(verb)) {
     throw new HookError(`unknown hook event: ${verb} (expected one of ${HOOK_EVENT_VERBS.join(', ')})`);
   }
+  const paths = workerPaths(sessionPaths(options.stateRoot, options.flags.background), options.flags.detachLane);
+  const job = (jobPaths, needsAnotherPass, claim) => runDetachedWorker({ verb, paths: jobPaths, run: (stdin) => runResolvedHookVerb(verb, { ...options, stdin, jobPaths }), needsAnotherPass, ...(claim === undefined ? {} : { claim }) });
+  // ac-os0zc: a payload an earlier build left under the shared name runs first, once, as its own launch (it carries its identity).
+  const legacy = paths.lane && legacyPending(paths, verb) ? job(legacyPaths(paths), () => false, null).catch(() => null) : Promise.resolve();
+  return legacy.then(() => job(paths, DETACHED_PASS_NEEDED[verb]));
+}
+
+/**
+ * `pre-tool-use --ack-gate-only` (the shell saw an armed entry). Only the
+ * payload/env session id, the subagent/Copilot check and ack.gate/ decide:
+ * no credentials, secret or runtime-binding check runs, so none can open the
+ * gate. The session resolves credential-free, as armPromptWithoutCredentials does.
+ */
+function runAckGateOnly({ stateRoot, flags, env, stdin, registry, detach }) {
+  const { status, payload } = classifyHookPayload(stdin === undefined ? readStdinSync() : { text: stdin, complete: true });
+  if (status !== 'empty' && status !== 'ok') throw new HookError(`the hook payload on stdin was ${status}; the ACK gate cannot name the session`);
+  const explicit = flags.runtime || env.TIGHTBEAM_RUNTIME;
+  const none = { ackGate: 'none', staged: 0, message_ids: [] };
+  if (payload.agent_id || registry?.get(explicit)?.hooksInstall?.format === 'copilot-json') {
+    debugLog({ event: 'ack_gate_only_not_gated', subagent: Boolean(payload.agent_id) });
+    return none;
+  }
+  let runtime = null;
+  try {
+    runtime = resolveRuntime({ payload, env, registry, explicit });
+  } catch (error) {
+    debugLog({ event: 'ack_gate_only_runtime_unresolved', error: error.code || error.message }); // the session still resolves through the full env chain
+  }
+  const sessionId = resolveSessionId({ payload, env, registry, runtime });
+  if (!sessionId) throw new HookError('could not resolve a session id from the hook payload or the environment for the ACK gate');
+  const ctx = { paths: launchPaths(sessionPaths(stateRoot, sessionId), env.TIGHTBEAM_LAUNCH_TOKEN || null), identity: { session_id: sessionId, launch_token: env.TIGHTBEAM_LAUNCH_TOKEN || null }, payload, copilotInput: null };
+  const verdict = localAckGateVerdict(ctx, { log: debugLog });
+  if (!verdict) debugLog({ event: 'ack_gate_only_nothing_armed', session_id: sessionId });
+  if (drainPassNeeded(ctx.paths)) detachPreToolUse({ ctx, stateRoot, runtime, payload, detach, reason: 'ack_gate_hint', log: debugLog }); // nothing new: no worker
+  return verdict ?? none;
+}
+
+async function runResolvedHookVerb(verb, { stateRoot, flags = {}, env = process.env, stdin, registry, socketPath, detach, jobPaths } = {}) {
+  if (!HOOK_EVENT_VERBS.includes(verb)) {
+    throw new HookError(`unknown hook event: ${verb} (expected one of ${HOOK_EVENT_VERBS.join(', ')})`);
+  }
+  if (verb === 'pre-tool-use' && flags.ackGateOnly) return runAckGateOnly({ stateRoot, flags, env, stdin, registry, detach });
 
   const delivered = stdin === undefined ? readStdinSync() : { text: stdin, complete: true };
   // The Stop gate and its wake listener get byte-identical stdin; both key
@@ -1627,10 +1668,12 @@ async function runResolvedHookVerb(verb, { stateRoot, flags = {}, env = process.
         "session is the PARENT's",
     );
   }
+  if (verb === 'session-start' && flags.background) return runSessionStartWorker({ payload, stateRoot, socketPath, registry });
   const explicitRuntime = flags.runtime || env.TIGHTBEAM_RUNTIME;
   const copilotRuntime = boundCopilotRuntime({ explicitRuntime, registry });
   const isCopilot = copilotRuntime !== null;
-  const copilotInput = isCopilot ? decodeCopilotHookInput(verb, payload) : null;
+  // A detached child's payload is the handoff its own foreground already decoded and validated.
+  const copilotInput = isCopilot && !flags.background ? decodeCopilotHookInput(verb, payload) : null;
   if (copilotInput?.child) return { skipped: true, subagent: true };
   if (copilotInput?.streamEvent) throw new HookError(`Copilot stream event ${copilotInput.event} cannot be handled as callback ${verb}`);
   if (copilotInput && copilotInput.sessionId === undefined) throw new HookError(`Copilot ${copilotInput.event} requires its actual session UUID`);
@@ -1641,9 +1684,17 @@ async function runResolvedHookVerb(verb, { stateRoot, flags = {}, env = process.
   })[verb]) throw new HookError(`Copilot callback event does not match hook verb ${verb}`);
   const hookPayload = copilotInput?.payload ?? payload;
   // Copilot callbacks validate their own identity before this incumbent bootstrap path.
-  let credentials = readHookCredentials(stateRoot);
+  let credentials;
+  try {
+    credentials = readHookCredentials(stateRoot);
+  } catch (error) {
+    // An unreadable credential file is the hook's error, but a tagged prompt must not lose its only arming chance with it.
+    if (verb === 'user-prompt-submit' && !isCopilot) armPromptWithoutCredentials({ stateRoot, payload: hookPayload, env, flags, registry }, debugLog);
+    throw error;
+  }
   if (requiresExplicitCopilotRuntime({ explicitRuntime, credentials, payload: hookPayload, env, registry })) throw new HookError('Copilot hook requires an explicit --runtime binding; pass --runtime instead of relying on runtime inference or credentials');
-  if (verb === 'session-start' && socketPath && registry) {
+  const detachSessionStart = shouldDetachSessionStart({ verb, detach, env, preparation: verb === 'session-start' ? sessionStartPreparation({ credentials, flags, env }) : null });
+  if (verb === 'session-start' && socketPath && registry && !detachSessionStart) {
     const preparation = sessionStartPreparation({ credentials, flags, env });
     if (preparation === 'bootstrap') {
       try {
@@ -1674,7 +1725,7 @@ async function runResolvedHookVerb(verb, { stateRoot, flags = {}, env = process.
   // With the runtime known, the session-id fallback chain can be scoped to
   // that record's declared vars (manifest bindings), so another runtime's
   // session variable cannot leak into this session's identity.
-  const sessionId = isCopilot ? copilotInput.sessionId : resolveSessionId({ payload: hookPayload, env, registry, runtime });
+  const sessionId = copilotInput ? copilotInput.sessionId : resolveSessionId({ payload: hookPayload, env, registry, runtime });
   if (!sessionId) {
     throw new HookError(
       'could not resolve a session id from the hook payload or the environment ' +
@@ -1682,13 +1733,44 @@ async function runResolvedHookVerb(verb, { stateRoot, flags = {}, env = process.
     );
   }
 
+  if (detachSessionStart) {
+    const started = detachSessionStartRegistration({ stateRoot, flags, env, credentials, sessionId, runtime, payload: hookPayload, detach, copilotRecord: copilotRuntime }, { resolveIdentity, captureOwnerProcess, log: debugLog });
+    return isCopilot ? copilotDetachedSessionStart(started, runtime, sessionId) : started;
+  }
+
   // From here the session directory is known, so a failing handoff gate
   // can tell its listener; identity is filled in once it resolves.
-  const ctx = { paths: sessionPaths(stateRoot, sessionId), identity: { session_id: sessionId }, payload: hookPayload, handoff: flags.handoff === true, waitMode: flags.waitMode, stdinKey, copilotInput, deferOutputCommit: isCopilot };
+  const ctx = { paths: sessionPaths(stateRoot, sessionId), identity: { session_id: sessionId }, payload: hookPayload, handoff: flags.handoff === true, ackRemediation: flags.ackRemediation === true, waitMode: flags.waitMode, stdinKey, copilotInput, deferOutputCommit: isCopilot, background: Boolean(flags.background) };
+  // A tagged prompt arms here, before any credential or daemon step: a daemon that is down must not lose the prompt's only arming chance.
+  if (verb === 'user-prompt-submit') armPromptNotices(ctx, ctx.payload?.prompt, debugLog);
+  // Something armed: the verdict comes from local files alone, before identity or any socket, and it never drains.
+  // A remediation call skips it, as on the shell's armed branch (armed/ may have filled since the shell's glob).
+  if (verb === 'pre-tool-use' && !flags.background && !ctx.ackRemediation && isGatedSession(ctx)) {
+    const verdict = localAckGateVerdict(ctx, { log: debugLog });
+    if (verdict) return verdict;
+  }
+  // No credentials yet (a first session still bootstrapping): no hook fails or asks the daemon; an armed gate still refuses (above) and holds Stop.
+  if (verb !== 'session-start' && !flags.background && !hookAuthority({ flags, env, credentials })) {
+    if (verb === 'user-prompt-submit') ctx.paths = launchPaths(ctx.paths, env.TIGHTBEAM_LAUNCH_TOKEN || null);
+    const prompt = verb === 'user-prompt-submit' ? recordPrompt(ctx.paths) : null;
+    credentials = readHookCredentials(stateRoot); // a worker that bootstrapped since the first read has already run its busy check
+    if (!hookAuthority({ flags, env, credentials })) return deferWithoutIdentity({ ctx, verb, prompt, isCopilot, log: debugLog, recordHandoff: (fields) => recordStopHandoffBestEffort(ctx, fields) });
+  }
   let client;
   try {
-    ctx.identity = resolveIdentity({ payload: hookPayload, env, flags, credentials, sessionId, runtime, verb, copilotRecord: copilotRuntime });
+    ctx.identity = (flags.background && payload?.[DETACHED_IDENTITY]) || resolveIdentity({ payload: hookPayload, env, flags, credentials, sessionId, runtime, verb, copilotRecord: copilotRuntime });
+    if (flags.background && !payload?.[DETACHED_IDENTITY]) Object.assign(ctx, workerLaunch(ctx.identity, payload));
+    ctx.paths = flags.background ? jobPaths : launchPaths(ctx.paths, ctx.identity.launch_token); // ac-os0zc: a worker reads and acks the prompt record of the files it runs from (a lane, or the shared names)
 
+    if (verb === 'stop' && !isCopilot && !flags.background) {
+      const local = localStopExit(ctx, { readCache, log: debugLog, stateRoot, runtime, payload, recordHandoff: (fields) => recordStopHandoffBestEffort(ctx, fields) });
+      if (local) return local;
+    }
+    if (copilotInput && verb !== 'session-start') return await runCopilotHook({ verb, ctx, render: runPostToolUse, handoff: { stateRoot, runtime, detach, drainNeeded: watermarkUnseen, stage: { appendStagedEntry, stagedNotificationEntry, readCache, appId: flags.appId || env.TIGHTBEAM_APP_ID || credentials?.app_id }, log: debugLog } });
+    if (verb === 'user-prompt-submit' && !flags.background && !isCopilot) {
+      const ownerProcess = adoptionOwnerProcess(readCache(ctx.paths), ctx.identity, () => captureOwnerProcess({ runtime, sessionId, cwd: ctx.identity.cwd, log: debugLog }));
+      return detachPromptBusy({ ctx, stateRoot, runtime, payload, log: debugLog, ownerProcess });
+    }
     if (verb === 'post-tool-use' && !isCopilot) return runPostToolUse(ctx);
     if (verb === 'subagent-start' || verb === 'subagent-stop') return trackCodexSubagent(verb, ctx);
     if (verb === 'wake-listen') {
@@ -1702,16 +1784,44 @@ async function runResolvedHookVerb(verb, { stateRoot, flags = {}, env = process.
 
     const appCredential = resolveHookAppCredential({ stateRoot, flags, env, credentials });
     ctx.app_id = appCredential.appId;
+    if (verb === 'pre-tool-use' && !flags.background && !isCopilot) return localPreToolUse(ctx, { stateRoot, runtime, payload, detach, remediation: ctx.ackRemediation, deps: { readCache, appendStagedEntry, stagedNotificationEntry }, log: debugLog });
     client = await openHookClient(stateRoot, appCredential);
   } catch (error) {
+    if (ctx.handoffRecord?.decision === LOCAL_STOP_PARK) return localParkUnreachable(ctx, error, debugLog);
     recordGateFailure(verb, ctx);
     throw error;
   }
   try {
-    if (isCopilot) return await runCopilotHook({ client, verb, ctx, handlers: HANDLERS, render: runPostToolUse });
+    if (copilotInput) return await runCopilotSessionStart(client, ctx, HANDLERS);
     return await HANDLERS[verb](client, ctx);
   } finally {
     await client.close();
+  }
+}
+
+/** Background half: runs under the seam's lock with the newest foreground payload. */
+function runSessionStartWorker({ payload, stateRoot, socketPath, registry }) {
+  if (payload?.[DETACHED_SESSION_START] !== true || !payload.identity) {
+    throw new HookError('session-start --background needs the payload runDetached wrote');
+  }
+  return runSessionStartRegistration({
+    job: payload,
+    stateRoot,
+    socketPath,
+    runtimeNames: [...registry.names()],
+    wakeRuntimeIds: packageBoundCopilotRuntimeIds(registry),
+    version: packageVersion(),
+    paths: sessionPaths(stateRoot, payload.identity.session_id),
+    deps: { readCredentials: readHookCredentials, hasUsableCredentials, bootstrap, ensureDaemon, openClient: openHookClient, register: registerSession, markBusy: HANDLERS['user-prompt-submit'] },
+    log: debugLog,
+  });
+}
+
+function packageVersion() {
+  try {
+    return JSON.parse(fs.readFileSync(new URL('../../../package.json', import.meta.url), 'utf8')).version ?? null;
+  } catch {
+    return null; // a missing package.json only makes every stamp equal, never wrong
   }
 }
 

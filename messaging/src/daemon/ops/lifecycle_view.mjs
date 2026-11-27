@@ -29,6 +29,8 @@ import { uniqueShortIds } from '../../protocol/ids.mjs';
 import { rootCompletionMode, rootRequesterLineage } from '../lifecycle_transition.mjs';
 import { offerRecipientEndpointIds } from './message_shared.mjs';
 import { HOSTED_LAUNCH_FAILURE_REASONS, hostedAttentionSource } from './resume_fail.mjs';
+import { operatorFacts, withOperatorFlag } from './lifecycle_operator_facts.mjs';
+import { rootResolution } from './root_resolution.mjs';
 
 const HANDLE_MIN_CHARS = 8;
 
@@ -67,7 +69,7 @@ function validateViewRequest(payload) {
     throw new TightbeamError('malformed_request', 'request is required and must be an object');
   }
   for (const key of Object.keys(request)) {
-    if (!VIEW_FIELDS.includes(key)) {
+    if (!VIEW_FIELDS.includes(key) && key !== 'operator') {
       throw new TightbeamError('malformed_request', `lifecycle.view declares "${key}", which is not part of its request contract`, { field: key });
     }
   }
@@ -77,7 +79,7 @@ function validateViewRequest(payload) {
       throw new TightbeamError('malformed_request', `${field} must be a non-empty string when present`, { field });
     }
   }
-  return request;
+  return withOperatorFlag(request);
 }
 
 export function chainNodes(db, rootId) {
@@ -245,7 +247,7 @@ const CWD_NOT_FOUND_ATTENTION = 'resume.cwd_not_found';
 // resume request whose endpoint never got a session, or a resume refused
 // because the session's folder is gone. The resumer records the reason when
 // it surfaces the failure (resumer.mjs surfaceLaunchFailure / failRequest).
-export function launchFailureFor(db, conversationId) {
+export function launchFailureFor(db, conversationId, handle = sessionHandles(db)) {
   const hostedReasons = HOSTED_LAUNCH_FAILURE_REASONS.map(() => '?').join(',');
   const row = db
     .prepare(
@@ -275,17 +277,16 @@ export function launchFailureFor(db, conversationId) {
   // a same-prefix sibling never read alike in the failure line.
   if (row.session_id === null) return failure;
   const attentionSource = HOSTED_LAUNCH_FAILURE_REASONS.includes(row.reason) ? hostedAttentionSource(row.reason) : CWD_NOT_FOUND_ATTENTION;
-  return { ...failure, session_id: row.session_id, short_id: sessionHandles(db)({ id: null, provider_session_id: row.session_id }), attention_source: attentionSource };
+  return { ...failure, session_id: row.session_id, short_id: handle({ id: null, provider_session_id: row.session_id }), attention_source: attentionSource };
 }
 
 /** Whether a launch-failure projection is one the daemon ended on purpose for a session another app holds. */
 export const isHostedLaunchFailure = (failure) => HOSTED_LAUNCH_FAILURE_REASONS.includes(failure?.reason);
 
-function projectionForRoot(db, root) {
+function projectionForRoot(db, root, { operator = false } = {}) {
   const nodes = chainNodes(db, root.id);
   const watches = chainWatches(db, root.id);
   const attention = db.prepare('SELECT attention_source, stop_block_count, first_marked_at, last_block_at FROM root_attention WHERE root_obligation_id = ?').get(root.id) ?? null;
-
   const attempts = nodes
     .filter((node) => node.role === 'attempt')
     .map((node) => ({
@@ -296,6 +297,7 @@ function projectionForRoot(db, root) {
       endpoint_state: node.endpoint_state,
       resolution: node.resolution,
       resolution_outcome: node.resolution_outcome,
+      closed_at: node.status === 'closed' ? node.updated_at : null,
     }));
   const delegations = nodes
     .filter((node) => node.role === 'delegation')
@@ -310,6 +312,8 @@ function projectionForRoot(db, root) {
       // offer is addressed to the principal as a whole.
       offered_endpoint_ids: offerRecipientEndpointIds(db, node.id),
       endpoint_state: node.endpoint_state,
+      resolution: node.resolution,
+      closed_at: node.status === 'closed' ? node.updated_at : null,
       watch_state: watches.find((watch) => watch.delegation_id === node.id)?.state ?? null,
       watch_outcome: watches.find((watch) => watch.delegation_id === node.id)?.outcome ?? null,
     }));
@@ -333,17 +337,7 @@ function projectionForRoot(db, root) {
     ack_in_flight: Boolean(db.prepare("SELECT 1 FROM deliveries WHERE route_reason = 'ack.provider_confirmed' AND source_obligation_id = ? AND state IN ('pending', 'claimed') LIMIT 1").get(root.id)),
     created_at: root.created_at,
     updated_at: root.updated_at,
-    resolution:
-      root.status === 'closed'
-        ? {
-            resolution: root.resolution,
-            message_id: root.resolution_message_id,
-            outcome: root.resolution_outcome,
-            reason: root.resolution_reason,
-            source: root.resolution_source,
-            replacement_id: root.resolution_replacement_id,
-          }
-        : null,
+    resolution: root.status === 'closed' ? rootResolution(db, root) : null,
     attempts,
     delegations,
     // Staged resolution is a PENDING-confirmation presentation, so it exists
@@ -354,7 +348,7 @@ function projectionForRoot(db, root) {
     notification: notificationProjection(db, root.id),
     attention,
     launch_failure: root.status === 'open' ? launchFailureFor(db, root.conversation_id) : null,
-    ...requesterProjection(db, root.id),
+    ...requesterProjection(db, root.id), ...(operator ? { operator: operatorFacts(db, { root, nodes, attention }) } : {}),
   };
 }
 
@@ -384,7 +378,7 @@ export function buildLifecycleView(db, appId, payload) {
       request.root_obligation_id ?? null,
       request.root_obligation_id ?? null,
     );
-  return { chains: roots.map((root) => projectionForRoot(db, root)) };
+  return { chains: roots.map((root) => projectionForRoot(db, root, { operator: request.operator === true })) };
 }
 
 export const lifecycleViewOp = {

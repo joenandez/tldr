@@ -14,7 +14,7 @@ function secureProviderMapFiles(path) {
   }
 }
 
-function openProviderMap(home, { readOnly = false } = {}) {
+export function openProviderMap(home, { readOnly = false } = {}) {
   const path = providerMapPath(home);
   if (readOnly && !existsSync(path)) return null;
   const db = new DatabaseSync(path, readOnly ? { readOnly: true } : {});

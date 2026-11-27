@@ -8,11 +8,16 @@
 # payload once per poll tick and run that tick's Tightbeam calls on the
 # verified runtime (item 38 option E); any failure exits non-zero as below.
 #
-# The payload is verified against release/activation-manifest.json on every
-# run, including runs that reuse the extracted cache, so a package whose
-# payload is later removed or altered fails closed. On macOS there is no
-# fallback to PATH or to the lifecycle runtime under install/, which the
-# bootstrap owns. Linux has no payload; it runs the system Node (>= 24.20).
+# The payload is verified against release/activation-manifest.json, so a
+# package whose payload is later removed or altered fails closed. A full
+# sha256 runs once per payload: the verified result is recorded under
+# runtimes/.verified-payloads with the file identity (device, inode, size,
+# mtime and ctime to the nanosecond, mode) of the manifest and the payload, and a
+# later run trusts it only while both identities are unchanged (ac-jfv.152).
+# Any write to either file changes its ctime, so it is digested again. On
+# macOS there is no fallback to PATH or to the lifecycle runtime under
+# install/, which the bootstrap owns. Linux has no payload; it runs the system
+# Node (>= 24.20).
 set -eu
 
 fail() {
@@ -49,7 +54,12 @@ case "$component" in
   *) fail 64 RUNTIME_COMPONENT_UNKNOWN "unknown component: $component" ;;
 esac
 
-package_root=$(CDPATH= cd -- "$(/usr/bin/dirname -- "$0")/.." && pwd -P) || \
+# Parameter expansion, not dirname: this runs on every CLI call (ac-jfv.152).
+case "$0" in
+  */*) script_dir=${0%/*} ;;
+  *) script_dir=. ;;
+esac
+package_root=$(CDPATH= cd -- "${script_dir:-/}/.." && pwd -P) || \
   fail 68 RUNTIME_MANIFEST_MISSING "cannot resolve the package root from $0"
 manifest="${package_root}/release/activation-manifest.json"
 package_root_is_git_worktree() {
@@ -82,16 +92,145 @@ if [ "$(uname -s)" = "Linux" ]; then
   exec "$runtime_node" "${package_root}/${entrypoint}" "$@"
 fi
 
-[ "$(/usr/bin/uname -s)/$(/usr/bin/uname -m)" = "Darwin/arm64" ] || \
+
+tab='	'
+newline='
+'
+# A file's identity: device, inode, size, mtime and ctime to the nanosecond,
+# and permission bits, of the file a link resolves to (-L), since plutil and
+# openssl read that file. Any write, rename over, relink, or chmod changes it.
+file_identity() {
+  /usr/bin/stat -L -f '%d:%i:%z:%Fm:%Fc:%Lp' "$@" 2>/dev/null
+}
+
+# The state root default (src/lib/store.mjs). The runtime cache is exempt
+# from the state root migration guard: it is regenerated on demand.
+runtimes=""
+if [ -n "${TLDR_AGENT_HOME:-}${HOME:-}" ]; then
+  tldr_agent_home=${TLDR_AGENT_HOME:-${HOME}/.tldr-agents/agent}
+  runtimes="${tldr_agent_home}/runtimes"
+fi
+verified_record="${runtimes}/.verified-payloads"
+runtime_stamp_name=.payload-sha256
+use_runtime() {
+  runtime="${runtimes}/${actual_sha}"
+  runtime_node="${runtime}/bin/node"
+  runtime_stamp="${runtime}/${runtime_stamp_name}"
+}
+
+# The stamp is written inside the staged runtime before its rename, so only an
+# entry this dispatcher completed carries the verified sha256. Anything else
+# under runtimes/<sha256>/, including links, is replaced and never executed.
+runtime_is_trusted() {
+  [ -d "$runtimes" ] && [ ! -L "$runtimes" ] && [ -O "$runtimes" ] || return 1
+  [ -d "$runtime" ] && [ ! -L "$runtime" ] && [ -O "$runtime" ] || return 1
+  [ -f "$runtime_stamp" ] && [ ! -L "$runtime_stamp" ] || return 1
+  stamp=""
+  IFS= read -r stamp 2>/dev/null < "$runtime_stamp" || :
+  [ "$stamp" = "$actual_sha" ] && [ -x "$runtime_node" ]
+}
+
+launch() {
+  if [ "$resolve_only" = 1 ]; then
+    printf 'node=%s\nentrypoint=%s\nsha256=%s\n' \
+      "$runtime_node" "${package_root}/${entrypoint}" "$actual_sha"
+    exit 0
+  fi
+  exec "$runtime_node" "${package_root}/${entrypoint}" "$@"
+}
+
+# The record is one line per package root: root, manifest identity, payload
+# path, verified sha256, payload identity. It is trusted only as a regular
+# file this user owns, in a runtimes/ directory this user owns with mode 0700.
+record_is_trusted() {
+  [ -n "$runtimes" ] && [ -d "$runtimes" ] && [ ! -L "$runtimes" ] && [ -O "$runtimes" ] || return 1
+  [ -f "$verified_record" ] && [ ! -L "$verified_record" ] && [ -O "$verified_record" ]
+}
+
+# Sets relative_path and actual_sha from this root's record line when the
+# manifest and payload still have the identities recorded at verification.
+recorded_payload_matches() {
+  record_is_trusted || return 1
+  while IFS="$tab" read -r r_root r_manifest r_path r_sha r_payload; do
+    [ "$r_root" = "$package_root" ] || continue
+    case "$r_path" in
+      ""|/*|../*|*/../*|*/..) return 1 ;;
+    esac
+    case "$r_sha" in
+      *[!0-9a-f]*|"") return 1 ;;
+    esac
+    [ "${#r_sha}" -eq 64 ] || return 1
+    # The same stat call checks that runtimes/ is still private (0700).
+    identities=$(file_identity "$manifest" "${package_root}/${r_path}" "$runtimes") || return 1
+    case "$identities" in
+      "${r_manifest}${newline}${r_payload}${newline}"*:700) ;;
+      *) return 1 ;;
+    esac
+    relative_path=$r_path
+    actual_sha=$r_sha
+    return 0
+  done < "$verified_record"
+  return 1
+}
+
+# Rewrites the record with this root's line, keeping lines for other roots
+# whose manifest still exists. A lost race only costs a later full digest.
+remember_verified_payload() {
+  [ -n "$manifest_identity" ] && [ -n "$payload_identity" ] || return 0
+  case "${package_root}${relative_path}" in
+    *"$tab"*|*"$newline"*) return 0 ;;
+  esac
+  # Whole-second timestamps (HFS+) cannot show a rewrite within the second of
+  # verification, so such files are digested on every call, as before.
+  case "${manifest_identity}${newline}${payload_identity}" in
+    *.000000000:*) return 0 ;;
+  esac
+  # Never publish through a link or onto a directory: mv would follow it.
+  if [ -L "$verified_record" ] || \
+    { [ -e "$verified_record" ] && [ ! -f "$verified_record" ]; }; then
+    /bin/rm -rf "$verified_record" || return 0
+  fi
+  next="${verified_record}.$$"
+  if {
+    if record_is_trusted; then
+      while IFS="$tab" read -r r_root r_rest; do
+        if [ "$r_root" != "$package_root" ] && \
+          [ -f "${r_root}/release/activation-manifest.json" ]; then
+          printf '%s\t%s\n' "$r_root" "$r_rest"
+        fi
+      done < "$verified_record"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\n' "$package_root" "$manifest_identity" \
+      "$relative_path" "$actual_sha" "$payload_identity"
+  } > "$next" && /bin/mv -f "$next" "$verified_record"; then
+    return 0
+  fi
+  /bin/rm -f "$next" 2>/dev/null || :
+  printf 'tldr-agent runtime: event=runtime_verified_record_unwritable path=%s\n' \
+    "$verified_record" >&2
+}
+
+# Fast path: a payload verified earlier, unchanged since, on a trusted runtime.
+# A record is only written after the darwin/arm64 check below passed for
+# these same files, so the fast path skips that check.
+if recorded_payload_matches; then
+  use_runtime
+  runtime_is_trusted && launch "$@"
+fi
+
+host=$(/usr/bin/uname -sm)
+[ "$host" = "Darwin arm64" ] || \
   fail 67 RUNTIME_ARCHITECTURE_UNSUPPORTED \
-    "only darwin/arm64 is supported, found $(/usr/bin/uname -s)/$(/usr/bin/uname -m)"
+    "only darwin/arm64 is supported, found ${host% *}/${host##* }"
 architecture=arm64
 
 [ -f "$manifest" ] || \
   fail 68 RUNTIME_MANIFEST_MISSING "release/activation-manifest.json is absent"
+
 field() {
   /usr/bin/plutil -extract "$1" raw -o - "$manifest" 2>/dev/null
 }
+manifest_identity=$(file_identity "$manifest") || manifest_identity=""
 [ "$(field schema_version)" = "1" ] || \
   fail 68 RUNTIME_MANIFEST_INVALID "unsupported activation manifest schema"
 prefix="architectures.${architecture}.runtime"
@@ -108,6 +247,7 @@ esac
 archive="${package_root}/${relative_path}"
 [ -f "$archive" ] || \
   fail 68 RUNTIME_PAYLOAD_MISSING "${relative_path} is absent"
+payload_identity=$(file_identity "$archive") || payload_identity=""
 actual_bytes=$(/usr/bin/stat -f %z "$archive") || actual_bytes=""
 lowercase() {
   printf '%s\n' "$1" | /usr/bin/tr 'A-F' 'a-f'
@@ -128,28 +268,9 @@ esac
 [ "$actual_bytes" = "$expected_bytes" ] && [ "$actual_sha" = "$(lowercase "$expected_sha")" ] || \
   fail 68 RUNTIME_PAYLOAD_MISMATCH "${relative_path} does not match its sha256 and size"
 
-[ -n "${TLDR_AGENT_HOME:-}${HOME:-}" ] || \
+[ -n "$runtimes" ] || \
   fail 70 RUNTIME_HOME_UNAVAILABLE "set TLDR_AGENT_HOME or HOME"
-# The state root default (src/lib/store.mjs). The runtime cache is exempt
-# from the state root migration guard: it is regenerated on demand.
-tldr_agent_home=${TLDR_AGENT_HOME:-${HOME}/.tldr-agents/agent}
-runtimes="${tldr_agent_home}/runtimes"
-runtime="${runtimes}/${actual_sha}"
-runtime_node="${runtime}/bin/node"
-runtime_stamp_name=.payload-sha256
-runtime_stamp="${runtime}/${runtime_stamp_name}"
-
-# The stamp is written inside the staged runtime before its rename, so only an
-# entry this dispatcher completed carries the verified sha256. Anything else
-# under runtimes/<sha256>/, including links, is replaced and never executed.
-runtime_is_trusted() {
-  [ -d "$runtimes" ] && [ ! -L "$runtimes" ] && [ -O "$runtimes" ] || return 1
-  [ -d "$runtime" ] && [ ! -L "$runtime" ] && [ -O "$runtime" ] || return 1
-  [ -f "$runtime_stamp" ] && [ ! -L "$runtime_stamp" ] || return 1
-  stamp=""
-  IFS= read -r stamp 2>/dev/null < "$runtime_stamp" || :
-  [ "$stamp" = "$actual_sha" ] && [ -x "$runtime_node" ]
-}
+use_runtime
 
 # runtimes/ holds only this user's runtimes. A link there is removed (never its
 # target) and the directory is recreated private.
@@ -226,9 +347,5 @@ extract_runtime() {
 }
 
 runtime_is_trusted || extract_runtime
-if [ "$resolve_only" = 1 ]; then
-  printf 'node=%s\nentrypoint=%s\nsha256=%s\n' \
-    "$runtime_node" "${package_root}/${entrypoint}" "$actual_sha"
-  exit 0
-fi
-exec "$runtime_node" "${package_root}/${entrypoint}" "$@"
+remember_verified_payload
+launch "$@"

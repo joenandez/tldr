@@ -15,6 +15,7 @@ import { withFiles } from "./slack_inbound_files.mjs";
 import { hintAndMark } from "./slack_inbound_hint.mjs";
 import { noteWorkingMessage, trackWorking } from "./slack_working_store.mjs";
 import {
+  maxIntake,
   parseEntry,
   readPending,
   resolveOwner,
@@ -237,6 +238,7 @@ async function drain(options) {
     pending: 0,
   };
   sweepRotated(ctx);
+  let intakeMs;
   for (const { raw, end } of readPending(ctx.home)) {
     const entry = parseEntry(raw);
     // lines must be handled in order; a retryable failure stops the drain
@@ -248,6 +250,7 @@ async function drain(options) {
     }
     counts[outcome] += 1;
     writeCursor(ctx.home, end);
+    intakeMs = maxIntake(intakeMs, entry, outcome);
   }
   if (counts.ok) rotateIfDrained(ctx);
   ctx.logger?.({
@@ -255,6 +258,7 @@ async function drain(options) {
     status: counts.ok ? "ok" : "error",
     result: counts,
     latency_ms: Date.now() - started,
+    intake_ms: intakeMs,
   });
   return Object.freeze(counts);
 }

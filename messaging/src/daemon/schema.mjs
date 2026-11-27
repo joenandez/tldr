@@ -89,9 +89,10 @@
 import { applyMigrations, listAppliedMigrations } from './migrations.mjs';
 import { reconcileTachyonArmingFromAudit } from './tachyon_arming.mjs';
 import { applyScheduledWakesMigration } from './scheduled_wakes.mjs';
-import { ensurePerformanceIndexes } from './performance_indexes.mjs';
+import { applyFailureCauseMigration } from './failure_cause_migration.mjs';
+import { ensureHolderStallIndexes, ensureLimitRefusedColumn, ensurePerformanceIndexes, ensureThreadOwners } from './performance_indexes.mjs';
 
-export const SCHEMA_VERSION = 30;
+export { SCHEMA_VERSION } from './schema_version.mjs';
 
 // The schema version at which the guarded lifecycle cutover landed. A
 // state document stamped below this version was written by a pre-cutover
@@ -1591,10 +1592,10 @@ export const MIGRATIONS = [
       db.exec('CREATE INDEX message_effects_obligation_effect ON message_effects(obligation_id, effect)');
     },
   },
-  // The Academy permission mode a Copilot owner was launched under; it follows the owner. NULL: unknown, never inferred.
-  { schemaVersion: 29, apply: (db) => db.exec("ALTER TABLE endpoints ADD COLUMN academy_permission_mode TEXT CHECK (academy_permission_mode IS NULL OR academy_permission_mode IN ('approve-all', 'approve-reads', 'deny-all'))") },
-  // scheduled_wakes plus the upgrade-time cutoff (this row's applied_at); see scheduled_wakes.mjs.
-  { schemaVersion: 30, apply: applyScheduledWakesMigration },
+  { schemaVersion: 29, apply: (db) => db.exec("ALTER TABLE endpoints ADD COLUMN academy_permission_mode TEXT CHECK (academy_permission_mode IS NULL OR academy_permission_mode IN ('approve-all', 'approve-reads', 'deny-all'))") }, // The Academy permission mode a Copilot owner was launched under; it follows the owner. NULL: unknown, never inferred.
+  { schemaVersion: 30, apply: applyScheduledWakesMigration }, // scheduled_wakes plus the upgrade-time cutoff (this row's applied_at); see scheduled_wakes.mjs.
+  { schemaVersion: 31, apply: (db) => db.exec('ALTER TABLE deliveries ADD COLUMN brief_launch_token TEXT') }, // ac-kf9rt: the launch whose stdin brief showed the body; its busy mark receipts it
+  { schemaVersion: 32, apply: applyFailureCauseMigration }, // ac-jfv.239: deliveries.failure_cause, a failed copy's durable cause (claims are not exported)
 ];
 
 /**
@@ -1609,7 +1610,7 @@ export const MIGRATIONS = [
  * closed with migration_incompatible.
  */
 export function openSchema(db) {
-  return ensurePerformanceIndexes(db, applyMigrations(db, MIGRATIONS));
+  return ensureThreadOwners(db, ensureHolderStallIndexes(db, ensureLimitRefusedColumn(db, ensurePerformanceIndexes(db, applyMigrations(db, MIGRATIONS)))));
 }
 
 /**

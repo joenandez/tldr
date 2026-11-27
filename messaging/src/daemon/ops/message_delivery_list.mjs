@@ -4,6 +4,18 @@
 
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { replacementDeliveryFor } from './message_shared.mjs';
+import { SKIPPED_CLAIM_PREFIX } from './delivery_complete.mjs';
+
+// A failed copy's cause is on its row (deliveries.failure_cause, ac-jfv.239). A copy skipped by
+// policy (delivery.complete reason) names its reason. Any other failed copy names its cause as
+// `failure_cause`, never `reason`: the CLI reads a failed copy with a reason as skipped, and this
+// one failed. A copy failed before the schema-32 backfill had a cause carries `legacy:<outcome>`.
+const failureNote = (state, cause) =>
+  state !== 'failed' || !cause
+    ? {}
+    : cause.startsWith(SKIPPED_CLAIM_PREFIX)
+      ? { reason: cause.slice(SKIPPED_CLAIM_PREFIX.length) }
+      : { failure_cause: cause };
 
 export const messageDeliveryListOp = {
   name: 'message.delivery.list',
@@ -20,13 +32,14 @@ export const messageDeliveryListOp = {
     }
     const deliveries = context.db
       .prepare(
-        `SELECT d.id AS delivery_id, d.state AS state, r.selector AS selector, r.label AS label
+        `SELECT d.id AS delivery_id, d.state AS state, r.selector AS selector, r.label AS label, d.failure_cause AS failure_cause
            FROM deliveries d
            JOIN channel_routes r ON r.id = d.channel_route_id
           WHERE d.message_id = ?
           ORDER BY r.selector ASC, d.id ASC`,
       )
-      .all(messageId);
+      .all(messageId)
+      .map(({ failure_cause: cause, ...row }) => ({ ...row, ...failureNote(row.state, cause) }));
     const endpointDeliveries = context.db
       .prepare(
         `SELECT d.id AS delivery_id, d.endpoint_id AS endpoint_id, d.state AS state,

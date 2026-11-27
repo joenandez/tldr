@@ -54,7 +54,8 @@ export function deliveryStepFor(rows, { holderEndpointId = null } = {}) {
 
   const newestByRecipient = new Map();
   for (const row of ordered) newestByRecipient.set(recipientOf(row), row);
-  const live = [...newestByRecipient.values()].filter((row) => !row.replacement_delivery_id);
+  // A copy skipped by policy carries nothing: another channel delivered the message (ac-jfv.55).
+  const live = [...newestByRecipient.values()].filter((row) => !row.replacement_delivery_id && !row.skipped);
   if (live.some((row) => row.state === 'failed')) return 'failed';
   if (live.some((row) => row.state === 'expired')) return 'timed_out';
   const rank = (row) => LADDER.indexOf(rowDeliveryStep(row));

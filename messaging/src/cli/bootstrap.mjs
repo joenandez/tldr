@@ -339,7 +339,7 @@ function isPidAlive(pid) {
   }
 }
 
-function readBootstrapLockOwner(lockDir) {
+export function readBootstrapLockOwner(lockDir) {
   try {
     return JSON.parse(fs.readFileSync(path.join(lockDir, 'owner.json'), 'utf8'));
   } catch {
@@ -347,7 +347,7 @@ function readBootstrapLockOwner(lockDir) {
   }
 }
 
-function bootstrapLockIsStale(lockDir) {
+export function bootstrapLockIsStale(lockDir) {
   const owner = readBootstrapLockOwner(lockDir);
   if (owner) return !isPidAlive(owner.pid);
   try {
@@ -368,6 +368,32 @@ function reclaimStaleBootstrapLock(lockDir) {
   fs.rmSync(tombstone, { recursive: true, force: true });
 }
 
+function mkdirLock(lockDir) {
+  try {
+    fs.mkdirSync(lockDir, { mode: 0o700 });
+    return true;
+  } catch (err) {
+    if (err.code !== 'EEXIST') throw err;
+    return false;
+  }
+}
+
+// One try at the owner.json mkdir lock (also hook_detach.mjs, whose token hands the claim to its worker): release fn, or null while a live owner holds it.
+export function tryOwnerLock(lockDir, token = randomBytes(16).toString('hex')) {
+  while (!mkdirLock(lockDir)) {
+    if (!bootstrapLockIsStale(lockDir)) return null;
+    reclaimStaleBootstrapLock(lockDir);
+  }
+  try {
+    fs.writeFileSync(path.join(lockDir, 'owner.json'), `${JSON.stringify({ pid: process.pid, token, started_at: new Date().toISOString() })}\n`, { mode: 0o600, flag: 'wx' });
+  } catch (err) {
+    fs.rmSync(lockDir, { recursive: true, force: true });
+    throw err;
+  }
+  return ownerLockRelease(lockDir, token);
+}
+export const ownerLockRelease = (lockDir, token) => () => readBootstrapLockOwner(lockDir)?.token === token && fs.rmSync(lockDir, { recursive: true, force: true });
+
 async function acquireBootstrapLock(stateRoot, { timeoutMs = BOOTSTRAP_LOCK_TIMEOUT_MS } = {}) {
   // Bootstrap is the first writer on a new machine: it creates the root
   // before any daemon does, so it refuses a pending migration the same way.
@@ -377,39 +403,13 @@ async function acquireBootstrapLock(stateRoot, { timeoutMs = BOOTSTRAP_LOCK_TIME
   fs.chmodSync(stateRoot, 0o700);
   fs.mkdirSync(adminDir, { recursive: true, mode: 0o700 });
   fs.chmodSync(adminDir, 0o700);
-
   const lockDir = path.join(adminDir, 'bootstrap.lock');
-  const token = randomBytes(16).toString('hex');
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    try {
-      fs.mkdirSync(lockDir, { mode: 0o700 });
-    } catch (err) {
-      if (err.code !== 'EEXIST') throw err;
-      if (bootstrapLockIsStale(lockDir)) {
-        reclaimStaleBootstrapLock(lockDir);
-        continue;
-      }
-      await sleep(BOOTSTRAP_LOCK_POLL_INTERVAL_MS);
-      continue;
-    }
-
-    try {
-      fs.writeFileSync(
-        path.join(lockDir, 'owner.json'),
-        `${JSON.stringify({ pid: process.pid, token, started_at: new Date().toISOString() })}\n`,
-        { mode: 0o600, flag: 'wx' },
-      );
-    } catch (err) {
-      fs.rmSync(lockDir, { recursive: true, force: true });
-      throw err;
-    }
-    return {
-      release() {
-        const owner = readBootstrapLockOwner(lockDir);
-        if (owner?.token === token) fs.rmSync(lockDir, { recursive: true, force: true });
-      },
-    };
+    const release = tryOwnerLock(lockDir);
+    if (release) return { release };
+    // eslint-disable-next-line no-await-in-loop -- polls the lock until the deadline
+    await sleep(BOOTSTRAP_LOCK_POLL_INTERVAL_MS);
   }
   throw new BootstrapError(
     `timed out waiting for another bootstrap process to finish for "${stateRoot}"; run "${tightbeamCommandName()} doctor"`,

@@ -11,7 +11,7 @@ import { REPLY_BINDING_POLICY } from '../reply_listener_policy.mjs';
 import { replyContinuityDiagnostic } from '../reply_continuity_diagnostics.mjs';
 import { admitParkExpiryRetirement } from '../endpoint_retirement.mjs';
 import { openOldestUnreadAdmission } from './delivery_admission.mjs';
-import { refreshSessionWatermark } from './message_shared.mjs';
+import { publishMissedPresentation, publishSessionNotice } from './session_notice.mjs';
 import { notificationContext } from './notification_context.mjs';
 import { isEndpointOwnerGone, ownerGoneSql } from '../listener_owner_loss.mjs';
 // listener_operations <-> lifecycle_transition is a cycle: never read these imports at module load (TDZ).
@@ -219,7 +219,7 @@ export function releaseListenersForBusySession(context, { endpointId, processGen
       .prepare("UPDATE listeners SET state = 'ended', terminal_reason = 'session_busy', updated_at = ?, ended_at = ? WHERE id = ? AND state IN ('parked', 'attached', 'waking')")
       .run(now, now, listener.id);
     for (const presentation of missed) {
-      refreshSessionWatermark({ stateRoot: context.stateRoot, sessionId: listener.session_id, deliveryId: presentation.target_delivery_id, logger: context.logger });
+      publishSessionNotice(context.db, { stateRoot: context.stateRoot, sessionId: listener.session_id, deliveryId: presentation.target_delivery_id, logger: context.logger });
     }
     context.logger?.info({ event: 'listener_released_for_busy_session', endpoint_id: endpointId, listener_id: listener.id, missed_presentations: missed.length });
   }
@@ -383,9 +383,13 @@ export const listenerEndOp = operation(LISTENER_END_OPERATION, (context, request
     }
     const updated = context.db.prepare("UPDATE listeners SET state = 'ended', terminal_reason = ?, updated_at = ?, ended_at = ? WHERE id = ? AND state IN ('parked', 'attached', 'waking')").run(request.terminal_reason, now, now, listener.id);
     if (updated.changes !== 1) conflict('listener is no longer endable');
+    const missed = context.db.prepare(
+      "SELECT target_delivery_id FROM listener_presentations WHERE listener_id = ? AND listener_generation = ? AND state = 'pending' AND admitted_at IS NULL ORDER BY created_at ASC, id ASC",
+    ).all(listener.id, listener.listener_generation);
     context.db.prepare(
       "UPDATE listener_presentations SET state = 'missed', missed_at = ?, fallback_reason = ?, updated_at = ? WHERE listener_id = ? AND listener_generation = ? AND state = 'pending' AND admitted_at IS NULL",
     ).run(now, request.terminal_reason, now, listener.id, listener.listener_generation);
+    for (const presentation of missed) publishMissedPresentation(context.db, { stateRoot: context.stateRoot, logger: context.logger, listener, deliveryId: presentation.target_delivery_id });
     if (Date.parse(listener.park_deadline_at) <= Date.parse(now)) {
       context.db.prepare("UPDATE reply_waits SET state = 'expired', terminal_reason = 'park_deadline', updated_at = ?, closed_at = ? WHERE id = ? AND state IN ('pending_delivery', 'eligible')").run(now, now, listener.reply_wait_id);
     }

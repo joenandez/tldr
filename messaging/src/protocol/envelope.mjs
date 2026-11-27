@@ -46,6 +46,7 @@ export const MESSAGING_RECEIPT_V1 = 'messaging.receipt.v1';
 export const SESSION_HOSTS_V1 = 'session_hosts.v1';
 // host.message.lookup: a host reads its sessions' messages by id, read-only.
 export const SESSION_HOSTS_MESSAGE_LOOKUP_V1 = 'session_hosts.message_lookup.v1';
+export const SESSION_HOSTS_MESSAGE_LOOKUP_SESSIONS_V1 = 'session_hosts.message_lookup.sessions.v1';
 export const RESUME_ASSERT_ACTIVE_V1 = 'resume.assert-active.v1';
 // The daemon captures a package-bound Copilot owner with its Academy permission
 // mode and wakes an exited owner only by exact managed resume under that mode.
@@ -53,6 +54,10 @@ export const RESUME_COPILOT_WAKE_V1 = 'resume.copilot-wake.v1';
 // delivery.claim's message projection carries top-level sender_cwd (the sending
 // endpoint's session folder) when the sender endpoint has one.
 export const MESSAGING_SENDER_CWD = 'messaging.sender-cwd';
+// `agent status|cancel --work <id> --operator` answer outside a session (Academy drive status).
+export const MESSAGING_OPERATOR_V1 = 'messaging.operator.v1';
+// `agent request --action-id <text>` keys idempotency on (app, requester namespace, action id).
+export const MESSAGING_REQUEST_ACTION_ID_V1 = 'messaging.request-action-id.v1';
 
 // Stable names for the narrow operations introduced by those capabilities.
 // Keeping them at the protocol boundary prevents adapters from rebuilding
@@ -82,9 +87,12 @@ export const BASELINE_CAPABILITIES = Object.freeze([
   MESSAGING_RECEIPT_V1,
   SESSION_HOSTS_V1,
   SESSION_HOSTS_MESSAGE_LOOKUP_V1,
+  SESSION_HOSTS_MESSAGE_LOOKUP_SESSIONS_V1,
   RESUME_ASSERT_ACTIVE_V1,
   RESUME_COPILOT_WAKE_V1,
   MESSAGING_SENDER_CWD,
+  MESSAGING_OPERATOR_V1,
+  MESSAGING_REQUEST_ACTION_ID_V1,
 ]);
 
 export class TightbeamError extends Error {

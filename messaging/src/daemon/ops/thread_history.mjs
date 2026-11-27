@@ -8,15 +8,16 @@
 // application is `thread_not_found`; a thread the caller is not in is
 // `not_a_participant`. Neither refusal carries a subject, body, or count.
 //
-// Read-only: it never writes a row, never touches read_at, delivery state, or
-// work state.
+// Read-only: it never writes a row, never touches read_at, delivery state, or work state.
 
+import { skippedDeliverySql } from './claims_shared.mjs';
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { ID_PREFIXES } from '../../protocol/ids.mjs';
 import { ROUTE_ADMITTED_ROLE } from './authority_scope.mjs';
 import { chainNodes, sessionHandles } from './lifecycle_view.mjs';
 import { replacementDeliveryFor } from './message_shared.mjs';
 import { returnedWorkNotice, returnedWorkRouteReasons } from './notification_context.mjs';
+import { holderNoteVisibleSql } from './reserved_notice.mjs';
 import { participantsFor, participationLinks, predecessorEndpointIds, threadSummary, validatedEndpoint } from './thread_list.mjs';
 
 const FIELDS = new Set(['principal_id', 'endpoint_id', 'process_generation', 'thread', 'limit', 'since', 'header_only']);
@@ -129,7 +130,7 @@ function sessionReader(db, appId, callerEndpointId) {
 }
 
 function deliveryStep(row) {
-  if (row.state === 'failed') return 'failed';
+  if (row.state === 'failed') return row.skipped ? 'skipped' : 'failed'; // skipped: another channel delivered it (ac-jfv.55)
   if (row.state === 'expired') return 'timed_out';
   if (row.acknowledged_at) return 'acknowledged';
   if (row.read_at) return 'received';
@@ -147,7 +148,7 @@ function declarationOf(effectPayload) {
 function recipientsOf(db, messageId, session) {
   const rows = db
     .prepare(
-      `SELECT d.endpoint_id, d.channel_route_id, d.state, d.read_at, d.acknowledged_at, cr.label
+      `SELECT d.endpoint_id, d.channel_route_id, d.state, d.read_at, d.acknowledged_at, cr.label, ${skippedDeliverySql('d')} AS skipped
          FROM deliveries d LEFT JOIN channel_routes cr ON cr.id = d.channel_route_id
         WHERE d.message_id = ?
         ORDER BY d.created_at ASC, d.rowid ASC`,
@@ -182,7 +183,7 @@ function unreadMessageIds(db, conversationId, endpointIds) {
 
 // Message items without their body, recipients, or unread tag: those are
 // hydrated only for the page that is returned (hydrateMessages).
-function messageItems(db, conversationId, { session }) {
+function messageItems(db, conversationId, { session, endpointIds }) {
   const rows = db
     .prepare(
       `SELECT m.id, m.created_at, m.sender_principal_id, m.origin_channel_route_id, m.in_reply_to_message_id,
@@ -190,10 +191,10 @@ function messageItems(db, conversationId, { session }) {
          FROM messages m
          LEFT JOIN message_effects me ON me.message_id = m.id
          LEFT JOIN channel_routes cr ON cr.id = m.origin_channel_route_id
-        WHERE m.conversation_id = ?
+        WHERE m.conversation_id = ? AND ${holderNoteVisibleSql('m', endpointIds)}
         ORDER BY m.created_at ASC, m.rowid ASC`,
     )
-    .all(conversationId);
+    .all(conversationId, ...endpointIds);
   return rows.flatMap((row) => {
     const declaration = declarationOf(row.effect_payload);
     const sender = row.origin_channel_route_id
@@ -260,16 +261,16 @@ function hydrateMessages(db, items, { conversationId, session, caller }) {
 
 // How many items a full read would return, counted without reading any of
 // them: one per message, one per effect event, one per replacement.
-function itemCount(db, conversationId, replacements) {
+function itemCount(db, conversationId, { replacements, endpointIds }) {
   const events = Object.keys(EFFECT_EVENTS);
   const counted = db
     .prepare(
       `SELECT COUNT(*) AS messages,
               COUNT(CASE WHEN me.effect IN (${events.map(() => '?').join(', ')}) THEN 1 END) AS events
          FROM messages m LEFT JOIN message_effects me ON me.message_id = m.id
-        WHERE m.conversation_id = ?`,
+        WHERE m.conversation_id = ? AND ${holderNoteVisibleSql('m', endpointIds)}`,
     )
-    .get(...events, conversationId);
+    .get(...events, conversationId, ...endpointIds);
   return counted.messages + counted.events + replacements.length;
 }
 
@@ -296,8 +297,7 @@ function ordered(messages, replacements) {
 }
 
 function page(items, { since, limit }) {
-  const recent = since === null ? items : items.filter((item) => item.at >= since);
-  const shown = recent.slice(-limit);
+  const shown = (since === null ? items : items.filter((item) => item.at >= since)).slice(-limit);
   return { items: shown, hidden_count: items.length - shown.length };
 }
 
@@ -411,8 +411,8 @@ function readHistory(context, connection, request) {
   const sessionIds = thread.participants.filter((p) => p.kind === 'session').map((p) => p.endpoint_id);
   const replacements = replacementEvents(db, appId, sessionIds, session);
   // A follow-up needs only the header: no item is read, all are hidden.
-  if (request.headerOnly) return { thread, items: [], hidden_count: itemCount(db, conversationId, replacements) };
-  const paged = page(ordered(messageItems(db, conversationId, { session }), replacements), request);
+  if (request.headerOnly) return { thread, items: [], hidden_count: itemCount(db, conversationId, { replacements, endpointIds: caller.endpointIds }) };
+  const paged = page(ordered(messageItems(db, conversationId, { session, endpointIds: caller.endpointIds }), replacements), request);
   return { thread, items: hydrateMessages(db, paged.items, { conversationId, session, caller }), hidden_count: paged.hidden_count };
 }
 

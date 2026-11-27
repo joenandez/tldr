@@ -1248,8 +1248,9 @@ async function runDirectAgentCommandWithFallback({
   logPaths,
   sessionRequired = true,
   wrapper = null,
+  jobFallbackPolicy = null,
 }) {
-  const defaults = readAgentDefaults();
+  const defaults = readAgentDefaults(undefined, jobFallbackPolicy);
   const fallbackAgent = fallbackFor(agent, defaults);
   const captureArgs = ensureSessionCaptureArgs(agent, args, wrapper);
   const prompt = extractAgentPrompt({ agent, args: captureArgs, stdinText });
@@ -1684,7 +1685,7 @@ export async function executeJob(job, opts) {
   const timeoutSec = hints.timeout_sec;
 
   if (adapter) {
-    const defaults = readAgentDefaults();
+    const defaults = readAgentDefaults(undefined, job.fallback_policy);
     const rawPrompt = resolvePrompt(job, scope);
     const reportCmd = process.env.HELM_REPORT_CMD || DEFAULT_REPORT_CMD;
     const cwd = job.process?.cwd || scope.cwd;
@@ -1896,6 +1897,7 @@ export async function executeJob(job, opts) {
       memoryMode,
       onSpawn: opts.onSpawn,
       logPaths: opts.logPaths,
+      jobFallbackPolicy: job.fallback_policy,
     };
     const managedProcess = managedAgentProcessDescriptor({
       command: job.process.command,
@@ -1961,5 +1963,6 @@ export async function executeJob(job, opts) {
     onSpawn: opts.onSpawn,
     logPaths: opts.logPaths,
     sessionRequired: hints.session_required,
+    jobFallbackPolicy: job.fallback_policy,
   });
 }

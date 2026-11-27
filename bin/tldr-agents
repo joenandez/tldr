@@ -92,7 +92,7 @@ usage	messaging	agent send	agent send --thread <handle> (--body <text> | --body-
 verb	messaging	agent wait	component	Wait for an expected reply without reading its content.
 usage	messaging	agent wait	agent wait [--timeout <duration>] [--json]
 verb	messaging	agent request	component	Open tracked work with another agent or yourself.
-usage	messaging	agent request	agent request --to self|session:<id>|agent:<runtime>:<cwd>|new:<runtime>:<cwd> --subject <text> --reason <text> (--body <text> | --body-file <path>) --completion-mode <message_committed|delivery_confirmed> [--notify user] [--channel <selector>]
+usage	messaging	agent request	agent request --to self|session:<id>|agent:<runtime>:<cwd>|new:<runtime>:<cwd> --subject <text> --reason <text> (--body <text> | --body-file <path>) --completion-mode <message_committed|delivery_confirmed> [--notify user] [--channel <selector>] [--action-id <text>]
 verb	messaging	agent reply	component	Reply to a received message, including a user message.
 usage	messaging	agent reply	agent reply --message <message_id> (--body <text> | --body-file <path>) [--channel <selector>] [--no-reply] [--wait-delivery <duration>]
 verb	messaging	agent receive	component	Receive the exact body of one notified message.
@@ -113,11 +113,13 @@ usage	messaging	agent decline	agent decline --work <delegation_id> (--body <text
 verb	messaging	agent complete	component	Finish tracked work with its result.
 usage	messaging	agent complete	agent complete --work <work_id> (--body <text> | --body-file <path>) [--notify user] [--wait-delivery <duration>]
 verb	messaging	agent cancel	component	Cancel work you requested or hold; downstream holders are told.
-usage	messaging	agent cancel	agent cancel --work <work_id> --reason <text>
+usage	messaging	agent cancel	agent cancel --work <work_id> --reason <text> [--timeout <ms>]
+usage	messaging	agent cancel	agent cancel --work <work_id> --reason <text> --operator [--timeout <ms>]
 verb	messaging	agent inbox	component	List received messages.
 usage	messaging	agent inbox	agent inbox [--unread]
 verb	messaging	agent status	component	Show work state, holder, who it waits on, and delivery step, or outbound delivery status.
-usage	messaging	agent status	agent status (--work <work_id>|--message <message_id>) [--wait-delivery <duration>]
+usage	messaging	agent status	agent status (--work <work_id>|--message <message_id>) [--wait-delivery <duration>] [--timeout <ms>]
+usage	messaging	agent status	agent status --work <work_id> --operator [--timeout <ms>]
 verb	messaging	agent sessions	component	List live or resumable agent sessions, this folder first.
 usage	messaging	agent sessions	agent sessions [--here | --cwd <path>] [--runtime <runtime>] [--state <busy|idle|stopped|ended|unknown>] [--all]
 verb	messaging	agent threads	component	List the threads you started or take part in, and who each is waiting on.
@@ -130,6 +132,8 @@ verb	messaging	recovery switch	component	Switch work to an explicitly selected e
 usage	messaging	recovery switch	recovery switch --root <obligation_id> --generation <n> --target-endpoint <id> --target-process-generation <n> --key <k>
 verb	messaging	recovery mirror-replies	component	Admin: mirror past inbound replies to the Subspace routes that hold the thread; safe to re-run.
 usage	messaging	recovery mirror-replies	recovery mirror-replies [--dry-run]
+verb	messaging	recovery rewake	component	Admin: re-fire wakes a provider usage limit ended and release wakes held for one; safe to re-run.
+usage	messaging	recovery rewake	recovery rewake [--dry-run] [--since <iso>] [--until <iso>]
 verb	messaging	doctor	registry	Check setup and connection; every failure names its own fix.
 usage	messaging	doctor	doctor
 verb	messaging	logs	registry	Print the end of the Tightbeam daemon log.

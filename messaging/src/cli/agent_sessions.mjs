@@ -44,7 +44,7 @@ const BUSY_ACTIVITIES = new Set(['working', 'waiting_on_message']);
  * a waiting activity. An older daemon omits the `owner_*` activity and
  * observation fields: exited reads false, everything else null.
  */
-function ownerFacts(endpoint, state) {
+export function ownerFacts(endpoint, state) {
   if ((endpoint.owner_process_pid ?? null) === null) return { owner_alive: null, activity: null, waiting_since: null };
   const ownerAlive = endpoint.owner_process_exited_at ? false : endpoint.owner_observed_alive === true ? true : null;
   const reported = endpoint.owner_activity ?? null;

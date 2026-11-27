@@ -12,14 +12,18 @@
 // A session is HOSTED when that lock file exists and a live process holds it
 // open. The lock file alone is not evidence (an app-server killed hard
 // leaves it behind), and an unanswerable probe is unknown, never permission.
-// The probe itself (lsof) lives in retirement_executor.mjs with the daemon's
-// other fixed process probes; it is injected here so every answer is testable.
+// The probe itself (lsof, async) lives in process_table.mjs with the daemon's
+// other process probes; the synchronous observer the deciders call reads a
+// per-lock-path cache of it (`cachedHolderObserver`, holder_cache.mjs) and
+// never waits on lsof.
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { observeFileHolders as defaultObserveFileHolders } from './retirement_executor.mjs';
+import { cachedHolderObserver } from './holder_cache.mjs';
+
+export { cachedHolderObserver };
 
 // What a provider session id may look like on its way into a file name: a
 // plain token, no separators, no leading dot or dash.
@@ -42,31 +46,69 @@ export function threadWriterLockPath(codexHome, sessionId) {
   return path.join(codexHome, 'thread-writer-locks', `${sessionId}.lock`);
 }
 
+export const HOLDER_PROBE_PENDING = 'holder_probe_pending';
+// Takeover's final check: the lock read unheld once, and a second, later probe has not confirmed it yet.
+export const HOLDER_RECHECK_PENDING = 'holder_recheck_pending';
+
+/** True for the host answer that means "no probe answer yet" (never "unanswered"). */
+export const isHostProbePending = (host) => host?.hosted === null && host.reason === HOLDER_PROBE_PENDING;
+
+
+let shared = null;
+const sharedHolders = () => (shared ??= cachedHolderObserver());
+
 /**
  * Whether a live process hosts this Codex thread.
  *   hosted true   the lock file exists and `holder_pids` hold it open
  *   hosted false  no lock file, or one nobody holds (stale)
  *   hosted null   unknown: unsafe session id, or the holder probe could not answer
- * `observeFileHolders` is a parameter so tests drive every answer.
+ *                 (reason `holder_probe_unavailable`), or has not answered yet
+ *                 (reason `holder_probe_pending`: a probe is running; not a failure)
+ * `observeFileHolders` is a synchronous parameter so tests drive every answer.
+ * `confirm` is takeover's final check: an unheld lock counts as `hosted: false`
+ * only when the holder cache confirmed it with two distinct probes; until then
+ * the answer is `hosted: null`, reason `holder_recheck_pending`.
  */
-export function observeCodexThreadHost({ sessionId, env = process.env, home = os.homedir(), observeFileHolders = defaultObserveFileHolders } = {}) {
+export function observeCodexThreadHost({ sessionId, env = process.env, home = os.homedir(), observeFileHolders = sharedHolders(), confirm = false } = {}) {
   const lockPath = threadWriterLockPath(resolveCodexHome(env, home), sessionId);
   if (lockPath === null) return { hosted: null, reason: 'unsafe_session_id', lock_path: null };
   if (!fs.existsSync(lockPath)) return { hosted: false, reason: 'no_lock_file', lock_path: lockPath };
   let observed;
   try {
-    observed = observeFileHolders(lockPath);
+    observed = observeFileHolders(lockPath, { confirm });
   } catch (error) {
     return { hosted: null, reason: 'holder_probe_unavailable', lock_path: lockPath, error: error.message };
   }
+  if (observed?.pending) return { hosted: null, reason: HOLDER_PROBE_PENDING, lock_path: lockPath };
   if (!observed || observed.unavailable || !Array.isArray(observed.pids)) return { hosted: null, reason: 'holder_probe_unavailable', lock_path: lockPath };
-  if (observed.pids.length === 0) return { hosted: false, reason: 'lock_unheld', lock_path: lockPath };
+  if (observed.pids.length === 0) {
+    if (confirm && observed.confirmed !== true) return { hosted: null, reason: HOLDER_RECHECK_PENDING, lock_path: lockPath };
+    return { hosted: false, reason: 'lock_unheld', lock_path: lockPath };
+  }
   return { hosted: true, reason: 'lock_held_by_live_process', lock_path: lockPath, holder_pids: observed.pids };
+}
+
+const observersByContext = new WeakMap();
+const wakersByContext = new WeakMap();
+
+/** Run `wake` whenever a holder probe of this context lands (the listener pass, the resumer tick); returns its remover. */
+export function onHostProbeLanded(context, wake) {
+  if (!wakersByContext.has(context)) wakersByContext.set(context, new Set());
+  wakersByContext.get(context).add(wake);
+  return () => wakersByContext.get(context).delete(wake);
+}
+
+/** Run this context's holder readers now (the observer calls this once per coalesced landing burst). */
+export function wakeHostProbeReaders(context) {
+  for (const wake of [...(wakersByContext.get(context) ?? [])]) wake();
 }
 
 /** The daemon's default host observer: this context's environment decides which Codex home is asked. */
 export function threadHostObserverFor(context) {
-  return ({ sessionId }) => observeCodexThreadHost({ sessionId, env: context?.env ?? process.env });
+  // One cache per daemon context: this is called every tick as a default argument.
+  if (context && !observersByContext.has(context)) observersByContext.set(context, cachedHolderObserver({ wakeReaders: () => wakeHostProbeReaders(context) }));
+  const observeFileHolders = context ? observersByContext.get(context) : sharedHolders();
+  return ({ sessionId, confirm = false }) => observeCodexThreadHost({ sessionId, env: context?.env ?? process.env, observeFileHolders, confirm });
 }
 
 // Codex's words when `codex queue` finds no app-server session for the thread

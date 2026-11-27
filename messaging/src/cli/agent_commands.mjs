@@ -9,20 +9,25 @@ import { TextDecoder } from 'node:util';
 
 import { confirmationWarning, formatAddress, parseAgentAddress, resolveAgentAddress, routedRecipient } from './agent_address.mjs';
 import { sendFollowUp } from './agent_follow_up.mjs';
-import { ackPending, allRoutesWithOrigin, replyOnWork, requireSlackAdded } from './agent_reply_flow.mjs';
+import { ackPending, allRoutesWithOrigin, isRequester, replyOnWork, requesterReplies, requireSlackAdded } from './agent_reply_flow.mjs';
 import { delegateAt, parseWakeAt } from './agent_delegate_at.mjs';
 import { deriveSessionState, ENDPOINT_DEAD_NEXT, listAgentSessions, refreshableRefusal, refreshAndRetry, SESSION_LIST_LIMIT, SESSION_STATES, sessionHandleLookup, sessionHandlesFor } from './agent_sessions.mjs';
 import { launchFailureNotice, listAgentThreads, readAgentThread } from './agent_threads.mjs';
 import { settleNewAgent } from './new_agent.mjs';
 import { runTransfer } from './agent_transfer.mjs';
+import { closedWorkError, workClosedError } from './agent_work_closed.mjs';
 import { resolveAgentIdentity } from './hook_identity.mjs';
 import { mutateActionStore } from './agent_action_store.mjs';
 import { LEGACY_RUNTIME_ALIASES as BUILTIN_RUNTIME_ALIASES } from '../runtimes/builtins.mjs';
 import { localTightbeamAction, offerActionCommands, tightbeamCommandHint, tightbeamRecipeCommand, workActionCommands } from './package_context.mjs';
-import { sessionPaths } from '../protocol/session_paths.mjs';
+import { markMessagingUsed, sessionPaths } from '../protocol/session_paths.mjs';
 import { deliveryStepFor } from '../protocol/delivery_step.mjs';
 import { routeOpenTo, slackChannelAdded } from '../protocol/session_env.mjs';
 import { parseWaitTimeout, readActionStore, waitForAgent } from './agent_wait.mjs';
+import { ackGateReceivedBefore, recordAckGateAfter, recordAckGateClosed, recordAckGateReplied } from './agent_wait_notice.mjs';
+import { parseOperatorFlags } from './agent_operator_parse.mjs';
+import { channelSelection, commitAddress, lookupReplay, replayedRequest, requestShape } from './agent_action_replay.mjs';
+import { channelDeliveriesOf, channelStates, deliveryOutcome, skippedNote, TERMINAL_CHANNEL_STATES } from './channel_outcome.mjs';
 
 export class AgentCommandError extends Error {
   constructor(code, message, { details, next_action: nextAction } = {}) {
@@ -34,7 +39,8 @@ export class AgentCommandError extends Error {
 }
 
 const RAW_FLAGS = new Set(['from', 'sender-endpoint', 'process-generation', 'key', 'conversation', 'target-principal', 'target-endpoint', 'obligation', 'generation', 'idempotency-key']);
-const COMMANDS = new Set(['send', 'request', 'reply', 'ack', 'update', 'delegate', 'transfer', 'accept', 'decline', 'complete', 'cancel', 'inbox', 'receive', 'status', 'sessions', 'threads', 'thread', 'wait']);
+const MESSAGING_COMMANDS = new Set(['send', 'request', 'reply', 'delegate']);
+export const COMMANDS = new Set(['send', 'request', 'reply', 'ack', 'update', 'delegate', 'transfer', 'accept', 'decline', 'complete', 'cancel', 'inbox', 'receive', 'status', 'sessions', 'threads', 'thread', 'wait']);
 
 /** The help that explains a usage error: the verb's own when it is a known agent verb. */
 function agentHelpCommand(verb) {
@@ -125,7 +131,7 @@ export function commitKey(command, commandArgs, stage) {
 }
 
 function invocationFingerprint(commandArgs) {
-  const { actionId: _actionId, waitDeliveryMs: _waitDeliveryMs, ...invocation } = commandArgs;
+  const { actionId: _actionId, explicitActionId: _explicitActionId, explicitTo: _explicitTo, waitDeliveryMs: _waitDeliveryMs, deadlineMs: _deadlineMs, ackGateReceived: _ackGateReceived, ...invocation } = commandArgs;
   return createHash('sha256').update(JSON.stringify(invocation)).digest('hex');
 }
 
@@ -177,12 +183,14 @@ function parseAgentArguments(argv, { actionId: suppliedActionId } = {}) {
     if (parsed.awaitReply !== undefined) usage('--await-reply is now the default; omit it or use --no-reply');
     validateChannelSelection(parsed.channels);
   } else if (command === 'request') {
-    parsed.to = recipient(required(args, 'to'), { self: true });
+    parsed.to = recipient(parsed.explicitTo = required(args, 'to'), { self: true }); // explicitTo: as typed, what an action-id replay compares
     if (parsed.to.kind === 'user') usage(`--to must be self, ${AGENT_ADDRESSES}`);
     parsed.subject = requiredNonblank(args, 'subject');
     parsed.reason = requiredNonblank(args, 'reason');
     parsed.body = resolveBodyInput(args);
     parsed.completionMode = required(args, 'completion-mode');
+    const explicitActionId = takeFlag(args, 'action-id'); // the same key the runtime's action-id file feeds; it wins over the file
+    if (explicitActionId !== undefined) parsed.actionId = parsed.explicitActionId = explicitActionId.trim() || usage('--action-id must not be blank');
     parsed.notify = takeFlag(args, 'notify');
     parsed.channels = takeMany(args, 'channel');
     if (parsed.notify !== undefined && parsed.notify !== 'user') usage('--notify only accepts user');
@@ -264,6 +272,7 @@ function parseAgentArguments(argv, { actionId: suppliedActionId } = {}) {
       if (parsed.waitDeliveryMs < 1 || parsed.waitDeliveryMs > 60_000) usage('--wait-delivery must be between 1ms and 60s');
     }
   }
+  if (command === 'status' || command === 'cancel') parseOperatorFlags(args, parsed, usage);
   if (args.length > 0) usage(`unknown agent argument: ${args.join(' ')}`);
   return parsed;
 }
@@ -349,7 +358,7 @@ export function loadAgentSession(stateRoot, { env = process.env, registry, paren
   } catch (error) {
     if (error?.code !== 'ENOENT') throw new AgentCommandError('action_identity_unavailable', 'the current runtime action identity is unreadable; refusing to risk a duplicate send');
   }
-  return { ...cached, runtime_action_id: runtimeActionId, agent_action_store_path: `${paths.dir}/agent-actions.json` };
+  return { ...cached, runtime_action_id: runtimeActionId, agent_action_store_path: `${paths.dir}/agent-actions.json`, session_paths: paths, ack_gate_paths: paths };
 }
 
 // A `new:` placeholder is remembered in this command's action envelope, so a
@@ -497,7 +506,7 @@ function withResolvedRecipient(response, target, confirmationText, result) {
 export async function readChannelDeliveries(client, messageId) {
   try {
     const deliveries = await client.request('message.delivery.list', { message_id: messageId });
-    const channelDeliveries = deliveries.channel_deliveries ?? [];
+    const channelDeliveries = channelDeliveriesOf(deliveries);
     return { outcome: deliveryOutcome(channelDeliveries), channel_deliveries: channelDeliveries };
   } catch (error) {
     debugLog({ event: 'agent_delivery.read', params: { message_id: messageId }, result: { code: error?.code ?? 'error', message: error?.message }, status: 'degraded' });
@@ -528,21 +537,13 @@ export function correspondenceResult(result, { subject, noReply, workId = null, 
   return response;
 }
 
-function deliveryOutcome(deliveries) {
-  const states = new Set(deliveries.map((delivery) => delivery.state));
-  if (states.size < 2) return states.size === 0 ? 'committed' : states.has('delivered') ? 'delivered' : [...states][0];
-  // Partial needs a delivered channel beside an undelivered one; with none delivered it is failed or still pending.
-  if (!states.has('delivered')) return [...states].every((state) => ['failed', 'cancelled'].includes(state)) ? 'failed' : 'pending';
-  return 'partial';
-}
-
 function unreadAdmissionError(error) {
   if (error?.code !== 'blocked_unread') return null;
   const subject = typeof error.details?.subject === 'string' && error.details.subject.length > 0 ? error.details.subject : 'this thread';
   const sender = typeof error.details?.sender_display_name === 'string' && error.details.sender_display_name.length > 0 ? error.details.sender_display_name : 'the sender';
-  const action = typeof error.details?.safe_action === 'string' && error.details.safe_action.length > 0 ? localTightbeamAction(error.details.safe_action) : `${tightbeamRecipeCommand()} agent inbox --unread`;
-  // The Next rides next_action (JSON and the text view's own Next line); the message does not repeat it.
-  return new AgentCommandError('blocked_unread', `Send paused · unread message on “${subject}” from ${sender}. Read it before replying.`, { next_action: action });
+  const id = typeof error.details?.oldest_unread_message_id === 'string' && error.details.oldest_unread_message_id.length > 0 ? error.details.oldest_unread_message_id : null; // R9: the blocker and its receive command
+  const action = id ? `${tightbeamRecipeCommand()} agent receive --message ${id}` : typeof error.details?.safe_action === 'string' && error.details.safe_action.length > 0 ? localTightbeamAction(error.details.safe_action) : `${tightbeamRecipeCommand()} agent inbox --unread`;
+  return new AgentCommandError('blocked_unread', id ? `Send paused · unread message ${id} on “${subject}” from ${sender}. Receive it before replying.` : `Send paused · unread message on “${subject}” from ${sender}. Read it before replying.`, { next_action: action }); // The Next rides next_action (JSON and the text view's Next line); the message does not repeat it.
 }
 
 function consumeInboundWarning(session, command) {
@@ -571,6 +572,8 @@ function selectCustodiedWork(chain, session, requestedWorkId) {
     ? [named]
     : nodes.filter((node) => node.status === 'open' && node.custodian_endpoint_id === session.endpoint_id);
   if (matches.length !== 1 || matches[0].status !== 'open' || matches[0].custodian_endpoint_id !== session.endpoint_id) {
+    const closed = closedWorkError(chain, session, requestedWorkId); // closed work is not lost custody (ac-2ih35)
+    if (closed) throw closed;
     // lifecycle.view does not grant an adapter the missing action intent:
     // retry refuses a healthy owner while switch deliberately displaces one.
     // Choosing between them on behalf of an agent would invent recovery
@@ -602,15 +605,9 @@ function selectCustodiedWork(chain, session, requestedWorkId) {
 // here, before any write, so they are zero-write by construction.
 async function authorizeRequesterOrHolderCancel(client, chain, session) {
   const thread = shortThreadId(chain.conversation_id);
-  if (chain.resolution) {
-    const label = chain.resolution.resolution === 'cancelled' ? 'cancelled' : 'done';
-    throw new AgentCommandError('work_closed', `Work on ${thread} is ${label}.`, {
-      details: { root_id: chain.root_obligation_id, resolution: chain.resolution.resolution ?? null },
-      next_action: `${tightbeamRecipeCommand()} agent thread --thread ${thread}`,
-    });
-  }
+  if (chain.resolution) throw workClosedError(chain);
   const requester = chain.requester;
-  if (requester && (requester.endpoint_id === session.endpoint_id || (requester.replacement_endpoint_ids ?? []).includes(session.endpoint_id))) return;
+  if (isRequester(chain, session)) return;
   const holdsOpenAttempt = (chain.attempts ?? []).some((node) => node.status === 'open' && node.custodian_endpoint_id === session.endpoint_id);
   if (holdsOpenAttempt) return;
   const handleFor = requester?.session_id ? await sessionHandlesFor(client, [requester.session_id]) : null;
@@ -781,9 +778,7 @@ export async function workChain(client, workId) {
 
 export async function runWorkCommand(client, session, command, chain, operation = command.command) {
   const node = operation === 'cancel' ? await authorizeRequesterOrHolderCancel(client, chain, session) : selectCustodiedWork(chain, session, command.workId);
-  const terminalOriginMessageId = (operation === 'complete' || operation === 'cancel' || command.command === 'reply' || command.wakeAt || node.role === 'attempt' /* a delegate's update keeps the participant path */) && typeof chain.user_origin_message_id === 'string'
-    ? chain.user_origin_message_id
-    : null;
+  const terminalOriginMessageId = (operation === 'complete' || operation === 'cancel' || command.command === 'reply' || command.wakeAt || node.role === 'attempt' /* a delegate's update keeps the participant path */) && typeof chain.user_origin_message_id === 'string' ? chain.user_origin_message_id : null;
   // The requester chose these selectors at open time; this completer's own Slack opt-in still decides.
   const storedChannels = operation === 'complete' ? chain.notification?.channel_selectors?.filter((selector) => selector !== 'slack' || slackChannelAdded(process.env.ACADEMY_AGENT_NAME)) : null;
   const notificationChannels = storedChannels?.length ? storedChannels : terminalOriginMessageId ? await allRoutesWithOrigin(client, session, terminalOriginMessageId) : null;
@@ -899,25 +894,26 @@ async function runAgentCommandOnce(client, session, command) {
     return withResolvedRecipient(sent, target, await exactConfirmation(client, 'Sent', target.resolved, { subject: command.subject, conversationId: result.conversation_id, tail: [sent.reply_policy] }), result);
   }
   if (command.command === 'request') {
-    const notificationChannels = command.notify === 'user' ? await selectedOutboundChannels(client, command.channels) : null;
+    const shape = requestShape(command, await channelSelection(command, () => selectedOutboundChannels(client, command.channels)));
+    const replayed = await lookupReplay({ client, session }, command, shape);
+    if (replayed.replay) return replayedRequest(replayed);
     const target = await resolveAgent(client, session, command.to, { verb: 'request', command });
-    const conversation = await conversationFor(client, session, target.principal_id, command);
     const result = await client.request('message.commit', {
       sender_principal_id: session.principal_id,
-      conversation_id: conversation.conversation_id,
+      ...(await commitAddress(command, target, () => conversationFor(client, session, target.principal_id, command))),
       body: command.body,
       idempotency_key: commitKey('request', command, 'open'),
-      ...(notificationChannels ? { metadata: { tightbeam_agent: { notification_channels: notificationChannels } } } : {}),
+      ...(shape.metadata ? { metadata: shape.metadata } : {}),
       obligation_effect: {
         type: 'open',
         target_principal_id: target.principal_id,
         target_endpoint_id: target.endpoint_id,
-        completion_mode: notificationChannels ? 'delivery_confirmed' : command.completionMode,
+        completion_mode: shape.completionMode,
         sender_endpoint_id: session.endpoint_id,
         process_generation: session.process_generation,
       },
     });
-    const opened = { ...intentResult(result), work_id: result.root_id, thread_id: result.conversation_id };
+    const opened = result.idempotent_replay ? replayedRequest(result) : { ...intentResult(result), work_id: result.root_id, thread_id: result.conversation_id };
     if (!target.resolved) return opened;
     target.resolved = await settledRecipient(client, target, result);
     return withResolvedRecipient(opened, target, await exactConfirmation(client, 'Sent', target.resolved, { subject: command.subject, conversationId: result.conversation_id, tail: ['reply required'] }), result);
@@ -943,8 +939,8 @@ async function runAgentCommandOnce(client, session, command) {
       if (chain.conversation_id !== message.conversation_id) {
         throw workNotFound('the message work does not belong to its canonical conversation');
       }
-      const attempt = selectCustodiedWork(chain, session, message.root_obligation_id);
-      effect = { type: 'update', obligation_id: attempt.obligation_id, generation: attempt.generation, sender_endpoint_id: session.endpoint_id, process_generation: session.process_generation };
+      const attempt = requesterReplies(chain, session) ? null : selectCustodiedWork(chain, session, message.root_obligation_id);
+      effect = attempt ? { type: 'update', obligation_id: attempt.obligation_id, generation: attempt.generation, sender_endpoint_id: session.endpoint_id, process_generation: session.process_generation } : baseNone(session);
       workId = chain.root_obligation_id;
     } else {
       throw new AgentCommandError('reply_policy_unavailable', 'this agent reply has no canonical open work; use --no-reply only when an explicit informational reply is intended');
@@ -957,7 +953,7 @@ async function runAgentCommandOnce(client, session, command) {
       idempotency_key: commitKey('reply', command, 'message'),
       channel_selectors: selectors,
       ...(awaitReply ? { await_reply: true } : {}),
-      obligation_effect: effect,
+      obligation_effect: effect, ...(effect.type === 'none' && workId ? { metadata: { reply_expected: true } } : {}), // only a requester's reply-required reply (ac-jfv.158)
     });
     if (selectors.length > 0) {
       if (command.waitDeliveryMs) return correspondenceResult(result, { subject: message.conversation_subject ?? null, noReply: command.noReply, workId });
@@ -997,6 +993,8 @@ async function runAgentCommandOnce(client, session, command) {
   }
   if (command.command === 'ack') {
     const chain = await workChain(client, command.workId);
+    const closed = closedWorkError(chain, session, command.workId); // a finished node too (ac-2ih35)
+    if (closed) throw closed;
     if (
       chain.status === 'done'
       || typeof chain.ack_due_at !== 'string'
@@ -1024,6 +1022,7 @@ async function runAgentCommandOnce(client, session, command) {
         ...(command.wakeAt ? { wake_at: command.wakeAt } : {}),
       },
     });
+    recordAckGateReplied(session, [chain.ack_message_id], { conversationId: chain.conversation_id, received: command.ackGateReceived });
     return withDeliveryWarning({
       ...intentResult(result),
       work_id: chain.root_obligation_id,
@@ -1082,11 +1081,13 @@ async function runAgentCommandOnce(client, session, command) {
         sender_endpoint_id: session.endpoint_id, process_generation: session.process_generation,
       },
     });
-    return correspondenceResult(result, { subject: chain.subject ?? null, noReply: false, workId: chain.root_obligation_id, verb: command.command === 'accept' ? 'Accepted' : 'Declined' });
+    const reply = correspondenceResult(result, { subject: chain.subject ?? null, noReply: false, workId: chain.root_obligation_id, verb: command.command === 'accept' ? 'Accepted' : 'Declined' });
+    return command.command === 'decline' ? recordAckGateClosed(session, { chain, command, result: reply }) : reply;
   }
   if (command.command === 'update' || command.command === 'complete' || command.command === 'cancel') {
     const chain = await workChain(client, command.workId);
-    return command.command === 'update' && ackPending(chain) && selectCustodiedWork(chain, session, command.workId).role === 'attempt' ? runAgentCommandOnce(client, session, { ...command, command: 'ack' }) : runWorkCommand(client, session, command, chain);
+    const asAck = command.command === 'update' && ackPending(chain) && selectCustodiedWork(chain, session, command.workId).role === 'attempt';
+    return recordAckGateClosed(session, { chain, command, result: await (asAck ? runAgentCommandOnce(client, session, { ...command, command: 'ack' }) : runWorkCommand(client, session, command, chain)) });
   }
   if (command.command === 'inbox') {
     const result = await client.request('inbox.list', { principal_id: session.principal_id, endpoint_id: session.endpoint_id, unread_only: command.unread });
@@ -1107,7 +1108,7 @@ async function runAgentCommandOnce(client, session, command) {
         return { outcome: workFields.work_status, work_id: chain.root_obligation_id, ...workFields, staged_resolution: stagedResolution, notification: chain.notification ?? null };
       }
       const deliveries = await client.request('message.delivery.list', { message_id: messageId });
-      const channelDeliveries = deliveries.channel_deliveries ?? [];
+      const channelDeliveries = channelDeliveriesOf(deliveries);
       return {
         outcome: deliveryOutcome(channelDeliveries),
         work_id: chain.root_obligation_id,
@@ -1118,7 +1119,7 @@ async function runAgentCommandOnce(client, session, command) {
       };
     }
     const deliveries = await client.request('message.delivery.list', { message_id: command.messageId });
-    const channelDeliveries = deliveries.channel_deliveries ?? [];
+    const channelDeliveries = channelDeliveriesOf(deliveries);
     return { outcome: deliveryOutcome(channelDeliveries), message_id: command.messageId, channel_deliveries: channelDeliveries };
   }
   usage(`unknown agent command: ${command.command}`);
@@ -1131,7 +1132,9 @@ async function runAgentCommandOnce(client, session, command) {
  * logical commit. Other conflicts remain canonical daemon errors.
  */
 export async function runAgentCommand(client, session, command, { refreshSession } = {}) {
-  const boundCommand = bindAgentCommand(session, command);
+  // What was received before the first daemon request; a refresh retry keeps it (ack gate replied markers).
+  const boundCommand = { ...bindAgentCommand(session, command), ackGateReceived: ackGateReceivedBefore(session, command) };
+  if (session.session_paths && MESSAGING_COMMANDS.has(command.command)) markMessagingUsed(session.session_paths, { logger: debugLog });
   let result;
   try {
     result = await runAgentCommandOnce(client, session, boundCommand);
@@ -1148,6 +1151,7 @@ export async function runAgentCommand(client, session, command, { refreshSession
     if (command.command === 'wait' || !refreshSession || !refreshableRefusal(error)) throw error;
     result = await refreshAndRetry({ error, session, command: command.command, refreshSession, retry: (refreshed) => runAgentCommandOnce(client, refreshed, boundCommand) });
   }
+  recordAckGateAfter(session, { command: boundCommand, result });
   // Waiting only reads the committed outbound message. A timeout or read error
   // must never re-enter the send/complete retry path.
   if (command.waitDeliveryMs) result = await waitForDelivery(client, session, result, command.waitDeliveryMs);
@@ -1158,12 +1162,11 @@ export async function runAgentCommand(client, session, command, { refreshSession
 }
 
 const TERMINAL_WORK_STATUSES = new Set(['done', 'cancelled']);
-const channelStates = (deliveries) => deliveries?.map((delivery) => `${delivery.label ?? delivery.selector ?? 'channel'} ${delivery.state}`).join(', ');
 
 // Terminal work has nothing left to wait for: report how it ended, any verdict, and what to read next (an open partial's message, else the thread).
 function terminalWorkConfirmation(result, { delivered, failed, partial, openRoute }) {
   const thread = result.thread_id ? shortThreadId(result.thread_id) : null;
-  const [delivery, verdictGuidance = {}] = delivered ? ['Delivery confirmed'] : partial ? [`Delivery partial · ${channelStates(result.channel_deliveries)}`, { guidance: [result.guidance, 'Do not resend: the delivered channels already have this message.'].filter(Boolean).join(' ') }] : failed ? ['Delivery failed', { guidance: 'Report the delivery failure; do not resend automatically.' }] : [];
+  const [delivery, verdictGuidance = {}] = delivered ? [`Delivery confirmed${skippedNote(result.channel_deliveries)}`] : partial ? [`Delivery partial · ${channelStates(result.channel_deliveries)}`, { guidance: [result.guidance, 'Do not resend: the delivered channels already have this message.'].filter(Boolean).join(' ') }] : failed ? ['Delivery failed', { guidance: 'Report the delivery failure; do not resend automatically.' }] : [];
   const next = openRoute ? `agent status --message ${result.message_id} --wait-delivery 30s` : thread && `agent thread --thread ${thread}`;
   return {
     ...result,
@@ -1212,11 +1215,11 @@ function deliveryConfirmation(result, command) {
   if (command.command === 'send' && !command.waitDeliveryMs) return result;
   if ((!Array.isArray(result.channel_deliveries) && !command.waitDeliveryMs) || (!result.confirmation && !command.waitDeliveryMs)) return result;
   const delivered = result.outcome === 'delivered', hasBad = result.channel_deliveries?.some((delivery) => ['failed', 'cancelled'].includes(delivery.state));
-  const partial = hasBad && result.outcome === 'partial', unconfirmed = hasBad && !partial && result.outcome === 'pending', failed = hasBad && !partial && !unconfirmed, openRoute = result.outcome === 'partial' && result.channel_deliveries?.some((entry) => !['delivered', 'failed', 'cancelled'].includes(entry.state));
+  const partial = hasBad && result.outcome === 'partial', unconfirmed = hasBad && !partial && result.outcome === 'pending', failed = hasBad && !partial && !unconfirmed, openRoute = result.outcome === 'partial' && result.channel_deliveries?.some((entry) => !TERMINAL_CHANNEL_STATES.includes(entry.state));
   if (command.command === 'ack' && !partial) return result; // an ack keeps its own notice unless a channel failed beside a delivered one
   if (command.command === 'status' && command.workId && TERMINAL_WORK_STATUSES.has(result.work_status)) return terminalWorkConfirmation(result, { delivered, failed, partial, openRoute });
   const unavailable = result.delivery_check_error === 'permission_denied', noRoutes = result.channel_deliveries?.length === 0;
-  const label = delivered ? 'Delivery confirmed'
+  const label = delivered ? `Delivery confirmed${skippedNote(result.channel_deliveries)}`
     : failed ? 'Delivery failed'
     : unconfirmed ? `Delivery unconfirmed · ${channelStates(result.channel_deliveries)}`
     : unavailable ? 'Delivery status unavailable'
@@ -1272,7 +1275,7 @@ async function waitForDelivery(client, session, initial, timeoutMs) {
     if (!result.message_id) return { ...result, delivery_wait: 'unavailable' };
     for (;;) {
       const routes = result.channel_deliveries;
-      if (routes?.length && routes.every((delivery) => delivery.state === 'delivered')) {
+      if (routes?.some((delivery) => delivery.state === 'delivered') && routes.every((delivery) => ['delivered', 'skipped'].includes(delivery.state))) {
         result = { ...result, delivery_wait: 'delivered' };
         if (result.work_id) {
           const view = await read('lifecycle.view', { root_obligation_id: result.work_id });
@@ -1281,14 +1284,14 @@ async function waitForDelivery(client, session, initial, timeoutMs) {
         }
         return result;
       }
-      if (routes?.some((delivery) => ['failed', 'cancelled'].includes(delivery.state)) && routes.every((delivery) => ['delivered', 'failed', 'cancelled'].includes(delivery.state))) return { ...result, delivery_wait: result.outcome === 'partial' ? 'partial' : 'failed' };
+      if (routes?.some((delivery) => ['failed', 'cancelled'].includes(delivery.state)) && routes.every((delivery) => TERMINAL_CHANNEL_STATES.includes(delivery.state))) return { ...result, delivery_wait: result.outcome === 'partial' ? 'partial' : 'failed' };
       if (routes && routes.length === 0) return { ...result, delivery_wait: 'unavailable' };
       const remaining = deadline - performance.now();
       if (remaining <= 0) return { ...result, delivery_wait: 'timed_out' };
       if (routes) await new Promise((resolve) => setTimeout(resolve, Math.min(delayMs, remaining)));
       if (performance.now() >= deadline) return { ...result, delivery_wait: 'timed_out' };
       const deliveries = await read('message.delivery.list', { message_id: result.message_id });
-      result = { ...result, outcome: deliveryOutcome(deliveries.channel_deliveries ?? []), channel_deliveries: deliveries.channel_deliveries ?? [] };
+      result = { ...result, outcome: deliveryOutcome(channelDeliveriesOf(deliveries)), channel_deliveries: channelDeliveriesOf(deliveries) };
       delayMs = Math.min(delayMs * 2, 2000);
     }
   } catch (error) {

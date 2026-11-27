@@ -9,7 +9,10 @@ import { retryWakeInMs } from "./daemon_retry_wake.mjs";
 import { createWatermarkWakeLane } from "./daemon_urgent_wake.mjs";
 import { outboundLogger } from "./slack_outbound_diagnostics.mjs";
 import { createTightbeamSlackAdapter } from "./tightbeam_slack_adapter.mjs";
-import { TLDR_AGENT_SLACK_ANSWER } from "./tldr_agent_daemon_phase_timeouts.mjs";
+import {
+  TLDR_AGENT_SLACK_ANSWER,
+  tldrAgentSlackAnswerClaimWindowMs,
+} from "./tldr_agent_daemon_phase_timeouts.mjs";
 
 const LANE = "slack_answer";
 
@@ -21,7 +24,9 @@ export const answerBackoffPath = (home) =>
 // again while claims succeed (one adapter per delivery: its post deadline serves one claim).
 // A failed delivery does not end the claiming: an earlier failure never holds a newer reply
 // (P0-19). It ends at claim_held, a claim that holds no delivery (backoff, abort), a delivery
-// offered again within the tick, or the end of the phase. Logs each delivery, never an idle claim.
+// offered again within the tick, or the claim window (no claim begins after `claimWindowMs`: the
+// tick waits for each delivery, so its phase is sized from the window; tldrAgentSlackAnswerPhaseTimeout).
+// Logs each delivery, never an idle claim.
 const endsClaiming = (result, seen, signal) =>
   !result.delivery_id || seen.has(result.delivery_id) || signal?.aborted;
 
@@ -35,10 +40,12 @@ export async function runSlackAnswerOnce({
   leaseMs = TLDR_AGENT_SLACK_ANSWER.leaseMs,
   lookupMs = TLDR_AGENT_SLACK_ANSWER.lookupMs,
   settleMs = TLDR_AGENT_SLACK_ANSWER.settleMs,
+  claimWindowMs = tldrAgentSlackAnswerClaimWindowMs(),
 }) {
   const results = [];
   const seen = new Set();
-  for (;;) {
+  const claimUntil = Date.now() + claimWindowMs;
+  while (Date.now() <= claimUntil) {
     let result;
     try {
       // eslint-disable-next-line no-await-in-loop -- one claim at a time; each ends before the next.
@@ -64,6 +71,7 @@ export async function runSlackAnswerOnce({
     if (endsClaiming(result, seen, signal)) return results;
     seen.add(result.delivery_id);
   }
+  return results;
 }
 
 // The answer lane: the shared watermark wake, each wake running one answer tick.

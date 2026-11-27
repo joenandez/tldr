@@ -3,30 +3,31 @@ import {
   expectedPreflightArgs,
 } from "./tightbeam_channel_runtime.mjs";
 import {
-  PROVIDER_RECEIVED_AT_FLAG,
   providerReceivedAtIso,
   receivedAtMetadata,
 } from "./provider_received_at.mjs";
 import { TLDR_AGENT_SLACK_SETTLE_MS } from "./tldr_agent_daemon_phase_timeouts.mjs";
+import { commitTarget } from "./tightbeam_slack_commit_target.mjs";
 import {
   OK,
   fail,
+  leftOf,
   nonEmpty,
   tightbeamCodeOf,
 } from "./tightbeam_slack_support.mjs";
 
-async function deliveryCapabilityAvailable(ctx) {
-  const result = await ctx.admin(expectedPreflightArgs());
+async function deliveryCapabilityAvailable(ctx, deadlineAt) {
+  const result = await ctx.admin(expectedPreflightArgs(), leftOf(deadlineAt));
   return result?.ok === true && result.result?.compatible === true;
 }
 
 const sameIdentity = (a, b) =>
   a?.app_id === b?.app_id && a?.app_secret === b?.app_secret;
 
-async function resolveTarget(ctx, listRoutes, identity) {
-  const owner = identity ? await ctx.registerOwner(identity) : null;
+async function resolveTarget(ctx, listRoutes, { identity, deadlineAt }) {
+  const owner = identity ? await ctx.registerOwner(identity, deadlineAt) : null;
   if (!owner) return fail("not_configured");
-  const listed = await listRoutes();
+  const listed = await listRoutes(deadlineAt);
   const route = listed.ok ? listed.routes[0] : null;
   if (!route) return fail("route_unavailable");
   return { identity, owner, endpointId: owner.endpoint.endpoint_id, route };
@@ -34,11 +35,15 @@ async function resolveTarget(ctx, listRoutes, identity) {
 
 // `cached` (a target from an earlier claim) is reused while the stored identity is unchanged:
 // no owner registration, no route list (ac-jfv.97).
-async function claimTarget(ctx, listRoutes, cached = null) {
+async function claimTarget(
+  ctx,
+  listRoutes,
+  { cached = null, deadlineAt = null } = {},
+) {
   const identity = await ctx.safeIdentity();
   return cached && sameIdentity(cached.identity, identity)
     ? cached
-    : resolveTarget(ctx, listRoutes, identity);
+    : resolveTarget(ctx, listRoutes, { identity, deadlineAt });
 }
 
 // An idle auto-select claim answers claim_held; anything else is a real failure.
@@ -63,10 +68,20 @@ function dropCache(cache, failed, hadTarget) {
   return hadTarget ? { ...failed, cache_reset: 1 } : failed;
 }
 
-async function claimSlackDelivery(ctx, listRoutes, { leaseMs, tier, cache }) {
+// The shared deadline of a user-route claim, else the claim's own lease (a hung CLI only).
+function claimOptions({ leaseMs, deadlineAt }) {
+  if (deadlineAt) return leftOf(deadlineAt);
+  return leaseMs ? { timeoutMs: leaseMs } : undefined;
+}
+
+async function claimSlackDelivery(
+  ctx,
+  listRoutes,
+  { leaseMs, tier, cache, deadlineAt },
+) {
   const cached =
     Date.now() - cache.resolvedAt < TARGET_TTL_MS ? cache.target : null;
-  const target = await claimTarget(ctx, listRoutes, cached);
+  const target = await claimTarget(ctx, listRoutes, { cached, deadlineAt });
   if (target.ok === false) return dropCache(cache, target, cache.target);
   if (target !== cached)
     Object.assign(cache, { target, resolvedAt: Date.now() });
@@ -86,10 +101,11 @@ async function claimSlackDelivery(ctx, listRoutes, { leaseMs, tier, cache }) {
       // One tier per lane: 0 notices, 1 answers to the user, 2 the rest. None: all tiers.
       ...(tier === undefined ? [] : ["--tier", String(tier)]),
     ],
-    // Only a hung CLI is killed, leaseMs after it started. A shorter kill would orphan claims it
-    // committed (held for the lease, then counted; ac-jfv.59 r6). A commit late in that window
-    // can still be orphaned: an accepted trade-off for a CLI that hung that long.
-    leaseMs ? { timeoutMs: leaseMs } : undefined,
+    // Only a hung path is killed: the preflight, refresh and this CLI share one deadline, leaseMs
+    // after the claim began (ac-jfv.81 r4). A shorter kill would orphan claims it committed (held
+    // for the lease, then counted; ac-jfv.59 r6). A commit late in that window can still be
+    // orphaned: an accepted trade-off for a CLI that hung that long.
+    claimOptions({ leaseMs, deadlineAt }),
   );
   if (commandFailure(claimed)) {
     const failed = claimFailure(claimed, finish);
@@ -131,67 +147,53 @@ function messageOutcome({ name, result, finish }) {
   return Object.freeze({ ok: true, ...result.result });
 }
 
+// In process, not the CLI: the reply is the user's own message, on the intake path (ac-wzn7q).
+// The payload is what `tightbeam channel reply publish` builds.
 async function publishSlackReply(ctx, input) {
   const identity = await ctx.safeIdentity();
   if (!identity) return fail("not_configured");
   const finish = ctx.begin("tightbeam_slack_publish");
-  const result = await ctx.asApp(identity, [
-    "channel",
-    "reply",
-    "publish",
-    "--reply-binding",
-    input.reply_binding,
-    "--body",
-    input.body,
-    "--external-event-id",
-    input.external_event_id,
-    "--provider-metadata-json",
-    JSON.stringify({
+  const result = await ctx.request(identity, "channel.reply.publish", {
+    reply_binding: input.reply_binding,
+    body: input.body,
+    external_event_id: input.external_event_id,
+    provider_metadata: {
       channel: "slack",
       ...receivedAtMetadata(input.provider_received_at),
-    }),
-  ]);
+    },
+  });
   return messageOutcome({ name: "publish", result, finish });
 }
 
 // Bridge ingress (messaging/docs/bridge-ingress.md section 2). The process
 // generation is the endpoint.register result's process_generation. The Slack
 // route as origin gives the agent's default `agent reply` a path back here.
-async function commitSlackMessage(ctx, listRoutes, input) {
-  const target = await claimTarget(ctx, listRoutes);
+async function commitSlackMessage(ctx, input) {
+  const target = await commitTarget(ctx);
   if (target.ok === false) return target;
   const { identity, owner, route } = target;
   const finish = ctx.begin("tightbeam_slack_commit");
-  const result = await ctx.asApp(identity, [
-    "message",
-    "commit",
-    "--conversation",
-    input.conversation_id,
-    "--from",
-    owner.principal.principal_id,
-    "--body",
-    input.body,
-    "--key",
-    input.idempotency_key,
-    "--effect",
-    "none",
-    "--sender-endpoint",
-    owner.endpoint.endpoint_id,
-    "--process-generation",
-    String(owner.endpoint.process_generation),
-    "--origin-channel-route",
-    route.route_id,
-    ...(providerReceivedAtIso(input.provider_received_at)
-      ? [
-          PROVIDER_RECEIVED_AT_FLAG,
-          providerReceivedAtIso(input.provider_received_at),
-        ]
-      : []),
+  const receivedAt = providerReceivedAtIso(input.provider_received_at);
+  // In process; the payload is what `tightbeam message commit --effect none` builds (ac-wzn7q).
+  const result = await ctx.request(identity, "message.commit", {
+    sender_principal_id: owner.principal.principal_id,
+    body: input.body,
+    idempotency_key: input.idempotency_key,
+    obligation_effect: {
+      type: "none",
+      sender_endpoint_id: owner.endpoint.endpoint_id,
+      process_generation: Number(owner.endpoint.process_generation),
+    },
+    conversation_id: input.conversation_id,
+    origin_channel_route_id: route.route_id,
     // one named session instead of every sibling endpoint of the principal
-    ...(input.target_endpoint_id
-      ? ["--inbound-target-endpoint", input.target_endpoint_id]
-      : []),
-  ]);
+    ...(input.target_endpoint_id && {
+      inbound_target_endpoint_id: input.target_endpoint_id,
+    }),
+    ...(receivedAt && {
+      metadata: { provider_metadata: { provider_received_at: receivedAt } },
+    }),
+  });
   return messageOutcome({ name: "commit", result, finish });
 }
 
@@ -257,12 +259,18 @@ export function createSlackDelivery({ ctx, listRoutes }) {
   const cache = { capable: false, target: null, resolvedAt: 0 };
   return {
     async claimSlackDelivery({ leaseMs, tier } = {}) {
-      cache.capable ||= await deliveryCapabilityAvailable(ctx);
+      // One deadline for the whole claim path, started before its first CLI (ac-jfv.81 r4). Only
+      // the user-route lanes (tiers 0 and 1) have a phase to hold; the others keep their own bound.
+      const deadlineAt =
+        leaseMs && (tier === 0 || tier === 1) ? Date.now() + leaseMs : null;
+      cache.capable ||= await deliveryCapabilityAvailable(ctx, deadlineAt);
       if (!cache.capable) return fail("delivery_capability_unavailable");
+      // shortcut: a refresh that used the whole deadline still starts the claim CLI, killed after 1 ms
       return claimSlackDelivery(ctx, listRoutes, {
         leaseMs,
         tier,
         cache,
+        deadlineAt,
       });
     },
     completeSlackDelivery: ({ delivery_id: id, token, outcome, timeoutMs }) =>
@@ -290,6 +298,6 @@ export function createSlackDelivery({ ctx, listRoutes }) {
     listSlackDeliveries: (messageId) => listSlackDeliveries(ctx, messageId),
     publishSlackReply: (input) => publishSlackReply(ctx, input),
     openSlackConversation: (input) => openSlackConversation(ctx, input),
-    commitSlackMessage: (input) => commitSlackMessage(ctx, listRoutes, input),
+    commitSlackMessage: (input) => commitSlackMessage(ctx, input),
   };
 }

@@ -9,14 +9,17 @@ import { REPLY_BINDING_POLICY } from './reply_listener_policy.mjs';
 import { replyContinuityDiagnostic } from './reply_continuity_diagnostics.mjs';
 import { admitParkExpiryRetirement, admitProviderAdmissionTimeoutRetirement } from './endpoint_retirement.mjs';
 import { refreshSessionWatermark } from './ops/message_shared.mjs';
-import { observeRetirementProcess, runEndpointRetirementExecutor, runOwnerProcessReconciliation } from './retirement_executor.mjs';
+import { publishMissedPresentation } from './ops/session_notice.mjs';
+import { runEndpointRetirementExecutor, runOwnerProcessReconciliation } from './retirement_executor.mjs';
+import { processObserverFor } from './process_table.mjs';
 import { endUnsupportedTachyonListeners, isTachyonArmedForGeneration } from './tachyon_arming.mjs';
 import { endOwnerGoneListeners, expireReplyWait, isBackgroundWaitOwned, isOwnerGone, logBackgroundWaitOwnerLoss } from './listener_owner_loss.mjs';
 import { liveResumeChildFor } from './resumer.mjs';
 import { maybeRequestHostWake } from './session_host.mjs';
 import { closedWorkNoticeSql, endpointHasWakingUnreadSql } from './lifecycle_transition.mjs';
-import { threadHostObserverFor } from './codex_thread_host.mjs';
+import { HOLDER_RECHECK_PENDING, onHostProbeLanded, threadHostObserverFor } from './codex_thread_host.mjs';
 import { observeOwnerLiveness, readOwnerFence } from './owner_liveness.mjs';
+import { earlierAdmittedExistsSql, realignStaleAdmissions } from './ops/delivery_admission.mjs';
 
 export const LISTENER_RECONCILE_TICK_MS = 1000;
 
@@ -56,14 +59,7 @@ function missPresentation(context, listener, presentation, reason, now) {
   // busy session drains it at its next tool call instead of only at Stop,
   // but only while that same session can still drain: a retiring or
   // taken-over endpoint refuses message.notification.next at every call.
-  const endpoint = db.prepare('SELECT state, provider_session_id, process_generation FROM endpoints WHERE id = ?').get(listener.endpoint_id);
-  if (
-    (endpoint?.state === 'idle' || endpoint?.state === 'busy')
-    && endpoint.provider_session_id === listener.provider_session_id
-    && endpoint.process_generation === listener.process_generation
-  ) {
-    refreshSessionWatermark({ stateRoot: context.stateRoot, sessionId: endpoint.provider_session_id, deliveryId: presentation.target_delivery_id, logger: context.logger });
-  }
+  publishMissedPresentation(db, { stateRoot: context.stateRoot, logger: context.logger, listener, deliveryId: presentation.target_delivery_id });
   return { missed: true, retirement };
 }
 
@@ -120,15 +116,7 @@ function admissionCandidates(db) {
         -- unread work behind it the notice is the head of receive order and
         -- the takeover proceeds as before.
         AND (NOT ${closedWorkNoticeSql('d')} OR ${endpointHasWakingUnreadSql('d.endpoint_id')})
-        AND NOT EXISTS (
-          SELECT 1 FROM deliveries earlier
-           WHERE earlier.endpoint_id = d.endpoint_id AND earlier.state != 'failed'
-             AND earlier.read_at IS NULL
-             AND (
-               earlier.created_at < d.created_at
-               OR (earlier.created_at = d.created_at AND earlier.id < d.id)
-             )
-        )
+        AND NOT ${earlierAdmittedExistsSql('d', 'earlier', "earlier.endpoint_id = d.endpoint_id AND earlier.state != 'failed' AND earlier.read_at IS NULL")}
       ORDER BY d.admission_opened_at ASC, d.endpoint_id ASC, d.created_at ASC, d.id ASC`,
   ).all();
 }
@@ -190,12 +178,15 @@ function decideAvailabilityTakeover(db, delivery, timestamp, observeProcess, obs
   // must never cause. The lock is read once more immediately before the
   // conditional update (nothing runs between the two but the update itself, in
   // this one synchronous transaction); anything but a second "not hosted" is a
-  // race, and a race defers: the next pass, the owner-exit route, or the
+  // race, and a race defers. The recheck also rests on a distinct observation:
+  // it asks for `confirm`, which the production observer answers only when two
+  // separate probes (the later started after the earlier finished) both found
+  // the lock unheld, else `holder_recheck_pending` and nothing is spent: the next pass, the owner-exit route, or the
   // resumer's launch-time probe (which queues through a host) takes over.
   if (owner.runtime === 'codex') {
-    const recheck = hostOf(observeThreadHost, delivery.provider_session_id);
+    const recheck = hostOf(observeThreadHost, delivery.provider_session_id, { confirm: true });
     if (recheck.hosted !== false) {
-      return { decided: false, outcome: 'deferred', liveness: 'gone', reason: recheck.hosted === true ? 'thread_host_appeared' : 'thread_host_unknown' };
+      return { decided: false, outcome: 'deferred', liveness: 'gone', reason: recheckDeferralReason(recheck) };
     }
   }
   const token = randomBytes(32).toString('hex');
@@ -242,9 +233,14 @@ function decideAvailabilityTakeover(db, delivery, timestamp, observeProcess, obs
   return { decided: true, outcome: 'takeover', liveness: 'gone', reason: null };
 }
 
-function hostOf(observeThreadHost, sessionId) {
+function recheckDeferralReason(recheck) {
+  if (recheck.hosted === true) return 'thread_host_appeared';
+  return recheck.reason === HOLDER_RECHECK_PENDING ? 'thread_host_recheck_pending' : 'thread_host_unknown';
+}
+
+function hostOf(observeThreadHost, sessionId, options = {}) {
   try {
-    return observeThreadHost({ sessionId });
+    return observeThreadHost({ sessionId, ...options });
   } catch (error) {
     return { hosted: null, reason: 'observation_error', error: error.message };
   }
@@ -332,7 +328,7 @@ function pruneAdmissionDeferrals(context, candidateIds) {
  * socketless. Runtime only changes rows whose durable deadline has elapsed
  * (or whose connection was reported by the event bus).
  */
-export function runListenerReconciliation(context, { now = new Date(), startup = false, disconnected = [], observeProcess = observeRetirementProcess, observeThreadHost = threadHostObserverFor(context) } = {}) {
+export function runListenerReconciliation(context, { now = new Date(), startup = false, disconnected = [], observeProcess = processObserverFor(context), observeThreadHost = threadHostObserverFor(context) } = {}) {
   const timestamp = now.toISOString();
   const nowMs = now.getTime();
   const disconnectedKeys = new Set(disconnected.map(({ listenerId, listenerGeneration }) => `${listenerId}\u0000${listenerGeneration}`));
@@ -357,7 +353,7 @@ export function runListenerReconciliation(context, { now = new Date(), startup =
       // deadline, busy-turn and owner-loss endings still bound it.
       if (!isBackgroundWaitOwned(listener) && !isTachyonArmedForGeneration(listener, listener.process_generation)) {
         const ended = endUnsupportedTachyonListeners(context.db, {
-          endpointId: listener.endpoint_id, processGeneration: listener.process_generation, now: timestamp,
+          endpointId: listener.endpoint_id, processGeneration: listener.process_generation, now: timestamp, notice: context,
         });
         summary.ended += ended;
         if (ended > 0 && listener.background_wait_at) logBackgroundWaitOwnerLoss(context, listener);
@@ -417,6 +413,7 @@ export function runListenerReconciliation(context, { now = new Date(), startup =
     // Delivery admission owns provider-receive timing.  An ACKed Stop
     // presentation remains transport evidence and never enters retirement
     // merely because exact receipt has not yet happened.
+    realignStaleAdmissions(context.db, { now: timestamp, logger: context.logger });
     const candidateIds = new Set();
     for (const delivery of admissionCandidates(context.db)) {
       candidateIds.add(delivery.delivery_id);
@@ -467,18 +464,21 @@ export function startListenerReconciler(context) {
   };
   runRetirements();
   let lastOwnerReconcileMs = 0;
+  let ownerRunning = false;
+  let ownerPromise = Promise.resolve();
+  // Async since ac-srg29: a pass never overlaps the previous one, its failure
+  // is logged, and stop() waits for it.
   const runOwnerReconciliation = () => {
     const nowMs = Date.now();
-    if (nowMs - lastOwnerReconcileMs < OWNER_RECONCILE_INTERVAL_MS) return;
+    if (stopped || ownerRunning || nowMs - lastOwnerReconcileMs < OWNER_RECONCILE_INTERVAL_MS) return;
     lastOwnerReconcileMs = nowMs;
-    try {
-      (context.runOwnerProcessReconciliation ?? runOwnerProcessReconciliation)(context);
-    } catch (err) {
-      context.logger?.error({ event: 'owner_process_reconcile_failed', message: err.message, stack: err.stack, status: 'error' });
-    }
+    ownerRunning = true;
+    ownerPromise = new Promise((resolve) => resolve((context.runOwnerProcessReconciliation ?? runOwnerProcessReconciliation)(context)))
+      .catch((err) => context.logger?.error({ event: 'owner_process_reconcile_failed', message: err.message, stack: err.stack, status: 'error' }))
+      .finally(() => { ownerRunning = false; });
   };
   runOwnerReconciliation();
-  const timer = setInterval(() => {
+  const pass = () => {
     if (running) return;
     running = true;
     try {
@@ -491,14 +491,18 @@ export function startListenerReconciler(context) {
     } finally {
       running = false;
     }
-  }, LISTENER_RECONCILE_TICK_MS);
+  };
+  const timer = setInterval(pass, LISTENER_RECONCILE_TICK_MS);
   timer.unref?.();
+  // A landed holder probe runs a pass now: the takeover reads it fresh whatever the tick spacing.
+  const stopWake = onHostProbeLanded(context, () => { if (!stopped) pass(); });
   context.logger?.info({ event: 'listener_reconciler_started', tick_ms: LISTENER_RECONCILE_TICK_MS, policy: REPLY_BINDING_POLICY.listenerLeaseMs });
   return {
     async stop() {
       stopped = true;
       clearInterval(timer);
-      await retirementPromise;
+      stopWake();
+      await Promise.all([retirementPromise, ownerPromise]);
     },
   };
 }

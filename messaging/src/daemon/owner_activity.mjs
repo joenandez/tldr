@@ -1,6 +1,8 @@
 // ac-jfv.116: what a live owner process is doing, read from the process
-// snapshot the owner reconciler already takes each pass (retirement_executor.mjs
-// snapshotProcesses). Pure functions over that snapshot; no ps, no database.
+// snapshot the owner reconciler already takes each pass (process_table.mjs).
+// Pure functions over that snapshot; no ps, no database. The snapshot holds
+// each process's executable (`comm`) only; the few descendants whose argv
+// matters are picked by `activityCandidatePids` and read with one targeted ps.
 import { normalizeStartIdentity } from "./owner_process_contract.mjs";
 
 // pid, ppid, then lstart (fixed C-locale shape: weekday month day time year);
@@ -73,6 +75,29 @@ export function childrenOf(snapshot) {
     children.get(entry.ppid).push(entry);
   }
   return children;
+}
+
+const CANDIDATE_COMM = /^(node(\d+(\.\d+)*)?|tightbeam|tldr-agents)$/;
+
+/** Pids under these owners that could be an `agent wait` (comm node/nodeNN/tightbeam/tldr-agents): the only argv worth reading. */
+export function activityCandidatePids(snapshot, ownerPids) {
+  const children = childrenOf(snapshot);
+  const pids = new Set();
+  for (const ownerPid of ownerPids) {
+    for (const entry of descendants(children, ownerPid)) {
+      if (CANDIDATE_COMM.test(basename(entry.comm ?? entry.command ?? "")))
+        pids.add(entry.pid);
+    }
+  }
+  return [...pids];
+}
+
+/** The snapshot with `command` replaced by argv for the pids that have one. */
+export function withArgv(snapshot, argv) {
+  const view = new Map(snapshot);
+  for (const [pid, command] of argv)
+    if (view.has(pid)) view.set(pid, { ...view.get(pid), command });
+  return view;
 }
 
 function descendants(children, ownerPid) {

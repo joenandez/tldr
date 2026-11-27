@@ -18,7 +18,7 @@ import {
 // Daemon-written marker on this notice's effect row. A client cannot forge it:
 // commits build the payload from their validated declaration, never from it.
 // Every daemon notice carries one (any value), and none is ever noticed.
-const NOTICE_MARKER = "cwd_gone";
+const CWD_GONE = "cwd_gone";
 
 // The sender's endpoint as the notice must reach it: the newest lineage
 // replacement of the one the effect audit names, or null when none is recorded.
@@ -75,8 +75,14 @@ function noticeBody(authorityReference) {
  * the target's principal or any other participant, since a row there would
  * wake the dead folder again. Once per message, and never about a notice.
  * Returns `{ skipped: reason }` when it stages nothing.
+ *
+ * A wake ended for another reason (a usage limit, ac-jfv.165) passes its own
+ * `reason` and `body`; the key, the skip rules and the delivery are the same.
  */
-export function stageCwdGoneSenderNotice(context, { requestId }) {
+export function stageCwdGoneSenderNotice(
+  context,
+  { requestId, reason = CWD_GONE, body: givenBody = null },
+) {
   const { db } = context;
   const request = db
     .prepare(
@@ -91,12 +97,12 @@ export function stageCwdGoneSenderNotice(context, { requestId }) {
   if (skipped) return { skipped };
   const recipientEndpointId = recipient.id;
 
-  const body = noticeBody(request.authority_reference);
+  const body = givenBody ?? noticeBody(request.authority_reference);
   const key = `resume-failure:${request.message_id}`;
   const hash = payloadHash({
     body,
     in_reply_to_message_id: request.message_id,
-    cwd_gone: true,
+    [reason]: true,
   });
   return withIdempotency(
     db,
@@ -119,7 +125,7 @@ export function stageCwdGoneSenderNotice(context, { requestId }) {
         effect: { type: "none", sender_endpoint_id: request.endpoint_id },
         obligationId: null,
         obligationGeneration: null,
-        notice: NOTICE_MARKER,
+        notice: reason,
         now: new Date().toISOString(),
       });
       const { liveDeliveries, presentations } = createDeliveriesForRecipients(

@@ -98,9 +98,25 @@ export const TLDR_AGENT_SLACK_ANSWER = Object.freeze({
 });
 
 // The notice Slack lane (tier 0, busy and resume_failed notices): a notice is due 120 s after the
-// user's message, plus <= 1 s sweep and <= 1 s watermark poll, and must reach the user inside
-// 2:15 (135 s). That leaves 13 s for claim + send: the post is cut at 8 s and the claim CLI is
-// killed at the lease, so claim (~2 s measured at load 100+) + post fit with margin. Post + look
+// user's message and must reach the user inside 2:15 (135 s). It is inserted (the watermark moves)
+// <= 1 s after it is due (sweep). Claims measured up to c = 4.2 s at load 120-130 (ac-jfv.81 r4).
+// Worst cases at c = 4.2 s (claim measured at load 120-130, ac-jfv.81 r4), post 8 s, seconds after
+// the due time (120 s); the user-route watermark moves on every insert, so claims in flight stay at
+// 2 (notice_pump.mjs: one more claim beside the one in flight when the stamp moves, none for a
+// chain successor). Main runs one claim at a time and ends the tick at its idle claim; the next
+// tick starts at the wake poll (1 s).
+//   case                             this branch                         main
+//   isolated, inside a tick          1+0.25+4.2+8      = 13.45 (133.45)  1+4.2+1+4.2+8   = 18.4 (138.4)
+//   isolated, after a tick           1+1+4.2+8         = 14.2  (134.2)   same             14.2  (134.2)
+//   isolated, behind 2 answer claims 1+0.25+2x4.2+8    = 17.65 (137.65)  1+4.2+1+4.2+8   = 18.4 (138.4)
+//   2 notices in one interval        1+0.25+2x4.2+8    = 17.65 (137.65)  1+4.2+1+2x4.2+8 = 22.6 (142.6)
+//   3 notices in one interval        1+0.25+3x4.2+8    = 21.85 (141.85)  1+4.2+1+3x4.2+8 = 26.8 (146.8)
+//   4 posts hung, a 5th falls due    1+8+4.2+8         = 21.2  (141.2)   1+8+8+4.2+8     = 29.2 (149.2)
+// Above 135 s: a notice behind 2 answer claims, the 2- and 3-notice bursts and the slot case, each
+// shorter than on main; the second of a burst waits one claim more because a claim decides at its start. Isolated notices hold the
+// bound up to c = 5.0 s (after a tick) and 5.75 s (inside one). A hung post holds its slot to its
+// 8 s cut (the settle call holds none).
+// The whole claim path ends at the lease (one deadline, tightbeam_slack_delivery.mjs). Post + look
 // + two settle calls end inside the lease (postBudget), so the post keeps its whole 8 s (8 + 2 +
 // 2 x 8 = 26 of 30; settleMs as for the answer lane).
 export const TLDR_AGENT_SLACK_NOTICE = Object.freeze({
@@ -110,17 +126,30 @@ export const TLDR_AGENT_SLACK_NOTICE = Object.freeze({
   settleMs: 8000,
 });
 
-// Claim (its CLI is killed at the lease) + post + look + one settle call, as the normal phase.
-const slackLanePhaseTimeout = ({
-  leaseMs,
-  postTimeoutMs,
-  lookupMs,
-  settleMs,
-}) => leaseMs + postTimeoutMs + lookupMs + settleMs;
+// The answer tick is sequential and waits for each delivery, in order (answers of one thread must
+// not post out of order, so no second consumer may start while it runs). It starts no claim once
+// ANSWER_WINDOW has passed. Its phase then holds the worst delivery claimed at the window's end:
+// the whole claim path (preflight, refresh and claim CLI share one deadline, `leaseMs`, 30 s, from
+// the claim's start), plus the lease the delivery holds from its commit, in which post, look and a
+// complete that may run to the lease end (ac-jfv.81) all end, plus one settle call (`settleMs`)
+// that begins at the lease end. Window + 2 x lease + settle, so a tick never overruns its phase
+// on the claim path (ac-jfv.81 r4: before, window + 2 x lease left no margin).
+export const TLDR_AGENT_SLACK_ANSWER_WINDOW_MS = 30_000;
+export const tldrAgentSlackAnswerClaimWindowMs = () =>
+  TLDR_AGENT_SLACK_ANSWER_WINDOW_MS;
 export const tldrAgentSlackAnswerPhaseTimeout = () =>
-  slackLanePhaseTimeout(TLDR_AGENT_SLACK_ANSWER);
+  tldrAgentSlackAnswerClaimWindowMs() +
+  2 * TLDR_AGENT_SLACK_ANSWER.leaseMs +
+  TLDR_AGENT_SLACK_ANSWER.settleMs;
+
+// The notice tick is not held to that: it ends at its claim window, detaching the sends in flight
+// (notice_pump.mjs `deadlineAt`; each keeps its lease, and the next tick claims what falls due
+// meanwhile), so a slow claim CLI or a slow complete cannot hold a due notice, or overrun the
+// phase. The window leaves two cleanup graces before the phase's end.
 export const tldrAgentSlackNoticePhaseTimeout = () =>
-  slackLanePhaseTimeout(TLDR_AGENT_SLACK_NOTICE);
+  2 * TLDR_AGENT_SLACK_NOTICE.leaseMs;
+export const tldrAgentSlackNoticeClaimWindowMs = () =>
+  tldrAgentSlackNoticePhaseTimeout() - 2 * DEFAULT_TLDR_AGENT_CHILD_GRACE_MS;
 
 export function tldrAgentParentPhaseTimeout(
   name,

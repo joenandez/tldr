@@ -1,6 +1,7 @@
-// Process observation for endpoint custody: the one daemon module that may
-// look at operating-system processes, and only through fixed `ps` probes.
-// It never creates a resume request and never signals a process.
+// Process observation for endpoint custody, decided from the async process
+// table (process_table.mjs: the daemon never waits on a child process, and
+// this module spawns none). It never creates a resume request and never
+// signals a process.
 //
 // Two passes share one liveness rule (owner_process_contract.mjs
 // ownerProcessLiveness: same PID and same OS start identity is the same
@@ -21,92 +22,49 @@
 //     unknown-mode endpoint becomes dead with `owner_process_exited_at`,
 //     the proof that lets the resumer continue it headlessly without ever
 //     changing its launch mode.
-import { execFileSync, spawnSync } from 'node:child_process';
 import { withTransaction } from './db.mjs';
+import { settleOwnerDeath } from './holder_death.mjs';
 import {
-  normalizeStartIdentity,
   ownerProcessLiveness,
   ownerProcessTupleIsComplete,
   ownerProcessTupleIssue,
   sameOwnerProcessTuple,
 } from './owner_process_contract.mjs';
-import { observeOwnerActivity, parseProcessSnapshot } from './owner_activity.mjs';
+import { activityCandidatePids, observeOwnerActivity, withArgv } from './owner_activity.mjs';
+import { liveEntry, processTableFor, SNAPSHOT_MAX_AGE_MS, snapshotAnswer } from './process_table.mjs';
 import { acquireClaim, releaseClaim, verifyClaimToken } from './ops/claims_shared.mjs';
+import { busyOverExitedOwnerRows, settleBusyOverExitedOwner } from './busy_over_exited_owner.mjs';
 
 const TYPE = 'endpoint_retirement';
 const RETIREMENT_LEASE_MS = 30_000;
 
-// `ps -o lstart=` is locale-formatted; the hook captured it under the C
-// locale (src/cli/hook_identity.mjs), so every observation here does too.
-function psEnvironment() {
-  return { ...process.env, LC_ALL: 'C', LANG: 'C' };
-}
+// Process observation lives in process_table.mjs (async, one `ps` at a time,
+// bounded output). The lsof probe is re-exported for its existing importers.
+export { observeFileHolders } from './process_table.mjs';
 
-/**
- * One process by PID: `{ pid, startIdentity, processGroupId }`, null when
- * the PID does not exist (or is a zombie), `{ unavailable: true }` when ps
- * itself cannot answer. `pgid`, never `pgrp`: macOS ps rejects `pgrp`.
- */
-export function observeRetirementProcess(pid) {
-  const result = spawnSync('ps', ['-o', 'pid=', '-o', 'lstart=', '-o', 'pgid=', '-o', 'stat=', '-p', String(pid)], { encoding: 'utf8', env: psEnvironment() });
-  if (result.error) return { unavailable: true };
-  const raw = String(result.stdout ?? '');
-  // Exit 1 with no row is "no such process"; exit 1 complaining about its
-  // own arguments is ps failing, which must never read as an exited owner.
-  if (result.status === 1 && raw.trim() === '' && !/unknown|invalid|keyword|option|usage/i.test(String(result.stderr ?? ''))) return null;
-  if (result.status !== 0) return { unavailable: true };
-  const match = /^\s*(\d+)\s+(.+?)\s+(\d+)\s+(\S+)\s*$/.exec(raw);
-  if (!match || match[4].startsWith('Z')) return null;
-  return { pid: Number(match[1]), startIdentity: normalizeStartIdentity(match[2]), processGroupId: Number(match[3]) };
-}
-
-/**
- * Every process in one `ps` call, as Map<pid, { pid, startIdentity, ppid,
- * command }>, or `{ unavailable: true }`. One snapshot per reconciliation
- * pass keeps the cost flat in the number of watched endpoints.
- */
-export function snapshotProcesses() {
-  let raw;
-  try {
-    // command last: the only column that may hold spaces.
-    raw = String(execFileSync('ps', ['-A', '-o', 'pid=', '-o', 'ppid=', '-o', 'lstart=', '-o', 'command='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], env: psEnvironment(), maxBuffer: 16 * 1024 * 1024 }));
-  } catch {
-    return { unavailable: true };
-  }
-  const processes = parseProcessSnapshot(raw);
-  return processes.size === 0 ? { unavailable: true } : processes;
-}
-
-// lsof lives in /usr/sbin, which a daemon started from launchd or a GUI does
-// not always have on PATH (src/cli/hook_process_tree.mjs hit the same thing
-// live). The absolute path is tried first, the PATH lookup second.
-const LSOF_COMMANDS = Object.freeze(['/usr/sbin/lsof', 'lsof']);
-
-/**
- * The live processes holding one file open: `{ pids }` (empty when nobody
- * does), or `{ unavailable: true }` when lsof cannot answer. A fixed probe
- * of one path the caller built from a validated name; never a shell.
- * F34 uses it to ask who holds a Codex thread's writer lock.
- */
-export function observeFileHolders(filePath) {
-  for (const command of LSOF_COMMANDS) {
-    const result = spawnSync(command, ['-t', '--', filePath], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 10_000 });
-    if (result.error) {
-      if (result.error.code === 'ENOENT') continue;
-      return { unavailable: true };
-    }
-    const pids = String(result.stdout ?? '').split('\n').map((line) => line.trim()).filter((line) => /^\d+$/.test(line)).map(Number);
-    // lsof exits 1 for "nothing found", and also when it could not inspect
-    // some other process while still answering; only a failure that
-    // produced no answer at all and is not the plain "nothing" exit is unknown.
-    if (result.status === 0 || result.status === 1) return { pids };
-    return { unavailable: true };
-  }
-  return { unavailable: true };
-}
-
-function defaultProcesses() {
-  return { inspect: observeRetirementProcess, snapshot: snapshotProcesses };
+// `inspect(pid, owner, { afterMs })` answers one owner from a snapshot that
+// started at or after `afterMs`; `snapshot(afterMs)` is that whole snapshot
+// as Map<pid, entry> or `{ unavailable: true }`; `snapshotStartedAtMs(map)` is
+// when that snapshot's ps began (undefined when unknown); `argv(pids)` is the
+// one targeted read of command lines owner activity needs.
+function defaultProcesses(context) {
+  const table = processTableFor(context);
+  const startedAt = new WeakMap();
+  const answer = async (afterMs) => {
+    const snapshot = await table.snapshotStartedAtOrAfter(afterMs);
+    const answered = snapshotAnswer(snapshot);
+    if (answered instanceof Map) startedAt.set(answered, snapshot.startedAtMs);
+    return answered;
+  };
+  return {
+    snapshotStartedAtMs: (snapshot) => startedAt.get(snapshot),
+    inspect: async (pid, _owner, { afterMs }) => {
+      const observed = await answer(afterMs);
+      return observed instanceof Map ? liveEntry(observed, pid) : observed;
+    },
+    snapshot: answer,
+    argv: (pids) => table.argvFor(pids),
+  };
 }
 
 function current(db, id) {
@@ -195,24 +153,27 @@ function logRetirementDecision(logger, row, decision, extra = {}) {
   });
 }
 
-async function executeOne(context, id, { now, processes, claimFn }) {
-  let claim;
-  try {
-    claim = withTransaction(context.db, () => claimFn(context.db, { resourceType: TYPE, resourceId: id, leaseMs: RETIREMENT_LEASE_MS, now }));
-  } catch (error) {
-    if (error?.code === 'claim_held') return 'skipped';
-    throw error;
-  }
+// Each candidate claims at its own time; the claim's lease expiry decides whether an answer counts.
+async function executeOne(context, id, { processes, claimFn, clock }) {
+  const claim = withTransaction(context.db, () => claimFn(context.db, { resourceType: TYPE, resourceId: id, leaseMs: RETIREMENT_LEASE_MS, now: new Date(clock()) }));
   const token = claim.token;
   const decide = (row, state, reason) => withTransaction(context.db, () => close(context.db, row.id, token, state, reason, new Date().toISOString()));
   const check = withTransaction(context.db, () => current(context.db, id));
-  if (!check.row) { withTransaction(context.db, () => finish(context.db, id, token, 'completed', now.toISOString())); return 'skipped'; }
+  if (!check.row) { withTransaction(context.db, () => finish(context.db, id, token, 'completed', new Date().toISOString())); return 'skipped'; }
   if (check.reason) {
     decide(check.row, 'cancelled', 'retirement_fence_changed');
     logRetirementDecision(context.logger, check.row, 'cancelled', { reason: 'retirement_fence_changed' });
     return 'cancelled';
   }
-  const liveness = ownerProcessLiveness(check.row, processes.inspect(check.row.owner_process_pid));
+  // The answer comes from a snapshot that started after this read, and only
+  // while the claim still holds: a claim older than its lease when the answer
+  // lands belongs to nobody, and a pending answer decides nothing.
+  const observed = await processes.inspect(check.row.owner_process_pid, check.row, { afterMs: clock() });
+  const liveness = ownerProcessLiveness(check.row, observed);
+  if (liveness === 'pending' || clock() >= Date.parse(claim.leaseExpiresAt)) {
+    logRetirementDecision(context.logger, check.row, 'skipped', { reason: liveness === 'pending' ? 'owner_observation_pending' : 'claim_lease_elapsed' });
+    return 'skipped';
+  }
   if (liveness === 'unavailable') {
     decide(check.row, 'failed', 'process_identity_unobservable');
     logRetirementDecision(context.logger, check.row, 'failed', { reason: 'process_identity_unobservable' });
@@ -228,7 +189,15 @@ async function executeOne(context, id, { now, processes, claimFn }) {
   return 'cancelled';
 }
 
-export async function runEndpointRetirementExecutor(context, { now = new Date(), processes = defaultProcesses(), claimFn = acquireClaim } = {}) {
+// A claim held by another run (claim_held) or lapsed under its candidate
+// (claim_expired) skips that candidate only, never the rest of the batch.
+const executeCandidate = (context, id, options) => executeOne(context, id, options).catch((error) => {
+  if (error?.code !== 'claim_held' && error?.code !== 'claim_expired') throw error;
+  if (error.code === 'claim_expired') context.logger?.warn?.({ event: 'endpoint_retirement_claim_expired', params: { retirement_id: id }, status: 'skipped' });
+  return 'skipped';
+});
+
+export async function runEndpointRetirementExecutor(context, { processes = defaultProcesses(context), claimFn = acquireClaim, clock = Date.now } = {}) {
   const ids = context.db.prepare(
     `SELECT r.id
        FROM endpoint_retirements r
@@ -241,7 +210,9 @@ export async function runEndpointRetirementExecutor(context, { now = new Date(),
       ORDER BY r.created_at, r.id`,
   ).all().map((row) => row.id);
   const summary = { candidates: ids.length, terminated: 0, cancelled: 0, failed: 0, skipped: 0 };
-  for (const id of ids) summary[await executeOne(context, id, { now, processes, claimFn })] += 1;
+  // One retirement at a time, on purpose: each decides from its own fresh observation.
+  // eslint-disable-next-line no-await-in-loop
+  for (const id of ids) summary[await executeCandidate(context, id, { processes, claimFn, clock })] += 1;
   return summary;
 }
 
@@ -256,10 +227,10 @@ export async function runEndpointRetirementExecutor(context, { now = new Date(),
 // session could never be resumed headlessly again. Read BEFORE the process
 // snapshot so an owner that registers after the read is never judged
 // against a snapshot taken before it existed.
-const WATCHED_ENDPOINTS = `
+export const WATCHED_ENDPOINTS = `
   SELECT id, state, runtime, launch_mode, process_generation, provider_session_id,
          owner_process_pid, owner_process_start_identity, owner_process_group_id,
-         owner_process_capture_source, owner_process_generation
+         owner_process_capture_source, owner_process_generation, owner_launch_token
     FROM endpoints
    WHERE state IN ('idle', 'busy', 'dead')
      AND provider_session_id IS NOT NULL
@@ -277,7 +248,7 @@ const WATCHED_ENDPOINTS = `
 // `dead`, exactly where the exit left it, so the next message wakes it. A
 // turn in progress (`busy`) is never touched, and neither is a headless
 // session (`non_interactive` idle is already resumable on its own branch).
-const REVIVED_IDLE_ENDPOINTS = `
+export const REVIVED_IDLE_ENDPOINTS = `
   SELECT id, runtime, launch_mode, process_generation, owner_process_pid
     FROM endpoints
    WHERE state = 'idle'
@@ -323,41 +294,71 @@ function returnRevivedIdleToDead(context, summary) {
  *                         launch mode is never touched.
  *   already dead          stays dead; only the exit proof is recorded.
  *
- * `updated_at` is deliberately left alone: a process exit is not session
- * activity, and item 44's staleness window reads that column. Open work the
- * endpoint holds stays open with it — the headless successor continues the
- * same session; nothing here is death evidence for custody reconciliation.
+ * `updated_at` and unread mail are left alone: an exit is not session activity
+ * (item 44 reads updated_at) and the headless successor continues the session.
+ * Only the busy-over-exited settle (ac-jfv.161) abandons a dead holder's stale mail.
  */
-export function runOwnerProcessReconciliation(context, { now = new Date(), processes = defaultProcesses() } = {}) {
+export async function runOwnerProcessReconciliation(context, { now = new Date(), processes = defaultProcesses(context), clock = Date.now } = {}) {
   const startedAt = Date.now();
   const db = context.db;
   const summary = { watched: 0, exited: 0, idled: 0, died: 0, proven: 0, alive: 0, fenced: 0, unavailable: false };
   returnRevivedIdleToDead(context, summary);
   const watched = db.prepare(WATCHED_ENDPOINTS).all()
     .filter((row) => ownerProcessTupleIssue(row, { runtime: row.runtime, processGeneration: row.process_generation }) === null);
+  const settleRows = busyOverExitedOwnerRows(context, now); // ac-jfv.161: read before the snapshot too
+  // Taken after the read: the snapshot below must have started after it, so an
+  // owner that registers after the read is never judged against an older one.
+  const readAtMs = Date.now();
   summary.watched = watched.length;
-  const ownerActivity = (context.ownerActivity = new Map()); // ac-jfv.116: owners seen alive, and what busy ones do; rebuilt each pass
-  if (watched.length === 0) return summary;
-
-  const snapshot = processes.snapshot();
-  if (snapshot?.unavailable) {
-    summary.unavailable = true;
-    context.logger?.warn?.({ event: 'owner_process_reconcile_unavailable', params: { watched: watched.length }, status: 'skipped', latency_ms: Date.now() - startedAt });
+  const ownerActivity = new Map(); // ac-jfv.116: owners seen alive, and what busy ones do; rebuilt each pass
+  if (watched.length === 0 && settleRows.length === 0) {
+    context.ownerActivity = ownerActivity;
     return summary;
   }
 
+  let snapshot = await processes.snapshot(readAtMs);
+  const snapshotStartedAtMs = processes.snapshotStartedAtMs?.(snapshot);
+  // A snapshot whose ps began more than SNAPSHOT_MAX_AGE_MS ago never drives a
+  // custody change (the retirement lease): checked after every await below.
+  const isStale = () => snapshotStartedAtMs !== undefined && clock() - snapshotStartedAtMs > SNAPSHOT_MAX_AGE_MS;
+  const stale = (where) => {
+    summary.stale = true;
+    context.logger?.warn?.({ event: 'owner_process_reconcile_stale', params: { watched: watched.length, after: where, snapshot_age_ms: clock() - snapshotStartedAtMs }, status: 'skipped', latency_ms: Date.now() - startedAt });
+  };
+  if (snapshot?.pending || snapshot?.unavailable || isStale()) {
+    // Pending: no answer fresh enough to judge any row, so none is judged.
+    // Unavailable: ps ran and could not answer. Neither is an exited owner.
+    // Stale: the answer is too old to move custody; the next pass takes a fresh one.
+    context.ownerActivity = ownerActivity;
+    if (snapshot.pending) summary.pending = watched.length;
+    else if (snapshot.unavailable) summary.unavailable = true;
+    if (snapshot.pending || snapshot.unavailable) context.logger?.warn?.({ event: 'owner_process_reconcile_unavailable', params: { watched: watched.length, pending: Boolean(snapshot.pending) }, status: 'skipped', latency_ms: Date.now() - startedAt });
+    else stale('snapshot');
+    return summary;
+  }
+  const busyAlive = watched.filter((row) => row.state === 'busy' && ownerProcessLiveness(row, liveEntry(snapshot, row.owner_process_pid)) === 'alive');
+  let activityKnown = true;
+  if (busyAlive.length > 0 && processes.argv) {
+    const argv = await processes.argv(activityCandidatePids(snapshot, busyAlive.map((row) => row.owner_process_pid)));
+    if (argv) snapshot = withArgv(snapshot, argv);
+    else activityKnown = false; // ps could not answer: no activity entry rather than a guessed one
+    if (isStale()) stale('argv');
+  }
+  context.ownerActivity = ownerActivity;
+
   const exitedAt = now.toISOString();
-  for (const row of watched) {
-    const liveness = ownerProcessLiveness(row, snapshot.get(row.owner_process_pid) ?? null);
+  // Freshness is rechecked inside each custody transaction: this loop's own database work ages the snapshot too.
+  for (const row of summary.stale ? [] : watched) {
+    const liveness = ownerProcessLiveness(row, liveEntry(snapshot, row.owner_process_pid));
     if (liveness !== 'gone') {
       summary.alive += 1;
-      if (liveness === 'alive') ownerActivity.set(row.id, observeOwnerActivity(snapshot, row, exitedAt));
+      if (liveness === 'alive' && (activityKnown || row.state !== 'busy')) ownerActivity.set(row.id, observeOwnerActivity(snapshot, row, exitedAt));
       continue;
     }
     const nonInteractive = row.launch_mode === 'non_interactive';
     const alreadyDead = row.state === 'dead';
     const nextState = alreadyDead ? 'dead' : nonInteractive ? 'idle' : 'dead';
-    const changed = withTransaction(db, () => db.prepare(
+    const changed = withTransaction(db, () => !isStale() && db.prepare(
       `UPDATE endpoints
           SET state = ?, owner_process_exited_at = ?
         WHERE id = ? AND state = ? AND process_generation = ? AND launch_mode IS ?
@@ -368,11 +369,13 @@ export function runOwnerProcessReconciliation(context, { now = new Date(), proce
       nextState, exitedAt, row.id, row.state, row.process_generation, row.launch_mode,
       row.owner_process_pid, row.owner_process_start_identity, row.owner_process_group_id, row.owner_process_capture_source,
     ).changes === 1);
+    if (!changed && isStale()) { stale('row'); break; }
     if (!changed) {
       summary.fenced += 1;
       continue;
     }
     summary.exited += 1;
+    settleOwnerDeath(context, row, now);
     if (alreadyDead) summary.proven += 1;
     else if (nonInteractive) summary.idled += 1;
     else summary.died += 1;
@@ -397,6 +400,7 @@ export function runOwnerProcessReconciliation(context, { now = new Date(), proce
       status: 'ok',
     });
   }
+  await settleBusyOverExitedOwner(context, { rows: settleRows, snapshot, processes, now, summary, isStale }); // after the watched owners: its argv read never ages their pass
   if (summary.exited > 0 || summary.fenced > 0) {
     context.logger?.info?.({ event: 'owner_process_reconcile_pass', params: { watched: summary.watched }, result: summary, status: 'ok', latency_ms: Date.now() - startedAt });
   }

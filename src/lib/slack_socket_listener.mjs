@@ -146,6 +146,8 @@ function createHandler({ home, path, ownerUserId, counters, log, slackOpts }) {
       text: event.text,
       user: event.user,
       files: fileRefs(event.files),
+      // socket receipt: the drain logs receipt -> commit as its intake hop (ac-jfv.229)
+      received_at: new Date().toISOString(),
     });
     if (eventId) seen.add(eventId);
     counters.kept += 1;

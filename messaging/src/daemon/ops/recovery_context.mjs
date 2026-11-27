@@ -6,6 +6,7 @@
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
 import { buildLifecycleView } from './lifecycle_view.mjs';
+import { holderNoteVisibleSql } from './reserved_notice.mjs';
 
 function requestFields(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -117,15 +118,15 @@ export function validateRecoveryContextState(db, appId, row, { allowUnboundRepla
   return root.id;
 }
 
-function messagesForRecovery(db, conversationId) {
+function messagesForRecovery(db, conversationId, endpointIds) {
   return db
     .prepare(
       `SELECT id AS message_id, sender_principal_id, body, created_at
          FROM messages
-        WHERE conversation_id = ?
+        WHERE conversation_id = ? AND ${holderNoteVisibleSql('messages', endpointIds)}
         ORDER BY created_at ASC, id ASC`,
     )
-    .all(conversationId);
+    .all(conversationId, ...endpointIds);
 }
 
 function unreadForRecovery(db, endpointId) {
@@ -171,7 +172,7 @@ export const recoveryContextOp = {
         conversation_id: lineage.conversation_id,
         subject: chain.subject,
         participants,
-        messages: messagesForRecovery(context.db, lineage.conversation_id),
+        messages: messagesForRecovery(context.db, lineage.conversation_id, [lineage.original_endpoint_id, lineage.replacement_endpoint_id]),
         unread: { message_ids: unreadForRecovery(context.db, request.endpoint_id).map((row) => row.message_id) },
         root: chain,
         lineage: {

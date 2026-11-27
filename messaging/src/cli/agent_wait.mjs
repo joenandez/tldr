@@ -11,6 +11,8 @@ import {
   recordWaitMessage,
   recordWaitOutcome,
 } from "./agent_wait_journal.mjs";
+import { isUserNotice } from "../protocol/ack_gate.mjs";
+import { armWaitResult, readWaitNotice } from "./agent_wait_notice.mjs";
 import { tightbeamRecipeCommand } from "./package_context.mjs";
 
 const POLL_INTERVAL_MS = 5_000;
@@ -105,7 +107,11 @@ function replayResult(session, actionId) {
   const terminal = readWaitTerminal(session, actionId);
   if (terminal) return terminalResult(terminal.outcome, true);
   const messageId = readWaitMessage(session, actionId);
-  return messageId ? messageResult(session, messageId, true) : null;
+  if (!messageId) return null;
+  // A wait killed between journaling and arming: the replay shows the notice again, so it arms.
+  if (readWaitNotice(session, actionId)?.user_notice)
+    armWaitResult(session, messageId);
+  return messageResult(session, messageId, true);
 }
 
 async function finishWait(client, session, { actionId, outcome }) {
@@ -162,7 +168,12 @@ async function pollStep(client, session, options) {
     typeof notification.message_id === "string" &&
     notification.message_id.length > 0
   ) {
-    recordWaitMessage(session, actionId, notification.message_id);
+    const userNotice = isUserNotice(notification);
+    recordWaitMessage(session, actionId, {
+      message_id: notification.message_id,
+      user_notice: userNotice,
+    });
+    if (userNotice) armWaitResult(session, notification.message_id);
     result = messageResult(session, notification.message_id);
   }
   return result;

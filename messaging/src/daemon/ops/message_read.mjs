@@ -25,6 +25,7 @@
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
 import { completeResumeRequestsForMessage } from './resume_shared.mjs';
+import { openNextUnreadForLiveOwner, publishNextUnread } from './next_unread_notice.mjs';
 
 /**
  * Marks exactly one already-authorized endpoint delivery read. Listener ACK
@@ -52,6 +53,26 @@ export function markExactDeliveryRead(db, { deliveryId, endpointId, now, complet
     })
     : [];
   return { message_id: delivery.message_id, completed_resume_request_ids: completedResumeRequests };
+}
+
+// ac-jfv.170: the delivery a takeover decided stays unread while its endpoint is takeover_pending.
+// A read by thread has no process identity: marking it read completed the takeover request with no
+// adoption and left the endpoint fenced for good. The reader still gets the message; the takeover
+// lifecycle (adoption, or restoreTakeoverPredecessor once attempts are exhausted) ends the row.
+function readTargets(db, { messageId, principalId, endpointId }) {
+  const targets = db
+    .prepare(
+      `SELECT d.id AS id, d.endpoint_id AS endpoint_id,
+              (e.state = 'takeover_pending' AND d.takeover_decided_at IS NOT NULL AND d.read_at IS NULL) AS takeover_fenced
+         FROM deliveries d
+         JOIN endpoints e ON e.id = d.endpoint_id
+        WHERE d.message_id = ? AND e.principal_id = ? AND (? IS NULL OR d.endpoint_id = ?)`,
+    )
+    .all(messageId, principalId, endpointId ?? null, endpointId ?? null);
+  return {
+    fenced: targets.filter((t) => t.takeover_fenced),
+    deliveryIds: targets.filter((t) => !t.takeover_fenced).map((t) => t.id),
+  };
 }
 
 export const messageReadOp = {
@@ -117,18 +138,9 @@ export const messageReadOp = {
       throw new TightbeamError('permission_denied', 'read_inbox is not granted for this message');
     }
 
-    const deliveryIds = context.db
-      .prepare(
-        `SELECT d.id AS id
-           FROM deliveries d
-           JOIN endpoints e ON e.id = d.endpoint_id
-          WHERE d.message_id = ? AND e.principal_id = ? AND (? IS NULL OR d.endpoint_id = ?)`,
-      )
-      .all(messageId, principalId, endpointId ?? null, endpointId ?? null)
-      .map((r) => r.id);
-
     const now = new Date().toISOString();
-    const completedResumeRequests = withTransaction(context.db, () => {
+    const { completedResumeRequests, wake, fenced: fencedDeliveries } = withTransaction(context.db, () => {
+      const { deliveryIds, fenced } = readTargets(context.db, { messageId, principalId, endpointId });
       const update = context.db.prepare("UPDATE deliveries SET read_at = ?, updated_at = ? WHERE id = ? AND read_at IS NULL AND state != 'failed'");
       for (const deliveryId of deliveryIds) update.run(now, now, deliveryId);
       // Only the verified target endpoint's read satisfies its reply wait.
@@ -161,8 +173,22 @@ export const messageReadOp = {
       // D(b) keeps working because the spawned session adopts the
       // placeholder that holds the request, so the reader and the target
       // are one endpoint.
-      return completeResumeRequestsForMessage(context.db, { messageId: message.id, principalId, endpointId: endpointId ?? null, now });
+      return {
+        fenced,
+        completedResumeRequests: fenced.length > 0 ? [] : completeResumeRequestsForMessage(context.db, { messageId: message.id, principalId, endpointId: endpointId ?? null, now }),
+        // R1: a reply's read moves the endpoint on to its next unread, as message.receive does.
+        wake: endpointId && deliveryIds.length > 0 ? openNextUnreadForLiveOwner(context.db, endpointId) : null,
+      };
     });
+    if (endpointId) publishNextUnread(context, wake, { op: 'message.read', messageId: message.id, endpointId });
+    for (const { endpoint_id: fencedEndpointId } of fencedDeliveries) {
+      context.logger?.info?.({
+        event: 'message_read_takeover_fenced',
+        params: { endpoint_id: fencedEndpointId, message_id: messageId, scoped: Boolean(endpointId) },
+        result: { delivery_read: false },
+        status: 'skipped',
+      });
+    }
 
     if (completedResumeRequests.length > 0) {
       context.logger?.info({

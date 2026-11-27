@@ -8,7 +8,7 @@ function legacyWaitKey(actionId) {
   return `wait:${actionId}`;
 }
 
-function waitKey(session, actionId) {
+export function waitKey(session, actionId) {
   return `wait1:${JSON.stringify([
     session.endpoint_id,
     session.session_id,
@@ -17,7 +17,7 @@ function waitKey(session, actionId) {
   ])}`;
 }
 
-function readWaitEnvelope(store, session, actionId) {
+export function readWaitEnvelope(store, session, actionId) {
   const envelopes = store?.envelopes;
   const key = waitKey(session, actionId);
   return Object.hasOwn(envelopes ?? {}, key)
@@ -33,7 +33,7 @@ function completedWaitKey(session) {
   ]);
 }
 
-function sameOwner(value, session) {
+export function sameOwner(value, session) {
   return (
     value?.endpoint_id === session.endpoint_id &&
     value?.provider_session_id === session.session_id &&
@@ -93,7 +93,12 @@ export function readWaitMessage(session, actionId) {
   return sameOwner(entry, session) ? (entry.message_id ?? null) : null;
 }
 
-export function recordWaitMessage(session, actionId, messageId) {
+// `message` is the message id, or `{ message_id, user_notice }`. `user_notice` (the message is a user's own
+// non-typed notice) is stored in the SAME mutation as the id, so no crash can leave a message id whose
+// eligibility to arm the ack gate is lost. (`Object("id")` has no fields: the default is the id itself.)
+export function recordWaitMessage(session, actionId, message) {
+  const { message_id: messageId = message, user_notice: userNotice } =
+    Object(message);
   if (!actionId || !session.agent_action_store_path) return;
   const key = waitKey(session, actionId);
   const guard = validGuard(session);
@@ -119,6 +124,7 @@ export function recordWaitMessage(session, actionId, messageId) {
       provider_session_id: session.session_id,
       process_generation: session.process_generation,
       message_id: messageId,
+      user_notice: userNotice, // overwrites an earlier wait's; undefined is not stored
       ...(hint
         ? { wait_guard: guardSnapshot(session, guard), wait_outcome: hint }
         : {}),

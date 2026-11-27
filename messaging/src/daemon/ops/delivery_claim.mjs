@@ -10,11 +10,12 @@
 
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
-import { acquireClaim, deliveryRetryDelayMs, issueReplyBindingToken, MAX_DELIVERY_CLAIM_ATTEMPTS, resolveLeaseMs, isUnsentOutcome } from './claims_shared.mjs';
+import { acquireClaim, CLAIM_ATTEMPTS_EXHAUSTED, claimEndedAtMs, deliveryRetryDelayMs, issueReplyBindingToken, MAX_DELIVERY_CLAIM_ATTEMPTS, resolveLeaseMs, isUnsentOutcome } from './claims_shared.mjs';
 import { AGED_TIER2_MS, behindHeldOlder, candidateTiers, heldRouteDeliveries, settleAnsweredNotices } from './delivery_priority.mjs';
 import { advanceReplyWaitForDelivery, markStagedDeliveryFailedAttention } from '../lifecycle_transition.mjs';
 
 const DELIVERY_PROJECTION_SQL = `SELECT d.id AS id, d.message_id AS message_id, d.endpoint_id AS endpoint_id, e.created_by_app_id AS owner_app_id,
+                    d.state AS state, d.channel_route_id AS channel_route_id,
                     m.conversation_id AS conversation_id, conv.metadata AS conversation_metadata, m.sender_principal_id AS sender_principal_id,
                     m.body AS body, m.metadata AS metadata, m.created_at AS created_at, m.origin AS origin,
                     d.route_reason AS route_reason,
@@ -38,13 +39,6 @@ const DELIVERY_PROJECTION_SQL = `SELECT d.id AS id, d.message_id AS message_id, 
 
 function selectDeliveryProjection(db, { deliveryId, channelRouteId }) {
   return db.prepare(DELIVERY_PROJECTION_SQL).get(deliveryId, channelRouteId ?? null, channelRouteId ?? null);
-}
-
-/** When a claim stopped holding its lease: a voluntary release, or lease expiry. */
-function claimEndedAtMs(claim) {
-  const leaseEnd = Date.parse(claim.lease_expires_at);
-  if (claim.state === 'released' && claim.released_at) return Math.min(leaseEnd, Date.parse(claim.released_at));
-  return leaseEnd;
 }
 
 function latestDeliveryClaims(db, deliveryIds) {
@@ -75,9 +69,15 @@ function failExhaustedDelivery(context, { deliveryId, latestClaim, now }) {
     context.db.prepare("UPDATE claims SET state = 'released', outcome = 'expired', released_at = ? WHERE id = ? AND state = 'claimed'").run(timestamp, latestClaim.id);
   }
   const failed = context.db
-    .prepare("UPDATE deliveries SET state = 'failed', updated_at = ? WHERE id = ? AND state IN ('pending', 'claimed')")
-    .run(timestamp, deliveryId);
+    .prepare("UPDATE deliveries SET state = 'failed', failure_cause = ?, updated_at = ? WHERE id = ? AND state IN ('pending', 'claimed')")
+    .run(CLAIM_ATTEMPTS_EXHAUSTED, timestamp, deliveryId);
   if (failed.changes !== 1) return false;
+  // The cause is on the row (ac-jfv.239); a released marker claim keeps the history, like the sweep's (ac-votvj).
+  context.db
+    .prepare(
+      "INSERT INTO claims (resource_type, resource_id, state, token, claimed_at, lease_expires_at, attempt_count, released_at, outcome) VALUES ('delivery', ?, 'released', ?, ?, ?, ?, ?, ?)",
+    )
+    .run(deliveryId, CLAIM_ATTEMPTS_EXHAUSTED, timestamp, timestamp, latestClaim.attempt_count, timestamp, CLAIM_ATTEMPTS_EXHAUSTED);
   advanceReplyWaitForDelivery(context.db, { deliveryId, outcome: 'failed', now });
   markStagedDeliveryFailedAttention(context.db, { deliveryId, now, logger: context.logger });
   context.logger?.warn({
@@ -267,6 +267,12 @@ export const deliveryClaimOp = {
         if (delivery.owner_app_id !== connection.appId) {
           throw new TightbeamError('permission_denied', 'consume_outbound_requests is not granted for this delivery');
         }
+        // A channel copy that ended (delivered, failed for any cause, skipped, superseded) stays ended:
+        // a claim by id would put it back to `claimed` and a late consumer could deliver it (ac-votvj).
+        // The row's state decides, not the latest claim: a state export carries states, not claims.
+        if (delivery.channel_route_id && delivery.state !== 'pending' && delivery.state !== 'claimed') {
+          throw new TightbeamError('claim_held', `delivery "${deliveryId}" already ended (${delivery.state})`);
+        }
       } else {
         // Auto-select never lets an earlier failure block a newer delivery
         // (user decision, 2026-09-22). Exhausted deliveries fail terminally
@@ -350,6 +356,19 @@ export const deliveryClaimOp = {
       };
       if (delivery.route_reason !== null) {
         result.route_reason = delivery.route_reason;
+      }
+      if (delivery.route_app_id) {
+        // The other channel copies of this message and their states (ac-jfv.55): a channel that
+        // cannot send its copy decides from them whether the message still reaches the user.
+        result.sibling_channels = context.db
+          .prepare(
+            `SELECT r.selector AS selector, d.state AS state
+               FROM deliveries d JOIN channel_routes r ON r.id = d.channel_route_id
+              WHERE d.message_id = ? AND d.id <> ?
+              ORDER BY r.selector, d.id`,
+          )
+          .all(delivery.message_id, delivery.id)
+          .map((row) => ({ selector: row.selector, state: row.state }));
       }
       if (acceptReplyBinding === true && delivery.reply_binding_id && delivery.route_app_id === connection.appId) {
         result.reply_binding = issueReplyBindingToken(context.db, { bindingId: delivery.reply_binding_id, now });

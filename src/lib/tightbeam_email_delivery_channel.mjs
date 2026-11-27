@@ -13,6 +13,7 @@ import {
   recordInboundProviderAcceptance as persistInboundProviderAcceptance,
   recordProviderReplyBinding,
 } from "./tightbeam_email_provider_map.mjs";
+import { trustedOwnerReplyParent } from "./tightbeam_email_reply_parent.mjs";
 
 const REPLY_BINDING_CAPABILITY = "channels.reply-binding.v1";
 const LISTENER_CAPABILITY = "listener.v1";
@@ -228,6 +229,7 @@ export function createTightbeamEmailDeliveryChannel({
     delivery_id: deliveryId,
     token,
     outcome,
+    reason,
   }) {
     const identity = await readIdentity();
     if (!identity) return Object.freeze({ ok: false, code: "not_configured" });
@@ -242,6 +244,7 @@ export function createTightbeamEmailDeliveryChannel({
         token,
         "--outcome",
         outcome,
+        ...(reason ? ["--reason", reason] : []),
       ],
     });
     return commandFailure(completed)
@@ -378,6 +381,10 @@ export function createTightbeamEmailDeliveryChannel({
         }
       : null;
   }
+  // The broker's reply-parent rule, read from this map (ac-jfv.55).
+  async function isOwnerReplyParent(parent) {
+    return trustedOwnerReplyParent(home, parent);
+  }
   return Object.freeze({
     claimEmailDelivery,
     completeEmailDelivery,
@@ -388,5 +395,6 @@ export function createTightbeamEmailDeliveryChannel({
     findProviderAcceptanceByDelivery,
     findThreadBinding,
     findProviderThreadByConversation,
+    isOwnerReplyParent,
   });
 }

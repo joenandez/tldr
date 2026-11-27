@@ -8,7 +8,7 @@ export {
 } from "./agent_process_descriptor.mjs";
 
 const SUPPORTED_AGENTS = new Set(["claude", "codex", "copilot"]);
-const FALLBACK_POLICIES = new Set(["always", "never"]);
+export const FALLBACK_POLICIES = new Set(["always", "never"]);
 const UUID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -114,15 +114,21 @@ export function fallbackFor(agent, defaults = readAgentDefaults()) {
   return normalized === "claude" ? "codex" : "claude";
 }
 
-export function readAgentDefaults(identity = readIdentity()) {
+// jobFallbackPolicy: a job's own always|never, which wins over the global one.
+export function readAgentDefaults(
+  identity = readIdentity(),
+  jobFallbackPolicy = null,
+) {
   const raw = identity?.agent_defaults || {};
   const primary = normalizeAgentName(raw.primary) || "codex";
   const secondary =
     normalizeAgentName(raw.secondary) ||
     (primary === "codex" ? "claude" : "codex");
-  const fallbackPolicy = FALLBACK_POLICIES.has(raw.fallback_policy)
-    ? raw.fallback_policy
-    : "always";
+  const fallbackPolicy = FALLBACK_POLICIES.has(jobFallbackPolicy)
+    ? jobFallbackPolicy
+    : FALLBACK_POLICIES.has(raw.fallback_policy)
+      ? raw.fallback_policy
+      : "always";
   return {
     primary,
     secondary:

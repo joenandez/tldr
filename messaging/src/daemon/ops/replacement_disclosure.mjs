@@ -86,7 +86,8 @@ export function discloseReplacement(db, { appId, replacementRequestId, replaceme
     adoptedConversationCount += 1;
     const idempotencyKey = `replacement-notice:${replacementRequestId}:${conversationId}`;
     if (db.prepare('SELECT 1 FROM messages WHERE app_id = ? AND idempotency_key = ?').get(appId, idempotencyKey)) continue;
-    const predecessorId = links.find((link) => link.endpoint_id !== replacementEndpointId)?.endpoint_id ?? directPredecessorId;
+    // The nearest predecessor that took part, by lineage order: link row order is the query plan's.
+    const predecessorId = predecessorIds.find((id) => links.some((link) => link.endpoint_id === id)) ?? directPredecessorId;
     const predecessor = db.prepare('SELECT id, runtime, provider_session_id FROM endpoints WHERE id = ?').get(predecessorId);
     const body = noticeBody(db, { predecessor, replacementEndpointId, replacementSessionId, subject: conversationSubject(db, conversationId), conversationId });
     const messageId = insertMessage(db, {

@@ -12,6 +12,7 @@ import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
 import { reapExpired } from './claims_shared.mjs';
 import { receiveOrderBy } from './message_shared.mjs';
+import { asksNothingSql } from './delivery_admission.mjs';
 
 // F1: an inbox with enough large-body messages could otherwise produce a
 // result too large to encode into one frame (MAX_FRAME_BYTES,
@@ -134,7 +135,8 @@ export const inboxListOp = {
                 c.metadata AS conversation_metadata,
                 sender.display_name AS sender_display_name,
                 origin_route.selector AS origin_channel_selector,
-                d.state AS state, d.read_at AS read_at, d.acknowledged_at AS acknowledged_at
+                d.state AS state, d.read_at AS read_at, d.acknowledged_at AS acknowledged_at,
+                CASE WHEN d.read_at IS NULL AND d.state != 'failed' THEN ${asksNothingSql('d')} ELSE 0 END AS asks_nothing
            FROM deliveries d
            JOIN endpoints e ON e.id = d.endpoint_id
       JOIN messages m ON m.id = d.message_id
@@ -153,6 +155,7 @@ export const inboxListOp = {
     // message, preferring the most-complete delivery_state observed.
     const rank = { pending: 0, claimed: 1, delivered: 2, failed: 2, expired: 2, superseded: 2, read: 3, acknowledged: 4 };
     const byMessage = new Map();
+    const closedUnread = new Set();
     // Unread means receivable by one of these endpoints: message.receive skips
     // failed deliveries and read ones are done, so for an unread listing those
     // rows are dropped BEFORE collapsing. Otherwise a failed or read copy on a
@@ -195,12 +198,16 @@ export const inboxListOp = {
           message.reply_policy = 'not_required';
         }
         byMessage.set(row.message_id, message);
+        if (row.asks_nothing) closedUnread.add(row.message_id);
+        else closedUnread.delete(row.message_id);
       }
     }
 
     // Map insertion order is the query's receive order (a repeat sighting of a
     // message keeps its first position); never re-sort by message time.
-    let messages = [...byMessage.values()];
+    // Unread closed work goes last, as message.receive admits it (ac-jfv.217).
+    const listed = [...byMessage.values()];
+    let messages = [...listed.filter((m) => !closedUnread.has(m.message_id)), ...listed.filter((m) => closedUnread.has(m.message_id))];
     messages = messages.slice(0, limit);
 
     let bodyBytes = 0;

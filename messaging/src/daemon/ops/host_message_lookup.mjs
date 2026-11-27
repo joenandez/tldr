@@ -1,4 +1,5 @@
-// host.message.lookup — session_hosts.message_lookup.v1 (docs/protocol.md
+// host.message.lookup — session_hosts.message_lookup.v1, plus
+// session_hosts.message_lookup.sessions.v1 for `sessions` (docs/protocol.md
 // «host.message.lookup»). A host reads messages delivered to, or sent from,
 // endpoints bound to it or their lineage predecessors. Strictly read-only:
 // SELECTs only, never message.read (which marks read, completes resume
@@ -32,19 +33,58 @@ function validatedIds(payload) {
   return ids;
 }
 
+// Optional `sessions` (session_hosts.message_lookup.sessions.v1): the
+// (authority_name, provider_session_id) pairs the host is displaying. A
+// provider session id is opaque and namespaced by its authority
+// (security-model.md identifier row 4), so it is never matched alone.
+function validatedSessions(payload) {
+  const sessions = payload?.sessions;
+  if (sessions === undefined) return [];
+  const bounded = (value) =>
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_ID_LENGTH;
+  const valid =
+    Array.isArray(sessions) &&
+    sessions.length <= MAX_IDS &&
+    sessions.every(
+      // A null, string or array entry has no such fields and fails here.
+      (entry) =>
+        bounded(entry?.authority_name) && bounded(entry?.provider_session_id),
+    );
+  if (!valid) {
+    throw new TightbeamError(
+      "malformed_request",
+      `sessions must be an array of at most ${MAX_IDS} { authority_name, provider_session_id } objects of non-empty strings of at most ${MAX_ID_LENGTH} characters`,
+      { field: "sessions" },
+    );
+  }
+  return sessions.map(({ authority_name, provider_session_id }) => ({
+    authority_name,
+    provider_session_id,
+  }));
+}
+
 // Every endpoint ever bound to the host (endpoint_host_bindings, so a headless
 // resume clearing endpoints.host_name does not hide its messages), plus the
 // lineage on both sides, in one query. Same walk as predecessorEndpointIds
 // (thread_list.mjs): follow resume_requests.replacement_endpoint_id backwards
 // to predecessors, and forwards to recovery replacements (the daemon creates
 // one with no host_name), only through endpoints created by the hosted
-// endpoint's app. UNION dedups, so a cycle terminates.
-function authorizedEndpointIds(db, hostName) {
-  if (typeof hostName !== "string") return new Set();
+// endpoint's app. UNION dedups, so a cycle terminates. Endpoints matched by a
+// named session are extra seeds of the same walk, so a headless resume
+// replacement (provider_session_id NULL) is reached through lineage.
+function authorizedEndpointIds(db, hostName, sessions) {
   const rows = db
     .prepare(
       `WITH RECURSIVE lineage(id, app_id) AS (
          SELECT e.id, e.created_by_app_id FROM endpoint_host_bindings b JOIN endpoints e ON e.id = b.endpoint_id WHERE b.host_name = ?
+         UNION
+         SELECT e.id, e.created_by_app_id
+           FROM json_each(?) s
+           JOIN endpoints e
+             ON e.authority_name = json_extract(s.value, '$.authority_name')
+            AND e.provider_session_id = json_extract(s.value, '$.provider_session_id')
          UNION
          SELECT rr.endpoint_id, lineage.app_id
            FROM resume_requests rr
@@ -58,7 +98,7 @@ function authorizedEndpointIds(db, hostName) {
        )
        SELECT DISTINCT id FROM lineage`,
     )
-    .all(hostName);
+    .all(hostName, JSON.stringify(sessions));
   return new Set(rows.map((row) => row.id));
 }
 
@@ -200,11 +240,12 @@ export const hostMessageLookupOp = {
   permission: "host_sessions",
   handler(context, payload, connection) {
     const ids = validatedIds(payload);
+    const sessions = validatedSessions(payload);
     const hostName =
       context.db
         .prepare("SELECT name FROM applications WHERE id = ?")
         .get(connection.appId)?.name ?? null;
-    const authorized = authorizedEndpointIds(context.db, hostName);
+    const authorized = authorizedEndpointIds(context.db, hostName, sessions);
     const queries = prepareQueries(context.db);
 
     const messages = [];
@@ -231,7 +272,11 @@ export const hostMessageLookupOp = {
     const ok = messages.filter((entry) => entry.status === "ok").length;
     context.logger?.info({
       event: "host.message_lookup",
-      params: { requested: ids.length, host_name: hostName },
+      params: {
+        requested: ids.length,
+        host_name: hostName,
+        sessions: sessions.length,
+      },
       result: { ok, denied: messages.length - ok, truncated },
       status: "ok",
     });

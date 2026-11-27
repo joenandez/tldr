@@ -8,7 +8,7 @@
 // ---------------------------------------------------------------------
 // Decisions made where the docs are silent (reported per ws-10 brief):
 //
-// 1. Exported/imported tables: every table in schema.mjs EXCEPT the three
+// 1. Exported/imported tables: every table in schema.mjs EXCEPT those
 //    named in NON_EXPORTED_TABLES below, which records WHY each one stays
 //    behind. The split is no longer maintained by hand alone:
 //    findExportAllowlistDrift() compares this module against what the live
@@ -60,20 +60,20 @@ import { invalidAcademyField } from './copilot_wake.mjs';
 import { ownerProcessTupleIsAbsent, ownerProcessTupleIssue, sameOwnerProcessTuple } from './owner_process_contract.mjs';
 
 // The tables a state movement deliberately leaves behind, each with the
-// reason it stays. This is the OTHER half of the export allowlist: a table
-// that appears in neither this set nor TABLE_ORDER is an omission nobody
-// decided, and findExportAllowlistDrift() (below) refuses to let it pass as
-// one. Silencing a new table by listing it here is a recorded decision with
-// a name attached; forgetting it is not possible.
+// reason it stays: the OTHER half of the export allowlist. A table in neither
+// this set nor TABLE_ORDER is an omission nobody decided, and
+// findExportAllowlistDrift() (below) refuses to let it pass as one. Listing a
+// new table here is a recorded decision with a name; forgetting it is not.
 export const NON_EXPORTED_TABLES = Object.freeze({
   claims:
     'bounded dispatch/resume leases held by one specific live client process; a lease has no meaning once replayed into a different daemon, and re-claiming is exactly what a resumed consumer does anyway',
-  schema_migrations:
-    "this daemon's own forward-migration bookkeeping for THIS state root, not migrated application content; the target root records its own",
+  schema_migrations: "this daemon's own forward-migration bookkeeping for THIS state root, not migrated application content; the target root records its own",
   endpoint_host_bindings:
     'append-only host.message.lookup visibility history, rebuilt from endpoints.host_name by its triggers and the start-up backfill (src/daemon/performance_indexes.mjs); a moved state root keeps only each endpoint\'s current host',
+  thread_owner_dirty: 'in-transaction marker of conversations whose owners await settling (ops/thread_owners.mjs); always empty outside a transaction',
   import_manifests:
     "the target root's own import provenance and idempotency ledger; carrying a source root's manifests would make the target claim imports it never applied",
+  holder_stall_watermark: "this root's stalled-holder catch-all install line (ac-4p2j0), not application content",
 });
 
 // Insertion order matters: every REFERENCES target must be inserted
@@ -197,7 +197,7 @@ export const TABLE_COLUMNS = Object.freeze({
     'created_at',
     'updated_at',
   ],
-  conversations: ['id', 'created_by_app_id', 'binding_kind', 'owner_principal_id', 'metadata', 'created_at', 'closed_at'],
+  conversations: ['id', 'created_by_app_id', 'binding_kind', 'owner_principal_id', 'metadata', 'created_at', 'closed_at', 'starter_owner_endpoint_id', 'target_owner_endpoint_id'],
   conversation_participants: ['conversation_id', 'principal_id', 'role', 'added_at'],
   messages: [
     'id',
@@ -245,7 +245,7 @@ export const TABLE_COLUMNS = Object.freeze({
     'admission_owner_launch_token',
     'admitted_at',
     'retry_armed_at',
-    'takeover_decided_at',
+    'takeover_decided_at', 'brief_launch_token', 'failure_cause', // Schema 31: the launch whose stdin brief showed the body; 32: a failed copy's cause (ac-jfv.239)
   ],
   // The forward canonical work graph only (schema 7 rebuild). Legacy
   // columns (kind/state/ack_state/durable satisfaction/registration keys/

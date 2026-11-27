@@ -18,19 +18,19 @@ import fs from "node:fs";
 import net from "node:net";
 
 import { renderNotification } from "../cli/arrival_notification.mjs";
-import { ARRIVAL_TAG } from "../protocol/arrival_block.mjs";
 import { isSafeSessionId, sessionPaths } from "../protocol/session_paths.mjs";
 import { withTransaction } from "./db.mjs";
 import { recordCurrentOwnerReceipt } from "./ops/message_receive_current_owner.mjs";
+import { receiveOrderBy } from "./ops/message_shared.mjs";
+import { asksNothingSql } from "./ops/delivery_admission.mjs";
 import {
-  receiveOrderBy,
-  refreshSessionWatermark,
-} from "./ops/message_shared.mjs";
+  endpointReadsInbox,
+  publishSessionNotice,
+} from "./ops/session_notice.mjs";
 import { notificationContext } from "./ops/notification_context.mjs";
 
 const REQUEST_TIMEOUT_MS = 5000;
 const PUSH_RETRY_MS = 30_000;
-const EMBEDDED_TAG = new RegExp(`<(?=\\s*/?\\s*${ARRIVAL_TAG}\\b)`, "gi");
 
 export function inputSocketPath(stateRoot, sessionId) {
   return sessionPaths(stateRoot, sessionId).inputSocket;
@@ -144,33 +144,39 @@ function liveRunCandidates(db, stateRoot) {
 // All unread deliveries, not only user ones: receipt is oldest-first, so a
 // user message cannot be receipted while an earlier one stays unread.
 function unreadDeliveries(db, endpointId) {
-  return db
+  const rows = db
     .prepare(
-      `SELECT d.id, d.message_id, d.takeover_decided_at, m.body, m.origin = 'inbound' AND m.origin_channel_route_id IS NOT NULL AS has_external_origin
+      `SELECT d.id, d.message_id, d.takeover_decided_at, m.body, m.origin = 'inbound' AND m.origin_channel_route_id IS NOT NULL AS has_external_origin,
+              ${asksNothingSql("d")} AS asks_nothing
        FROM deliveries d JOIN messages m ON m.id = d.message_id
       WHERE d.endpoint_id = ? AND d.state != 'failed' AND d.read_at IS NULL
       ORDER BY ${receiveOrderBy("d")}`,
     )
     .all(endpointId);
+  // Admission order (ac-jfv.217): closed work after what still asks something.
+  return [
+    ...rows.filter((row) => !row.asks_nothing),
+    ...rows.filter((row) => row.asks_nothing),
+  ];
 }
 
-// The hook's notification block, plus the body for user-origin mail only, so
+// The hook's notification block, which carries the body for user-origin mail
+// only (arrival_notification.mjs: quoted, capped, the arrival tag neutralized), so
 // the run can answer the user without a receive call. Other mail (another
 // agent's, say) stays behind the block's receive command: in a
-// bypass-permissions run, a pushed body is user-role text. The body is
-// sender-controlled: it may not open or close an arrival block of its own.
-function promptText(db, delivery) {
-  const block = renderNotification([
+// bypass-permissions run, a pushed body is user-role text. No body without the
+// owning app's read_inbox grant (review v2).
+function promptText(db, delivery, endpointId) {
+  return renderNotification([
     {
       ...notificationContext(db, delivery.message_id, {
         deliveryId: delivery.id,
       }),
       message_id: delivery.message_id,
       has_external_origin: Boolean(delivery.has_external_origin),
+      ...(endpointReadsInbox(db, endpointId) ? { body: delivery.body } : {}),
     },
   ]);
-  if (!delivery.has_external_origin) return block;
-  return `${block}\n\n${delivery.body.replace(EMBEDDED_TAG, "&lt;")}`;
 }
 
 // Why a receipt was refused: the owner exited, the owner tuple moved, or this
@@ -234,7 +240,7 @@ function recordPushReceipt(context, push, delivery) {
     return false;
   }
   if (outcome.wake) {
-    refreshSessionWatermark({
+    publishSessionNotice(context.db, {
       stateRoot: context.stateRoot,
       ...outcome.wake,
       wake: "next_unread",
@@ -273,7 +279,7 @@ async function pushDelivery(context, delivery, push) {
     {
       op: "prompt",
       id: delivery.id,
-      text: promptText(context.db, delivery),
+      text: promptText(context.db, delivery, endpoint.id),
       deliver: push.deliver,
       owner_launch_token: endpoint.owner_launch_token,
     },

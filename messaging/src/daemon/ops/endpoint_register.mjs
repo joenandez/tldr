@@ -100,12 +100,14 @@ import { assertObservedDead, availabilityTakeoverReplay, expandStoredRuntimeIds,
 import { clearUnprovenPermissionMode, isCopilotWakeRuntime, normalizeAcademyAgentName, normalizeAcademyPermissionMode } from '../copilot_wake.mjs';
 import { dropLaunchTokenOnReopen, tokenHeldByOtherSession } from './launch_token_claims.mjs';
 import { MAX_OWNER_START_IDENTITY_LENGTH, MAX_PROCESS_ID, normalizeStartIdentity, ownerCaptureSourceForRuntime } from '../owner_process_contract.mjs';
+import { withoutDaemonReserved } from '../resume_children.mjs';
+import { earlierWorkExistsSql } from './delivery_admission.mjs';
 
 const LAUNCH_MODES = new Set(['interactive', 'non_interactive']);
 
 // The resumer mints 32 hex characters (src/daemon/resumer.mjs). The bound
 // is generous enough for any future minting shape and still a bound.
-const MAX_LAUNCH_TOKEN_LENGTH = 128;
+export const MAX_LAUNCH_TOKEN_LENGTH = 128;
 function normalizeOwnerProcess(ownerProcess, expectedSource, providerSessionId) {
   if (ownerProcess === undefined || ownerProcess === null) return null;
   if (!ownerProcess || typeof ownerProcess !== 'object' || Array.isArray(ownerProcess) || providerSessionId === null) {
@@ -277,12 +279,7 @@ function adoptAvailabilityTakeover(db, { endpoint, providerSessionId, launchToke
            WHERE newer.endpoint_id = r.endpoint_id
              AND newer.process_generation > ?
         )
-        AND NOT EXISTS (
-          SELECT 1 FROM deliveries earlier
-           WHERE earlier.endpoint_id = d.endpoint_id AND earlier.state != 'failed'
-             AND earlier.read_at IS NULL
-             AND (earlier.created_at < d.created_at OR (earlier.created_at = d.created_at AND earlier.id < d.id))
-        )
+        AND NOT ${earlierWorkExistsSql('d', 'earlier', "earlier.endpoint_id = d.endpoint_id AND earlier.state != 'failed' AND earlier.read_at IS NULL")}
       ORDER BY r.created_at ASC, r.id ASC
       LIMIT 1`,
   ).get(endpoint.id, providerSessionId, endpoint.process_generation, providerSessionId, endpoint.owner_epoch, endpoint.owner_launch_token, endpoint.process_generation);
@@ -330,6 +327,9 @@ export const endpointRegisterOp = {
     // stamp an arbitrarily large blob into the ownership column.
     if (typeof payload.launch_token === 'string' && (payload.launch_token.length === 0 || payload.launch_token.length > MAX_LAUNCH_TOKEN_LENGTH)) {
       throw new TightbeamError('malformed_request', `launch_token must be 1 to ${MAX_LAUNCH_TOKEN_LENGTH} characters`, { field: 'launch_token' });
+    }
+    if (payload.takeover_only !== undefined && typeof payload.takeover_only !== 'boolean') {
+      throw new TightbeamError('malformed_request', 'takeover_only must be a boolean when present', { field: 'takeover_only' });
     }
     const runtime = payload && payload.runtime;
     if (typeof runtime !== 'string' || runtime.length === 0) {
@@ -397,6 +397,9 @@ export const endpointRegisterOp = {
     const endpointId = generateId('endpoint');
     const now = new Date().toISOString();
 
+    if (payload.takeover_only === true && !context.db.prepare('SELECT 1 FROM endpoints WHERE authority_name = ? AND provider_session_id = ?').get(authorityName, providerSessionId)) {
+      throw new TightbeamError('identity_conflict', 'no endpoint for this session to take over', { field: 'provider_session_id', reason: 'endpoint_not_takeover_pending' });
+    }
     let adopted = null;
     let candidateCount = 0;
     let watermarkDeliveryId = null;
@@ -434,13 +437,15 @@ export const endpointRegisterOp = {
         // other connection can move underneath it. The match spans the
         // claimed runtime's whole stored-spelling class: legacy alias rows
         // are adoptable by canonical sessions and never rewritten.
-        const candidates =
+        const adoptable =
           providerSessionId === null
             ? []
             : adoptablePlaceholders(context.db, {
                 principalId, authorityName, appId: connection.appId, hint: placeholderHint,
                 storedSpellings: expandStoredRuntimeIds([storedRuntime], acceptedStoredIds),
               });
+        // A placeholder the daemon is cold-starting a hinted child for is that child's (ac-asrmm).
+        const candidates = placeholderHint ? adoptable : withoutDaemonReserved(context, adoptable, { principalId, providerSessionId, launchToken, ownerProcess });
         candidateCount = candidates.length;
         if (candidates.length > 0) {
           // The UPDATE re-asserts the two clauses a concurrent writer
@@ -613,6 +618,11 @@ export const endpointRegisterOp = {
             idempotent_replay: true,
           },
         };
+      }
+      // ac-x09n0: adopt a pending takeover or nothing; never fall through to the live-owner restamp below.
+      if (payload.takeover_only === true) {
+        const reason = existing.state === 'takeover_pending' ? 'takeover_not_adoptable' : 'endpoint_not_takeover_pending';
+        throw new TightbeamError('identity_conflict', `endpoint (${authorityName}, ${providerSessionId}) has no availability takeover this launch can adopt`, { field: 'launch_token', reason });
       }
       if (existing.state === 'takeover_pending') {
         throw new TightbeamError('identity_conflict', `endpoint (${authorityName}, ${providerSessionId}) has an unavailable takeover admission`, { field: 'launch_token' });

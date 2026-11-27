@@ -10,6 +10,7 @@ import { mutateJobs } from "./scope_runtime.mjs";
 import { appendActivityEvent } from "./activity_stream.mjs";
 import { bypassesNetworkPrecondition } from "./network_precondition_policy.mjs";
 import { isSafeJobId } from "./job_id.mjs";
+import { FALLBACK_POLICIES } from "./agent_fallback.mjs";
 import { normalizeJobRuntimeFields } from "./job_runtime_fields.mjs";
 import { academyCopilotOptionErrors } from "./runtime_options.mjs";
 import {
@@ -628,6 +629,9 @@ export function validateJob(job, opts = {}) {
     if (!["forbid", "allow"].includes(job.schedule.overlap_policy)) {
       errors.push("schedule_overlap_policy_invalid");
     }
+  }
+  if (!FALLBACK_POLICIES.has(job.fallback_policy ?? "always")) {
+    errors.push("fallback_policy_invalid");
   }
   if (
     job.schedule?.stagger_sec !== null &&

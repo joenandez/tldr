@@ -16,11 +16,13 @@ const HOST_SESSIONS_PERMISSION = 'host_sessions';
 // The F33 rule (an unread, non-failed delivery that is not a closed-work
 // notice) plus the informational opt-out: a message whose whole effect is a
 // bare `none` (`agent send --no-reply`) asks nothing of the session, so it
-// never prompts a host. The resumer still launches for it today; only the
-// host push is narrower.
+// never prompts a host. A requester's reply-required reply to its delegate is
+// a `none` that asks (metadata.reply_expected, ac-jfv.158), so it wakes. The
+// resumer still launches for any of them today; only the host push is narrower.
 const hostWakingDeliverySql = (alias) => `${alias}.state != 'failed' AND ${alias}.read_at IS NULL
   AND NOT ${closedWorkNoticeSql(alias)}
-  AND NOT EXISTS (SELECT 1 FROM message_effects info_me WHERE info_me.message_id = ${alias}.message_id AND info_me.effect = 'none')`;
+  AND NOT EXISTS (SELECT 1 FROM message_effects info_me JOIN messages info_m ON info_m.id = info_me.message_id
+    WHERE info_me.message_id = ${alias}.message_id AND info_me.effect = 'none' AND json_extract(info_m.metadata, '$.reply_expected') IS NOT 1)`;
 
 // Sent wake ids (-> host name) and already-logged skips, in memory per
 // context like the Codex host cache: one send per wake_id per daemon
@@ -151,6 +153,20 @@ function requestWake(context, { endpointId, wakeId: requestedWakeId, now = new D
 }
 
 /**
+ * Of `endpointIds`, those already holding an unread host-waking delivery. Any
+ * new row on such an endpoint re-prompts its host (maybeRequestHostWake keys
+ * on the new delivery id), even when the new message itself never host-wakes.
+ */
+export function pendingHostWakeEndpointIds(db, endpointIds) {
+  if (endpointIds.length === 0) return new Set();
+  // EXISTS stops at the first waking row per endpoint; one fixed SQL text.
+  const rows = db
+    .prepare(`SELECT j.value AS id FROM json_each(?) j WHERE EXISTS (SELECT 1 FROM deliveries d WHERE d.endpoint_id = j.value AND ${hostWakingDeliverySql('d')})`)
+    .all(JSON.stringify(endpointIds));
+  return new Set(rows.map((row) => row.id));
+}
+
+/**
  * Trigger (b), called from the post-commit delivery fan-out. A non-interactive
  * endpoint is woken through its resume request (trigger a), so only
  * interactive or unknown-interactivity endpoints are considered here.
@@ -159,6 +175,25 @@ export function requestHostWakesForDeliveries(context, liveDeliveries) {
   for (const delivery of liveDeliveries) {
     if (!delivery.delivery_id) continue;
     maybeRequestHostWake(context, { endpointId: delivery.endpoint_id, wakeId: delivery.delivery_id, interactiveOnly: true });
+  }
+}
+
+/**
+ * Trigger (d), called when an endpoint moves to idle with mail already
+ * enqueued: it was busy at delivery, so trigger (b) found nothing wakeable.
+ * One wake for the oldest waking unread delivery not yet woken, so an earlier
+ * prompted-but-unread delivery cannot shadow mail that arrived while busy.
+ */
+export function requestHostWakeForIdleEndpoint(context, endpointId) {
+  // Runs after the idle commit: a failure must not read as a failed state change.
+  try {
+    const rows = context.db
+      .prepare(`SELECT d.endpoint_id, d.id AS wake_id FROM deliveries d WHERE d.endpoint_id = ? AND ${hostWakingDeliverySql('d')} ORDER BY d.created_at ASC, d.id ASC`)
+      .all(endpointId);
+    const [next] = unwokenOldestPerEndpoint(context, rows);
+    if (next) maybeRequestHostWake(context, { endpointId, wakeId: next.wake_id, interactiveOnly: true });
+  } catch (err) {
+    context.logger?.warn?.({ event: 'endpoint_idle_host_wake_failed', params: { endpoint_id: endpointId }, status: 'warn', error: err.message, stack: err.stack });
   }
 }
 
@@ -177,13 +212,21 @@ export function requestHostCatchUpWakes(context, appId) {
     context.logger?.warn?.({ event: 'host.wake_catch_up_failed', params: { app_id: appId }, error: { message: err.message, stack: err.stack }, status: 'error' });
     return;
   }
-  const sent = perContext(sentWakes, context, () => new Map());
-  const woken = new Set();
-  for (const row of rows) {
-    if (woken.has(row.endpoint_id) || sent.has(row.wake_id)) continue;
-    woken.add(row.endpoint_id);
+  for (const row of unwokenOldestPerEndpoint(context, rows)) {
     maybeRequestHostWake(context, { endpointId: row.endpoint_id, wakeId: row.wake_id });
   }
+}
+
+// Shared by trigger (c) and (d): rows are oldest-first {endpoint_id, wake_id};
+// keep each endpoint's first delivery that has not already been woken.
+function unwokenOldestPerEndpoint(context, rows) {
+  const sent = perContext(sentWakes, context, () => new Map());
+  const seen = new Set();
+  return rows.filter((row) => {
+    if (sent.has(row.wake_id) || seen.has(row.endpoint_id)) return false;
+    seen.add(row.endpoint_id);
+    return true;
+  });
 }
 
 function catchUpCandidates(context, appId) {

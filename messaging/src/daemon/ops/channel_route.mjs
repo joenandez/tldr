@@ -9,6 +9,7 @@ import { generateId } from '../../protocol/ids.mjs';
 import { withTransaction } from '../db.mjs';
 import { CHANNEL_ROUTE_CAPABILITIES, validateChannelRouteDescriptor } from '../channel_route_contract.mjs';
 import { isUniqueConstraintError } from './authority_scope.mjs';
+import { failRouteCopies } from '../channel_copy_sweep.mjs';
 
 function malformed(field, message) {
   throw new TightbeamError('malformed_request', message, { field });
@@ -235,6 +236,8 @@ export const channelRouteRetireOp = {
             WHERE channel_route_id = ? AND state = 'active'`,
         )
         .run(retiredAt, routeId);
+      // Nothing drains a retired route: its unfinished copies end here, not pending forever (ac-uc6tr).
+      failRouteCopies(context, { routeId, nowIso: retiredAt });
       return { result: { route_id: routeId, state: 'retired', retired_at: retiredAt } };
     });
   },

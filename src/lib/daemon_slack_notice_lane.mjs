@@ -6,11 +6,18 @@ import {
   slackTickOnce,
 } from "./daemon_slack_lane.mjs";
 import { retryWakeInMs } from "./daemon_retry_wake.mjs";
-import { createWatermarkWakeLane } from "./daemon_urgent_wake.mjs";
+import {
+  createWatermarkWakeLane,
+  mtimeOf,
+  urgentWatermarkPath,
+} from "./daemon_urgent_wake.mjs";
 import { pumpNotices } from "./notice_pump.mjs";
 import { outboundLogger } from "./slack_outbound_diagnostics.mjs";
 import { createTightbeamSlackAdapter } from "./tightbeam_slack_adapter.mjs";
-import { TLDR_AGENT_SLACK_NOTICE } from "./tldr_agent_daemon_phase_timeouts.mjs";
+import {
+  TLDR_AGENT_SLACK_NOTICE,
+  tldrAgentSlackNoticeClaimWindowMs,
+} from "./tldr_agent_daemon_phase_timeouts.mjs";
 
 const LANE = "slack_notice";
 const MAX_CONCURRENT_NOTICES = 4;
@@ -20,9 +27,15 @@ const MAX_CONCURRENT_NOTICES = 4;
 export const noticeBackoffPath = (home) =>
   join(home, "slack", "notice-outbound-backoff.json");
 
-// One notice tick (tier 0: busy and resume_failed notices): claims `--tier 0` until claim_held and
-// sends each claimed notice in its own task, at most 4 at once (notice_pump.mjs). One adapter per
-// delivery: its 8 s post deadline serves one claim. Notices take no thread lock (withThreadTurn).
+// One notice tick (tier 0: busy and resume_failed notices): claims `--tier 0` and sends each
+// claimed notice in its own task, at most 4 claiming or posting at once per tick (notice_pump.mjs;
+// a task in its settle call holds no slot), and at most 2 of them claiming. A task detached at the
+// window keeps running, so the next tick may add its own: up to 8 claiming or posting, 4 claiming,
+// across two ticks. After a claim_held it claims again only when the user-route watermark moves,
+// so a notice due while a send is slow is not held to the tick's end. At `claimWindowMs` the tick
+// ends without waiting for the sends in flight (notice_pump.mjs `deadlineAt`): a due notice is
+// claimed by the next tick, never behind a slow complete, and the tick never reaches its phase.
+// One adapter per delivery: its 8 s post deadline serves one claim. Notices take no thread lock (withThreadTurn).
 // Logs each claimed delivery, never an idle claim. Resolves with the result of every claimed
 // delivery (the closing idle claim is not one).
 export async function runSlackNoticeOnce({
@@ -36,8 +49,13 @@ export async function runSlackNoticeOnce({
   leaseMs = TLDR_AGENT_SLACK_NOTICE.leaseMs,
   lookupMs = TLDR_AGENT_SLACK_NOTICE.lookupMs,
   settleMs = TLDR_AGENT_SLACK_NOTICE.settleMs,
+  watermarkPath = urgentWatermarkPath(),
+  claimWindowMs = tldrAgentSlackNoticeClaimWindowMs(),
+  watchMs,
+  carry = [],
 }) {
-  const runOne = async ({ onClaimed }) => {
+  const deadlineAt = Date.now() + claimWindowMs;
+  const runOne = async ({ onClaimed, onSettling }) => {
     let result;
     try {
       result = await createTightbeamSlackAdapter({
@@ -47,6 +65,7 @@ export async function runSlackNoticeOnce({
         logger: outboundLogger(home),
         tier: 0,
         onClaimed,
+        onSettling,
         postTimeoutMs,
         leaseMs,
         lookupMs,
@@ -65,8 +84,15 @@ export async function runSlackNoticeOnce({
     runOne,
     limit,
     stopped: () => signal?.aborted,
+    stamp: () => mtimeOf(watermarkPath),
+    watchMs,
+    deadlineAt,
+    onLate: (result) => carry.push(result),
   });
-  return results.filter((r) => r.code !== "claim_unavailable");
+  // What the sends detached by an earlier tick ended with: their held_until still wakes the lane.
+  return [...carry.splice(0), ...results].filter(
+    (r) => r.code !== "claim_unavailable",
+  );
 }
 
 // The notice lane: the shared watermark wake, each wake running one notice tick.
@@ -83,6 +109,7 @@ export function createSlackNoticeLane({
   runSlackNotice = runSlackNoticeOnce,
   ...tick
 }) {
+  const carry = []; // results of sends a tick left in flight at its window
   return createWatermarkWakeLane({
     once,
     isStopped,
@@ -100,7 +127,8 @@ export function createSlackNoticeLane({
           once,
           phaseName: LANE,
           ...tick,
-          runSlackTick: runSlackNotice,
+          runSlackTick: (args) =>
+            runSlackNotice({ ...args, watermarkPath, carry }),
         }),
       ),
   });

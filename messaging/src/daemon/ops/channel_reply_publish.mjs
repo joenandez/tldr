@@ -8,9 +8,11 @@ import { createHash } from 'node:crypto';
 import { TightbeamError } from '../../protocol/envelope.mjs';
 import { withTransaction } from '../db.mjs';
 import { replayHashes, withoutProviderReceivedAt } from './replay_identity.mjs';
-import { createDerivedInboundDelivery, insertMessage, newestLineageEndpointId, payloadHash, pushLiveDeliveryEvents, refreshSessionWatermark, validateBody } from './message_shared.mjs';
+import { createDerivedInboundDelivery, insertMessage, newestLineageEndpointId, payloadHash, pushLiveDeliveryEvents, validateBody } from './message_shared.mjs';
 import { activeListenerForEndpoint, createPendingPresentation, pendingReplyWaitForBinding, publishPresentation } from './listener_operations.mjs';
 import { mirrorToHolderRoutes } from './channel_reply_mirror.mjs';
+import { publishRoutedDelivery } from './session_notice.mjs';
+import { agentSideOwner } from './thread_owners.mjs';
 import { replyContinuityDiagnostic } from '../reply_continuity_diagnostics.mjs';
 import { applyOpen } from '../lifecycle_transition.mjs';
 
@@ -81,7 +83,7 @@ function digestToken(token) {
   return `sha256:${createHash('sha256').update(token, 'utf8').digest('hex')}`;
 }
 
-function resolveBinding(db, { tokenDigest, appId }) {
+function resolveBinding(db, { tokenDigest, appId, logger }) {
   const row = db.prepare(
     `SELECT b.id, b.app_id, b.channel_route_id, b.conversation_id, b.source_message_id, b.source_delivery_id,
             b.target_endpoint_id, b.expires_at, b.state AS binding_state,
@@ -106,7 +108,7 @@ function resolveBinding(db, { tokenDigest, appId }) {
   if (!row) {
     throw new TightbeamError('permission_denied', 'reply binding is not granted for this authenticated application');
   }
-  return routeToNewestLineage(db, row);
+  return routeToNewestLineage(db, row, logger);
 }
 
 // A binding names the session that sent the message being answered. Once a
@@ -114,8 +116,12 @@ function resolveBinding(db, { tokenDigest, appId }) {
 // lineage replacement (plan §2.2): custody, delivery, and any wake land
 // there. A closed newest replacement keeps the existing closed-target
 // refusal; the superseded predecessor is never a fallback.
-function routeToNewestLineage(db, binding) {
-  const routedId = newestLineageEndpointId(db, binding.target_id);
+// On a thread whose agent side has an owner (ac-32qki), the owner is the target and `owned` marks
+// that it also wins over the holder of open work, so a reply never lands on a non-owner.
+function routeToNewestLineage(db, row, logger) {
+  const owner = agentSideOwner(db, row.conversation_id, logger);
+  const binding = { ...row, owned: owner !== null };
+  const routedId = owner ?? newestLineageEndpointId(db, binding.target_id);
   if (routedId === binding.target_id) return binding;
   const routed = db.prepare(
     `SELECT id AS target_id, principal_id AS target_principal_id, created_by_app_id AS target_app_id, state AS target_state,
@@ -176,17 +182,30 @@ function requireNewEventBinding(db, binding, now) {
   }
 }
 
+// The session a reply lands on when no open request holds the thread: the binding's (routed) target.
+const targetEndpoint = (binding) => ({
+  id: binding.target_id,
+  principal_id: binding.target_principal_id,
+  state: binding.target_state,
+  session_id: binding.target_session_id,
+  process_generation: binding.target_process_generation,
+  launch_mode: binding.target_launch_mode,
+  authority_reference: binding.target_authority_reference,
+});
+
 // An open request absorbs further user replies: they go to the endpoint that
-// holds the open attempt and open no new root. Null means no open request.
-function openRequestHolder(db, conversationId) {
-  return db.prepare(
+// holds the open attempt and open no new root. On an owned thread they go to
+// the owner instead, whoever holds the work. Null means no open request.
+function openRequestHolder(db, binding) {
+  const holder = db.prepare(
     `SELECT e.id, e.principal_id, e.state, e.provider_session_id AS session_id, e.process_generation, e.launch_mode, e.authority_reference
        FROM obligations root
        JOIN obligations attempt ON attempt.parent_id = root.id AND attempt.role = 'attempt' AND attempt.status = 'open'
        JOIN endpoints e ON e.id = attempt.custodian_endpoint_id
       WHERE root.conversation_id = ? AND root.role = 'root' AND root.status = 'open' AND e.state != 'closed'
       LIMIT 1`,
-  ).get(conversationId) ?? null;
+  ).get(binding.conversation_id) ?? null;
+  return holder && binding.owned ? targetEndpoint(binding) : holder;
 }
 
 export const channelReplyPublishOp = {
@@ -198,7 +217,7 @@ export const channelReplyPublishOp = {
     const tokenDigest = digestToken(request.reply_binding);
     const startedAt = Date.now();
     const outcome = withTransaction(context.db, () => {
-      const binding = resolveBinding(context.db, { tokenDigest, appId: connection.appId });
+      const binding = resolveBinding(context.db, { tokenDigest, appId: connection.appId, logger: context.logger });
       const replay = findReplay(context.db, {
         bindingId: binding.id,
         externalEventId: request.external_event_id,
@@ -231,7 +250,7 @@ export const channelReplyPublishOp = {
         inReplyToMessageId: binding.source_message_id,
       });
       const now = new Date().toISOString();
-      const holder = openRequestHolder(context.db, binding.conversation_id);
+      const holder = openRequestHolder(context.db, binding);
       const opened = holder
         ? null
         : applyOpen(context.db, {
@@ -246,15 +265,7 @@ export const channelReplyPublishOp = {
             },
             now,
           });
-      const endpoint = holder ?? {
-        id: binding.target_id,
-        principal_id: binding.target_principal_id,
-        state: binding.target_state,
-        session_id: binding.target_session_id,
-        process_generation: binding.target_process_generation,
-        launch_mode: binding.target_launch_mode,
-        authority_reference: binding.target_authority_reference,
-      };
+      const endpoint = holder ?? targetEndpoint(binding);
       const listener = activeListenerForEndpoint(context.db, {
         endpointId: endpoint.id,
         processGeneration: endpoint.process_generation,
@@ -285,8 +296,9 @@ export const channelReplyPublishOp = {
           'UPDATE obligations SET ack_due_at = ?, ack_message_id = ?, ack_delivery_id = ? WHERE id = ?',
         ).run(new Date(Date.parse(now) + 120_000).toISOString(), messageId, delivery.delivery_id, opened.created.root_id);
       }
-      // Every route that wrote a delivery refreshes the marker the PreToolUse fast path compares.
-      refreshSessionWatermark({
+      // Every route that wrote a delivery refreshes the marker the PreToolUse fast path compares;
+      // an enqueued one is presented there, so it also gets the local notice.
+      publishRoutedDelivery(context.db, delivery.route_outcome, {
         stateRoot: context.stateRoot,
         sessionId: endpoint.session_id,
         deliveryId: delivery.delivery_id,

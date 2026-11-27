@@ -1,5 +1,7 @@
 export function normalizeJobRuntimeFields(input, now) {
   return {
+    // Absent stays absent: the global agent_defaults.fallback_policy applies.
+    ...(input.fallback_policy && { fallback_policy: input.fallback_policy }),
     retry: {
       max_attempts:
         input.retry?.max_attempts !== undefined ? input.retry.max_attempts : 0,

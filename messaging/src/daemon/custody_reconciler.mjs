@@ -89,6 +89,7 @@
 import { withTransaction } from './db.mjs';
 import { createParentResultDelivery, newestLineageEndpointId, pushLiveDeliveryEvents } from './ops/message_shared.mjs';
 import { findOfferMessageId } from './watch_reconciler.mjs';
+import { publishFailedAttemptNotices, stageFailedAttemptNotices } from './holder_failed_notice.mjs';
 
 export const CUSTODY_LOST_ROUTE_REASON = 'endpoint.custody_lost';
 export const CUSTODY_ATTENTION_SOURCE = 'endpoint.custody_lost';
@@ -131,7 +132,7 @@ function resolveCapturedNodes(db, { endpointId, capturedNodes }) {
 }
 
 /** One visibility mark per root; the Stop anti-wedge counter is untouched. */
-function markRootAttention(db, { rootId, now }) {
+export function markRootAttention(db, { rootId, now }) {
   const nowIso = now instanceof Date ? now.toISOString() : now;
   db.prepare(
     `INSERT INTO root_attention (root_obligation_id, stop_block_count, attention_source, first_marked_at, last_block_at, updated_at)
@@ -194,6 +195,52 @@ function routeCustodyLossToParent(db, context, node) {
   };
 }
 
+/**
+ * Whether the launch behind `evidence` no longer speaks for `endpoint` (a row with id, process_generation,
+ * owner_epoch, owner_launch_token): the reason, or null. Positive staleness only: the process, launch-ownership
+ * and owner-epoch fences of one custody observation. The post-receipt limit path (limit_note.mjs) shares it.
+ */
+export function launchFenceStale(context, endpoint, { evidenceKind, observedProcessGeneration = null, observedOwnerEpoch = null, observedOwnerToken = null, capturedOwnerToken = null }) {
+  const recorded = endpoint.process_generation;
+  const recordedToken = endpoint.owner_launch_token ?? null;
+  const recordedEpoch = endpoint.owner_epoch ?? 0;
+  // Launch-ownership fence: a launch speaks for the endpoint while it either OWNS the recorded regime
+  // (its own registration stamped the token) or nothing has re-stamped the column since it looked.
+  const ownsRecordedRegime = observedOwnerToken !== null && observedOwnerToken === recordedToken;
+  const checks = [
+    // Process fence. A NULL recording has no observed process to contradict anything (session.stop's rule).
+    [
+      'stale_generation',
+      recorded !== null && observedProcessGeneration !== null && observedProcessGeneration !== recorded,
+      { observed_process_generation: observedProcessGeneration, recorded_process_generation: recorded },
+    ],
+    [
+      'stale_owner_token',
+      observedOwnerToken !== null && !ownsRecordedRegime && recordedToken !== capturedOwnerToken,
+      { observed_owner_token: observedOwnerToken, captured_owner_token: capturedOwnerToken, recorded_owner_token: recordedToken },
+    ],
+    // Owner-epoch fence, for a row whose owner left no token to compare. Equality is required even against a
+    // NULL-generation recording: every row has an epoch, so a stale capture can never pass merely because nothing
+    // stamped the generation it predicted. Evidence that owns the recorded token is exempt: its capture necessarily
+    // predates the registration that advanced the epoch, which is exactly what owning the row looks like.
+    [
+      'stale_owner_epoch',
+      !ownsRecordedRegime && observedOwnerEpoch !== null && observedOwnerEpoch !== recordedEpoch,
+      { observed_owner_epoch: observedOwnerEpoch, recorded_owner_epoch: recordedEpoch },
+    ],
+  ];
+  const [reason, , params] = checks.find(([, stale]) => stale) ?? [null];
+  if (reason) {
+    context.logger?.info({
+      event: `TEMP DEATH custody_loss_fenced_${reason}`,
+      params: { endpoint_id: endpoint.id, evidence_kind: evidenceKind, ...params },
+      result: 'inert_zero_writes',
+      status: 'ok',
+    });
+  }
+  return reason;
+}
+
 const NOOP = (reason) => ({ decided: false, reason, closed: [], route: null, routes: [], liveDeliveries: [] });
 
 /**
@@ -202,7 +249,9 @@ const NOOP = (reason) => ({ decided: false, reason, closed: [], route: null, rou
  * best-effort live-event push happens after commit. Never throws for a
  * fenced or already-decided observation — those are counted no-ops.
  */
-export function reconcileCustodyLoss(context, { endpointId, evidenceKind, observedProcessGeneration = null, observedOwnerEpoch = null, observedOwnerToken = null, capturedOwnerToken = null, capturedNodes = null, now = new Date() }) {
+// `notifyRequester: false` is for a caller that admits a replacement session
+// right after (exact_session_unavailable): the request is not finished failing.
+export function reconcileCustodyLoss(context, { endpointId, evidenceKind, observedProcessGeneration = null, observedOwnerEpoch = null, observedOwnerToken = null, capturedOwnerToken = null, capturedNodes = null, now = new Date(), notifyRequester = true }) {
   const db = context.db;
 
   let outcome;
@@ -212,59 +261,8 @@ export function reconcileCustodyLoss(context, { endpointId, evidenceKind, observ
       if (!endpoint) return NOOP('endpoint_unknown');
       if (endpoint.state === 'closed') return NOOP('endpoint_closed');
 
-      // Process fence: positive staleness only. A NULL recording has no
-      // observed process to contradict anything (session.stop's rule).
-      const recorded = endpoint.process_generation;
-      if (recorded !== null && observedProcessGeneration !== null && observedProcessGeneration !== recorded) {
-        context.logger?.info({
-          event: 'TEMP DEATH custody_loss_fenced_stale_generation',
-          params: { endpoint_id: endpointId, evidence_kind: evidenceKind, observed_process_generation: observedProcessGeneration, recorded_process_generation: recorded },
-          result: 'inert_zero_writes',
-          status: 'ok',
-        });
-        return NOOP('stale_generation');
-      }
-
-      // Launch-ownership fence, positive staleness only. A launch speaks
-      // for the endpoint while it either OWNS the recorded regime (its own
-      // registration stamped the token) or nothing has re-stamped the
-      // column since it looked. Anything else means another launch took
-      // ownership in between, and this evidence is that launch's loser.
-      const recordedToken = endpoint.owner_launch_token ?? null;
-      const ownsRecordedRegime = observedOwnerToken !== null && observedOwnerToken === recordedToken;
-      if (observedOwnerToken !== null && !ownsRecordedRegime && recordedToken !== capturedOwnerToken) {
-        context.logger?.info({
-          event: 'TEMP DEATH custody_loss_fenced_stale_owner_token',
-          params: {
-            endpoint_id: endpointId,
-            evidence_kind: evidenceKind,
-            observed_owner_token: observedOwnerToken,
-            captured_owner_token: capturedOwnerToken,
-            recorded_owner_token: recordedToken,
-          },
-          result: 'inert_zero_writes',
-          status: 'ok',
-        });
-        return NOOP('stale_owner_token');
-      }
-
-      // Owner-epoch fence, for a row whose owner left no token to compare.
-      // Equality is required even against a NULL-generation recording —
-      // every row has an epoch, so a stale capture can never pass merely
-      // because nothing stamped the generation it predicted. Evidence that
-      // owns the recorded token is exempt: its capture necessarily predates
-      // the registration that advanced the epoch, which is exactly what
-      // owning the row looks like.
-      const recordedEpoch = endpoint.owner_epoch ?? 0;
-      if (!ownsRecordedRegime && observedOwnerEpoch !== null && observedOwnerEpoch !== recordedEpoch) {
-        context.logger?.info({
-          event: 'TEMP DEATH custody_loss_fenced_stale_owner_epoch',
-          params: { endpoint_id: endpointId, evidence_kind: evidenceKind, observed_owner_epoch: observedOwnerEpoch, recorded_owner_epoch: recordedEpoch },
-          result: 'inert_zero_writes',
-          status: 'ok',
-        });
-        return NOOP('stale_owner_epoch');
-      }
+      const stale = launchFenceStale(context, endpoint, { evidenceKind, observedProcessGeneration, observedOwnerEpoch, observedOwnerToken, capturedOwnerToken });
+      if (stale) return NOOP(stale);
 
       const surviving = resolveCapturedNodes(db, { endpointId, capturedNodes });
       // Authorized state.set evidence always records the terminal state
@@ -339,12 +337,15 @@ export function reconcileCustodyLoss(context, { endpointId, evidenceKind, observ
         if (!routedNodeIds.has(nodeId)) attentionRoots.add(rootId);
       }
       for (const rootId of attentionRoots) markRootAttention(db, { rootId, now });
+      // ac-4p2j0: an attempt has no parent endpoint to wake; its requester gets
+      // one notice (a delegation's parent already got its custody_lost wake).
+      const notices = stageFailedAttemptNotices(context, { closed, routed: routedNodeIds, enabled: notifyRequester, now });
 
       // `route` stays the decision's primary route for callers that name a
       // single one; `routes` is the per-child truth.
       const route = routes[0] ?? (attentionRoots.size > 0 ? { kind: 'root_attention', roots: [...attentionRoots] } : null);
 
-      return { decided: true, reason: 'reconciled', closed, route, routes, liveDeliveries, attentionRoots: [...allAttentionRoots] };
+      return { decided: true, reason: 'reconciled', closed, route, routes, liveDeliveries, attentionRoots: [...allAttentionRoots], notices };
     });
   } catch (error) {
     // A reconciliation failure must never crash the resumer tick or fail a
@@ -367,6 +368,8 @@ export function reconcileCustodyLoss(context, { endpointId, evidenceKind, observ
       status: 'ok',
     });
     pushLiveDeliveryEvents(context, { liveDeliveries: outcome.liveDeliveries });
+    publishFailedAttemptNotices(context, outcome.notices);
   }
-  return outcome;
+  const { notices: _notices, ...result } = outcome;
+  return result;
 }

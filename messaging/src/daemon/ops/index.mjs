@@ -22,16 +22,18 @@ import { endpointListOp } from './endpoint_list.mjs';
 import { threadListOp } from './thread_list.mjs';
 import { threadHistoryOp } from './thread_history.mjs';
 import { channelRouteImpactOp, channelRouteListOp, channelRouteRegisterOp, channelRouteRetireOp } from './channel_route.mjs';
-import { recoveryMirrorRepliesOp } from './channel_reply_mirror.mjs';
+import { recoveryMirrorRepliesOp, recoveryRewakeOp } from './channel_reply_mirror.mjs';
 import { conversationCreateOp } from './conversation_create.mjs';
 import { conversationCloseOp } from './conversation_close.mjs';
 import { messageCommitOp } from './message_commit.mjs';
+import { messageActionReplayOp } from '../action_id_replay.mjs';
 import { messageDeliveryListOp } from './message_delivery_list.mjs';
 import { recoveryRetryOp } from './recovery_retry.mjs';
 import { recoverySwitchOp } from './recovery_switch.mjs';
 import { recoveryTransferOp } from './recovery_transfer.mjs';
 import { sessionStopOp } from './session_stop.mjs';
 import { lifecycleViewOp } from './lifecycle_view.mjs';
+import { lifecycleOperatorCancelOp } from './lifecycle_operator_cancel.mjs';
 import { recoveryContextOp } from './recovery_context.mjs';
 import { inboxListOp } from './inbox_list.mjs';
 import { messageReadOp } from './message_read.mjs';
@@ -145,6 +147,7 @@ export function buildOpTable() {
   // required effect. The disabled legacy writers below stay name-addressable
   // for typed rejections; nothing else may write lifecycle truth.
   registerOp(table, messageCommitOp);
+  registerOp(table, messageActionReplayOp);
   registerOp(table, messageDeliveryListOp);
   // The explicit administrative recovery transitions (transitions.yaml
   // RECOVERY-RETRY / RECOVERY-SWITCH) join message.commit as the only
@@ -154,6 +157,7 @@ export function buildOpTable() {
   registerOp(table, recoverySwitchOp);
   registerOp(table, recoveryTransferOp);
   registerOp(table, recoveryMirrorRepliesOp);
+  registerOp(table, recoveryRewakeOp);
   // The idempotent Stop decision (transitions.yaml STOP-REQUEST): engine-
   // owned block-or-allow behind a thin wrapper, agent scope gated on the
   // endpoint-administration grant the Stop actor's identity already rests on.
@@ -162,6 +166,7 @@ export function buildOpTable() {
   // «Technical Approach 6»): labels derive at READ time from canonical
   // records only — no stored combined status, no listener input.
   registerOp(table, lifecycleViewOp);
+  registerOp(table, lifecycleOperatorCancelOp);
   registerOp(table, recoveryContextOp);
   for (const disabled of DISABLED_LIFECYCLE_OPERATIONS) registerOp(table, disabled);
   registerOp(table, inboxListOp);

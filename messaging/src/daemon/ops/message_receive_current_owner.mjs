@@ -4,9 +4,10 @@
 
 import { TightbeamError } from "../../protocol/envelope.mjs";
 import { openOldestUnreadAdmission } from "./delivery_admission.mjs";
-import { receiveOrderBy, receivedBeforeSql } from "./message_shared.mjs";
 import { completeResumeRequestsForMessage } from "./resume_shared.mjs";
 import { satisfyBoundReplyWait } from "./message_reply_wait_admission.mjs";
+import { earlierAdmittedExistsSql } from "./delivery_admission.mjs";
+import { receiveOrderBy } from "./message_shared.mjs";
 
 function exactCurrentOwnerReceipt(db, input, appId) {
   return db
@@ -28,12 +29,7 @@ function exactCurrentOwnerReceipt(db, input, appId) {
             d.read_at IS NOT NULL
             OR (
               d.admitted_at IS NULL
-              AND NOT EXISTS (
-                SELECT 1 FROM deliveries earlier
-                 WHERE earlier.endpoint_id = e.id AND earlier.state != 'failed'
-                   AND earlier.read_at IS NULL
-                   AND ${receivedBeforeSql("earlier", "d")}
-              )
+              AND NOT ${earlierAdmittedExistsSql("d", "earlier", "earlier.endpoint_id = e.id AND earlier.state != 'failed' AND earlier.read_at IS NULL")}
             )
           )
         ORDER BY ${receiveOrderBy("d")}
@@ -57,12 +53,9 @@ function admitCurrentOwnerReceipt(db, current, now) {
           AND admission_process_generation = ? AND admission_provider_session_id IS ?
           AND admission_owner_epoch = ? AND admission_owner_launch_token IS ?
           AND NOT EXISTS (
-            SELECT 1 FROM deliveries earlier
-             WHERE earlier.endpoint_id = ? AND earlier.state != 'failed' AND earlier.read_at IS NULL
-               AND (
-                 earlier.created_at < (SELECT created_at FROM deliveries WHERE id = ?)
-                 OR (earlier.created_at = (SELECT created_at FROM deliveries WHERE id = ?) AND earlier.id < ?)
-               )
+            SELECT 1 FROM deliveries d
+             WHERE d.id = ?
+               AND ${earlierAdmittedExistsSql("d", "earlier", "earlier.endpoint_id = ? AND earlier.state != 'failed' AND earlier.read_at IS NULL")}
           )`,
     )
     .run(
@@ -74,10 +67,8 @@ function admitCurrentOwnerReceipt(db, current, now) {
       current.provider_session_id,
       current.owner_epoch,
       current.owner_launch_token,
+      current.delivery_id,
       current.endpoint_id,
-      current.delivery_id,
-      current.delivery_id,
-      current.delivery_id,
     );
   return admitted.changes === 1;
 }

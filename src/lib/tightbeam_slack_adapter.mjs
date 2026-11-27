@@ -342,9 +342,11 @@ export function createTightbeamSlackAdapter({
   sleep: sleepOption,
   // The lane's tier (ac-jfv.74.1): claims `--tier N` (none: all tiers). Tiers 0-1 are the user
   // route: their own look and settle bounds (they size the post budget inside a short lease)
-  // and their own backoff file. onClaimed runs once the claim is in hand.
+  // and their own backoff file. onClaimed runs once the claim is in hand; onSettling before the
+  // first settle call (complete or release), when only that call is left.
   tier,
   onClaimed,
+  onSettling,
   lookupMs,
   settleMs,
   backoffPath = join(home ?? "", "slack", "outbound-backoff.json"),
@@ -377,6 +379,7 @@ export function createTightbeamSlackAdapter({
     sleep,
     tier,
     onClaimed,
+    onSettling,
     lookupMs,
     settleMs,
     backoffPath,

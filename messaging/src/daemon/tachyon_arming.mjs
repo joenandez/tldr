@@ -1,3 +1,5 @@
+import { publishMissedPresentation } from './ops/session_notice.mjs';
+
 export const UNSUPPORTED_TACHYON_ARMING_REASON = 'unsupported_tachyon_arming';
 
 function positiveInteger(value) {
@@ -75,13 +77,18 @@ export function findInvalidImportedTachyonArming(records) {
   return null;
 }
 
-export function endUnsupportedTachyonListeners(db, { endpointId, processGeneration, now, reason = UNSUPPORTED_TACHYON_ARMING_REASON }) {
+export function endUnsupportedTachyonListeners(db, { endpointId, processGeneration, now, reason = UNSUPPORTED_TACHYON_ARMING_REASON, notice = null }) {
   const listeners = db.prepare(
-    `SELECT id, listener_generation
+    `SELECT id, endpoint_id, process_generation, provider_session_id, listener_generation
        FROM listeners
       WHERE endpoint_id = ? AND process_generation = ?
         AND state IN ('parked', 'attached', 'waking')`,
   ).all(endpointId, processGeneration);
+  const pending = db.prepare(
+    `SELECT target_delivery_id FROM listener_presentations
+      WHERE listener_id = ? AND listener_generation = ? AND state = 'pending' AND admitted_at IS NULL
+      ORDER BY created_at ASC, id ASC`,
+  );
   const miss = db.prepare(
     `UPDATE listener_presentations
         SET state = 'missed', missed_at = ?, fallback_reason = ?, updated_at = ?
@@ -96,8 +103,10 @@ export function endUnsupportedTachyonListeners(db, { endpointId, processGenerati
   );
   let ended = 0;
   for (const listener of listeners) {
+    const missed = notice ? pending.all(listener.id, listener.listener_generation) : [];
     miss.run(now, reason, now, listener.id, listener.listener_generation);
     ended += end.run(reason, now, now, listener.id, listener.listener_generation).changes;
+    for (const presentation of missed) publishMissedPresentation(db, { stateRoot: notice.stateRoot, logger: notice.logger, listener, deliveryId: presentation.target_delivery_id });
   }
   return ended;
 }

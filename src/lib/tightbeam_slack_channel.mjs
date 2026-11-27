@@ -9,6 +9,7 @@ import {
   createSlackContext,
   fail,
   isIdentityConflict,
+  leftOf,
   nonEmpty,
   tightbeamCodeOf,
 } from "./tightbeam_slack_support.mjs";
@@ -86,8 +87,12 @@ async function registerSlackChannel(ctx, route = SLACK_ROUTE) {
   return result;
 }
 
-async function listWith(ctx, identity) {
-  const listed = await ctx.asApp(identity, ["channel", "route", "list"]);
+async function listWith(ctx, identity, deadlineAt) {
+  const listed = await ctx.asApp(
+    identity,
+    ["channel", "route", "list"],
+    leftOf(deadlineAt),
+  );
   if (commandFailure(listed) || !Array.isArray(listed.result?.routes)) {
     return Object.freeze({ ok: false });
   }
@@ -97,12 +102,12 @@ async function listWith(ctx, identity) {
   });
 }
 
-async function listSlackRoutes(ctx) {
+async function listSlackRoutes(ctx, deadlineAt) {
   // undefined marks an unreadable identity; null means none stored yet.
   const identity = await ctx.readIdentity().catch(() => undefined);
   if (identity === undefined) return Object.freeze({ ok: false });
   if (identity === null) return Object.freeze({ ok: true, routes: [] });
-  return listWith(ctx, identity);
+  return listWith(ctx, identity, deadlineAt);
 }
 
 // Tightbeam checks and retires each route atomically; a refusal leaves it active.
@@ -139,7 +144,7 @@ async function retireSlackRoute(ctx) {
 
 export function createTightbeamSlackChannel(options = {}) {
   const ctx = createSlackContext(options);
-  const listRoutes = () => listSlackRoutes(ctx);
+  const listRoutes = (deadlineAt) => listSlackRoutes(ctx, deadlineAt);
   return Object.freeze({
     registerSlackChannel: (route) => registerSlackChannel(ctx, route),
     listSlackRoutes: listRoutes,

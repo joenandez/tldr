@@ -76,6 +76,7 @@ export async function startDaemon({
   let loopLagTimer;
   try {
     db = openDatabase(paths.db);
+    db.logger = logger; // read by settleThreadOwners
     const schemaVersion = openSchema(db);
 
     // Runtime manifests are execution configuration: load and validate

@@ -2,7 +2,11 @@ import { realpathSync } from "node:fs";
 
 import { isCopilotPluginHooksPath } from "../runtimes/copilot_contract.mjs";
 import { encodeCopilotHookEffect } from "./copilot_hook.mjs";
+import { drainBackedOff } from "./drain_backoff.mjs";
+import { runDetached } from "./hook_detach.mjs";
+import { readUnseenNotices } from "./hook_local_notice.mjs";
 import { resolveRuntime } from "./hook_identity.mjs";
+import { DETACHED_IDENTITY, detachPromptBusy } from "./prompt_busy.mjs";
 import {
   quotedMessagingRecipe,
   unifiedPackageCopilotPluginHooksPath,
@@ -86,35 +90,88 @@ export function requiresExplicitCopilotRuntime({
 
 // The startup context ends with the validated session binding, so commands
 // the model starts itself carry it before any message arrives.
-async function runCopilotSessionStart(client, ctx, handlers) {
-  const result = await handlers["session-start"](client, ctx);
-  const recovered = result.output?.hookSpecificOutput?.additionalContext;
-  if (recovered === undefined) return result;
-  const prefix = copilotRecipePrefix(
-    ctx.identity.runtime,
-    ctx.copilotInput.sessionId,
-  );
-  const content = `${recovered}\n\n<tightbeam_session_binding>\nStart every tldr messaging command for this session with: ${prefix} <command>\n</tightbeam_session_binding>`;
+function withSessionBinding(result, { runtime, sessionId }, context) {
+  const binding = `<tightbeam_session_binding>\nStart every tldr messaging command for this session with: ${copilotRecipePrefix(runtime, sessionId)} <command>\n</tightbeam_session_binding>`;
   return {
     ...result,
     copilotOutput: encodeCopilotHookEffect({
       event: "sessionStart",
-      effect: { authority: "startup-context", content },
+      effect: {
+        authority: "startup-context",
+        content: context ? `${context}\n\n${binding}` : binding,
+      },
     }),
   };
 }
 
-export async function runCopilotHook({ client, verb, ctx, handlers, render }) {
-  if (verb === "session-start")
-    return runCopilotSessionStart(client, ctx, handlers);
-
-  if (verb === "user-prompt-submit") await handlers[verb](client, ctx);
-  await handlers["pre-tool-use"](client, ctx);
-  ctx.recipePrefix = copilotRecipePrefix(
-    ctx.identity.runtime,
-    ctx.copilotInput.sessionId,
+// Resumed sessions only (placeholder or launch token): today's synchronous handler.
+export async function runCopilotSessionStart(client, ctx, handlers) {
+  const result = await handlers["session-start"](client, ctx);
+  const recovered = result.output?.hookSpecificOutput?.additionalContext;
+  if (recovered === undefined) return result;
+  return withSessionBinding(
+    result,
+    { runtime: ctx.identity.runtime, sessionId: ctx.copilotInput.sessionId },
+    recovered,
   );
-  const rendered = await render(ctx);
+}
+
+/** A direct sessionStart: the cached catalog (or nothing) plus the binding; registration is already detached. */
+export const copilotDetachedSessionStart = (started, runtime, sessionId) =>
+  withSessionBinding(
+    started,
+    { runtime, sessionId },
+    started.output?.hookSpecificOutput?.additionalContext,
+  );
+
+// Busy (prompt only) and the drain run in detached workers; the drain only
+// when the daemon wrote something since the last one (or an ACK hint needs reconciling).
+function detachDaemonWork(
+  verb,
+  ctx,
+  { stateRoot, runtime, detach, drainNeeded, log },
+) {
+  const startedAt = Date.now();
+  const busy =
+    verb === "user-prompt-submit"
+      ? detachPromptBusy({
+          ctx,
+          stateRoot,
+          runtime,
+          payload: ctx.payload,
+          detach,
+          log,
+        })
+      : null;
+  // A backed-off drain spawns nothing; the notice was already staged from local files.
+  const drain =
+    drainNeeded(ctx.paths) && !drainBackedOff(ctx.paths)
+      ? runDetached(
+          "pre-tool-use",
+          {
+            session_id: ctx.identity.session_id,
+            // The child has no session env and must not capture its own process tree.
+            [DETACHED_IDENTITY]: { ...ctx.identity, owner_process: null },
+          },
+          {
+            stateRoot,
+            paths: ctx.paths,
+            args: ["--runtime", runtime],
+            ...detach,
+          },
+        )
+      : null;
+  log({
+    event: "copilot_callback_detached",
+    params: { verb, session_id: ctx.identity.session_id },
+    result: { busy: busy?.coalesced ?? null, drain: drain?.coalesced ?? null },
+    status: "ok",
+    latency_ms: Date.now() - startedAt,
+  });
+  return busy !== null || drain !== null;
+}
+
+function copilotEffect(verb, ctx, rendered) {
   const contribution =
     rendered.output?.hookSpecificOutput?.additionalContext ?? "";
   if (verb === "user-prompt-submit") {
@@ -140,4 +197,74 @@ export async function runCopilotHook({ client, verb, ctx, handlers, render }) {
         }),
       }
     : rendered;
+}
+
+// hnbc 1.12: an unseen owner-matching notice is staged here, from the local
+// notice file (zero IPC), so the render below shows it in this same callback.
+// The watermark is consumed once the notice is durably staged; the shown
+// ledger is written by the render's output commit, so no path repeats it.
+function stageUnseenNotices(ctx, { stage, log }) {
+  const read = readUnseenNotices(ctx.paths, {
+    sessionId: ctx.identity.session_id,
+    appId: stage.appId,
+    endpoint: stage.readCache(ctx.paths),
+    subagent: Boolean(ctx.payload?.agent_id),
+    log,
+  });
+  try {
+    for (const notice of read.notices) {
+      // Copilot is never shown a body (and never marks one read): its notices stay bodyless.
+      const entry = stage.stagedNotificationEntry(notice.attempt, notice);
+      delete entry.body;
+      stage.appendStagedEntry(ctx.paths, entry);
+    }
+    const { consumed } = read.commit({ shown: [], complete: true });
+    log({
+      event: "copilot_local_notice",
+      params: { session_id: ctx.identity.session_id },
+      result: {
+        staged: read.notices.length,
+        deferred: read.deferred,
+        left_for_main: read.leftForMain,
+        consumed,
+      },
+      status: "ok",
+    });
+  } catch (error) {
+    // Unstaged notices stay unseen for the detached drain; the render still runs.
+    log({
+      event: "copilot_local_notice",
+      params: { session_id: ctx.identity.session_id },
+      status: "error",
+      error: error.message,
+      stack: error.stack,
+    });
+  } finally {
+    read.release();
+  }
+}
+
+/**
+ * userPromptSubmitted / postToolUse, before any daemon connection: show any
+ * unseen local notice, hand the daemon work to detached workers, then render
+ * only what is staged locally through the unchanged Copilot output path.
+ */
+export async function runCopilotHook({ verb, ctx, render, handoff }) {
+  // Decided before the notice consumes the watermark: the drain still admits the presentation daemon-side (receive replay needs it).
+  const drainWanted = handoff.drainNeeded(ctx.paths);
+  // An unchanged watermark means nothing to stage: skip the tail and ledger reads (mirrors the shell cmp gate).
+  if (drainWanted) stageUnseenNotices(ctx, handoff);
+  const detached = detachDaemonWork(verb, ctx, {
+    ...handoff,
+    drainNeeded: () => drainWanted,
+  });
+  ctx.recipePrefix = copilotRecipePrefix(
+    ctx.identity.runtime,
+    ctx.copilotInput.sessionId,
+  );
+  const rendered = await render(ctx);
+  return {
+    ...copilotEffect(verb, ctx, rendered),
+    ...(detached ? { detached } : {}),
+  };
 }

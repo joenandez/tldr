@@ -6,6 +6,8 @@ import { withTransaction } from '../db.mjs';
 import { openOldestUnreadAdmission } from './delivery_admission.mjs';
 import { notificationContext } from './notification_context.mjs';
 import { pendingReplyGuard } from '../agent_wait_context.mjs';
+import { reclaimLiveTakeover } from './takeover_reclaim.mjs';
+import { CALLER_LAUNCH_FIELD, readCallerLaunch, refuseUnlessOwnerLaunch } from '../launch_owner_fence.mjs';
 
 function validateRequestIdentity(payload) {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
@@ -30,6 +32,7 @@ function validateRequestOptions(payload) {
         'provider_session_id',
         'include_pending_reply_guard',
         'wait_action_id',
+        CALLER_LAUNCH_FIELD,
       ].includes(field)
     ) {
       throw new TightbeamError('malformed_request', `message.notification.next declares "${field}", which is not part of its request contract`, { field });
@@ -60,6 +63,7 @@ function validateRequestOptions(payload) {
 function request(payload) {
   validateRequestIdentity(payload);
   validateRequestOptions(payload);
+  readCallerLaunch(payload);
   return payload;
 }
 
@@ -70,6 +74,8 @@ export const messageNotificationNextOp = {
   handler(context, payload, connection) {
     const input = request(payload);
     const notification = withTransaction(context.db, () => {
+      reclaimLiveTakeover(context.db, input, { appId: connection.appId, via: 'message.notification.next', logger: context.logger });
+      refuseUnlessOwnerLaunch(context, { endpointId: input.endpoint_id, callerLaunch: readCallerLaunch(input), op: 'message.notification.next' });
       const endpoint = context.db
         .prepare(
           `SELECT id, principal_id, process_generation, provider_session_id, owner_epoch, owner_launch_token

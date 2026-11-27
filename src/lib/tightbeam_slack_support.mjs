@@ -4,6 +4,7 @@ import {
   productionRun,
   tightbeamInvocation,
 } from "./tightbeam_channel_runtime.mjs";
+import { requestAsApp } from "./tightbeam_inprocess_request.mjs";
 import { slackIdentityStore } from "./tightbeam_slack_identity.mjs";
 import { helmHome } from "./store.mjs";
 
@@ -53,34 +54,50 @@ export function tightbeamCodeOf(result) {
   return TIGHTBEAM_CODE.test(reported ?? "") ? reported : null;
 }
 
-async function registerOwner(asApp, identity) {
-  const principal = await asApp(identity, [
-    "principal",
-    "register",
-    "--authority",
-    SLACK_AUTHORITY,
-    "--external-ref",
-    SLACK_PRINCIPAL_REF,
-    "--display-name",
-    "Owner",
-  ]);
+// The options of a call that must end by `deadlineAt` (an absolute ms time; null: no limit). The
+// call runs as its own process group and the timeout kills the group: a hung CLI and the processes
+// it started (a launcher's child) die together at the deadline (ac-jfv.81 r5).
+export const leftOf = (deadlineAt) =>
+  deadlineAt
+    ? { timeoutMs: Math.max(1, deadlineAt - Date.now()), killGroup: true }
+    : undefined;
+
+async function registerOwner(asApp, identity, deadlineAt) {
+  const principal = await asApp(
+    identity,
+    [
+      "principal",
+      "register",
+      "--authority",
+      SLACK_AUTHORITY,
+      "--external-ref",
+      SLACK_PRINCIPAL_REF,
+      "--display-name",
+      "Owner",
+    ],
+    leftOf(deadlineAt),
+  );
   if (commandFailure(principal) || !nonEmpty(principal.result?.principal_id)) {
     return null;
   }
-  const endpoint = await asApp(identity, [
-    "endpoint",
-    "register",
-    "--authority",
-    SLACK_AUTHORITY,
-    "--principal",
-    principal.result.principal_id,
-    "--runtime",
-    "reference",
-    "--session",
-    SLACK_ENDPOINT_SESSION,
-    "--reference",
-    SLACK_AUTHORITY,
-  ]);
+  const endpoint = await asApp(
+    identity,
+    [
+      "endpoint",
+      "register",
+      "--authority",
+      SLACK_AUTHORITY,
+      "--principal",
+      principal.result.principal_id,
+      "--runtime",
+      "reference",
+      "--session",
+      SLACK_ENDPOINT_SESSION,
+      "--reference",
+      SLACK_AUTHORITY,
+    ],
+    leftOf(deadlineAt),
+  );
   if (commandFailure(endpoint) || !nonEmpty(endpoint.result?.endpoint_id)) {
     return null;
   }
@@ -122,10 +139,15 @@ async function provisionOpener(runners, identity) {
   return commandFailure(grants) ? null : registerOpener(runners, identity);
 }
 
+// One op as the Slack app over the daemon socket, in process (ac-wzn7q); tests inject a fake.
+const inProcessRequest = (identity, op, payload) =>
+  requestAsApp({ identity, op, payload });
+
 // Shared plumbing for the Slack channel modules: tightbeam invocation,
 // identity access, owner principal/endpoint registration and structured logs.
 export function createSlackContext({
   run = productionRun,
+  request = inProcessRequest,
   command,
   commandPrefix,
   home = resolve(helmHome()),
@@ -138,7 +160,8 @@ export function createSlackContext({
   const persistIdentity = saveIdentity ?? ((identity) => store.save(identity));
   const invocation = tightbeamInvocation({ command, commandPrefix });
   const execute = (options) => run({ ...invocation, ...options });
-  const admin = (args) => execute({ admin: true, credentials: null, args });
+  const admin = (args, options) =>
+    execute({ admin: true, credentials: null, args, ...options });
   const asApp = (credentials, args, options) =>
     execute({ admin: false, credentials, args, ...options });
 
@@ -160,11 +183,13 @@ export function createSlackContext({
   return Object.freeze({
     admin,
     asApp,
+    request,
     begin,
     readIdentity,
     persistIdentity,
     safeIdentity,
-    registerOwner: (identity) => registerOwner(asApp, identity),
+    registerOwner: (identity, deadlineAt) =>
+      registerOwner(asApp, identity, deadlineAt),
     registerOpener: (identity) => registerOpener({ admin, asApp }, identity),
     async ensureOpener(identity) {
       opener ??= await provisionOpener({ admin, asApp }, identity);

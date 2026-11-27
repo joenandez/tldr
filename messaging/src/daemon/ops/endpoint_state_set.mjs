@@ -36,13 +36,54 @@ import { withTransaction } from '../db.mjs';
 import { authorityIsAllowed } from './authority_scope.mjs';
 import { releaseListenersForBusySession } from './listener_operations.mjs';
 import { reconcileCustodyLoss } from '../custody_reconciler.mjs';
-
+import { requestHostWakeForIdleEndpoint } from '../session_host.mjs';
+import { readStopAtMs, recordEndpointBusy, staleIdleResult } from '../endpoint_idle_fence.mjs';
+import { briefReceiptFor, readLaunchToken } from './brief_receipt.mjs';
+import { readCallerLaunch, refuseUnlessOwnerLaunch } from '../launch_owner_fence.mjs';
 // busy = alive and mid-turn, idle = alive and between turns, dead = the
 // process is gone. `closed` is deliberately absent: it is the terminal
 // "this session will never return" fact and stays reachable only through
 // endpoint.close, which also records closed_at.
 const KNOWN_STATES = new Set(['busy', 'idle', 'dead', 'takeover_pending']);
 const WRITABLE_STATES = new Set(['busy', 'idle', 'dead']);
+
+// Contract C4 (late busy guard): the last idle per endpoint, in memory, per
+// database. endpoints.updated_at cannot order a busy against an idle: it
+// moves while the session is idle (endpoint.register, launch token claims).
+// shortcut: a daemon restart forgets it, so a late busy then applies as before; persist it if that race shows up across restarts.
+const lastIdleByDb = new WeakMap();
+
+function recordEndpointIdle(db, { endpointId, processGeneration, atMs }) {
+  if (!lastIdleByDb.has(db)) lastIdleByDb.set(db, new Map());
+  lastIdleByDb.get(db).set(endpointId, { processGeneration, atMs });
+}
+
+// session.stop's idle mark. A takeover_pending row changes owner only by
+// adoption or exhausted release.
+export function markEndpointIdle(db, { endpointId, processGeneration, now }) {
+  const marked = db
+    .prepare("UPDATE endpoints SET state = 'idle', updated_at = ? WHERE id = ? AND process_generation IS ? AND state NOT IN ('retiring', 'takeover_pending')")
+    .run(now, endpointId, processGeneration).changes === 1;
+  if (marked) recordEndpointIdle(db, { endpointId, processGeneration, atMs: Date.parse(now) });
+  return marked;
+}
+
+function busyPredatesIdle(db, { endpointId, processGeneration, promptAtMs }) {
+  const idle = lastIdleByDb.get(db)?.get(endpointId);
+  return idle?.processGeneration === processGeneration && promptAtMs < idle.atMs ? idle : null;
+}
+
+function staleBusyResult(context, { endpointId, processGeneration, promptAtMs }) {
+  const staleIdle = promptAtMs === undefined ? null : busyPredatesIdle(context.db, { endpointId, processGeneration, promptAtMs });
+  if (!staleIdle) return null;
+  context.logger?.info({
+    event: 'endpoint_busy_ignored_stale',
+    params: { endpoint_id: endpointId, process_generation: processGeneration, prompt_at_ms: promptAtMs, last_idle_at_ms: staleIdle.atMs },
+    result: 'ignored',
+    status: 'ok',
+  });
+  return { stale_busy_ignored: true };
+}
 
 export const endpointStateSetOp = {
   name: 'endpoint.state.set',
@@ -76,8 +117,18 @@ export const endpointStateSetOp = {
       }
       observedProcessGeneration = payload.observed_process_generation;
     }
+    // A busy may name when its prompt was submitted; absent (older clients)
+    // the busy applies unconditionally, as it always did.
+    const promptAtMs = payload.prompt_at_ms;
+    if (promptAtMs !== undefined && (state !== 'busy' || !Number.isInteger(promptAtMs) || promptAtMs < 0)) {
+      throw new TightbeamError('malformed_request', 'prompt_at_ms is only valid with state "busy" and must be a non-negative integer', { field: 'prompt_at_ms' });
+    }
+    const stopAtMs = readStopAtMs(payload, state);
+    const callerLaunch = readCallerLaunch(payload);
+    // ac-kf9rt: the launch a prompt-busy names (its UPS pass only), so that launch's brief bodies are receipted after the busy commit.
+    const briefReceipt = briefReceiptFor(context, connection, { endpointId, launchToken: readLaunchToken(payload, state) });
 
-    const endpoint = context.db.prepare('SELECT id, authority_name, state, created_by_app_id, process_generation FROM endpoints WHERE id = ?').get(endpointId);
+    const endpoint = context.db.prepare('SELECT id, authority_name, state, created_by_app_id, process_generation, updated_at FROM endpoints WHERE id = ?').get(endpointId);
     if (!endpoint) {
       throw new TightbeamError('endpoint_unknown', `no endpoint registered with id "${endpointId}"`);
     }
@@ -96,8 +147,11 @@ export const endpointStateSetOp = {
     }
 
     if (endpoint.state === 'closed' || endpoint.state === 'retiring' || endpoint.state === 'takeover_pending') {
-      throw new TightbeamError('identity_conflict', `endpoint is ${endpoint.state}; state cannot be reasserted`, { field: 'endpoint_id' });
+      // ac-x09n0: a typed reason, so a hook can tell a takeover fence from a terminal endpoint.
+      throw new TightbeamError('identity_conflict', `endpoint is ${endpoint.state}; state cannot be reasserted`, { field: 'endpoint_id', reason: `endpoint_${endpoint.state}` });
     }
+    // ac-os0zc: a launch that learned the generation from the shared cache is not the owner.
+    refuseUnlessOwnerLaunch(context, { endpointId, callerLaunch, op: 'endpoint.state.set' });
 
     if (observedProcessGeneration !== undefined) {
       // The reconciler owns the single decision transaction: endpoint
@@ -134,11 +188,28 @@ export const endpointStateSetOp = {
       };
     }
 
+    // A late busy (C4) or a late Stop idle changes nothing.
+    const stale = staleBusyResult(context, { endpointId, processGeneration, promptAtMs }) ?? staleIdleResult(context, { endpointId, processGeneration, stopAtMs });
+    if (stale) {
+      // A late busy still proves its prompt was submitted.
+      briefReceipt();
+      return { result: { endpoint_id: endpointId, state: endpoint.state, updated_at: endpoint.updated_at, ...stale } };
+    }
+
     const updatedAt = new Date().toISOString();
     withTransaction(context.db, () => {
       context.db.prepare('UPDATE endpoints SET state = ?, updated_at = ? WHERE id = ?').run(state, updatedAt, endpointId);
       if (state === 'busy') releaseListenersForBusySession(context, { endpointId, processGeneration, now: updatedAt });
     });
+    if (state === 'busy') {
+      recordEndpointBusy(context.db, { endpointId, processGeneration, promptAtMs });
+      briefReceipt();
+    }
+    if (state === 'idle') {
+      // A fenced idle dates from when its Stop ran, so the next prompt's busy (prompt_at_ms > stop_at_ms) still applies.
+      recordEndpointIdle(context.db, { endpointId, processGeneration, atMs: stopAtMs ?? Date.parse(updatedAt) });
+      requestHostWakeForIdleEndpoint(context, endpointId);
+    }
     if (state === 'dead') {
       context.logger?.info({
         event: 'TEMP DEATH endpoint_state_set_without_evidence',
